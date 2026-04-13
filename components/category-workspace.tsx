@@ -2,6 +2,7 @@
 
 import {
   type ChangeEvent,
+  type FormEvent,
   type FocusEvent,
   useCallback,
   useEffect,
@@ -185,12 +186,70 @@ type SearchResult = {
   preview: string;
 };
 
+type ChecklistBlock = {
+  id: string;
+  title: string;
+  tags: string[];
+  checkedCategoryIds: string[];
+};
+
+type ContinuousContentModel = {
+  text: string;
+  checklists: ChecklistBlock[];
+};
+
+type MessageChecklistPayload = {
+  tags: string[];
+  checkedCategoryIds: string[];
+};
+
+type ChecklistEditorSource = "continuous" | "block-message";
+
+type ChecklistEditorState = {
+  source: ChecklistEditorSource;
+  sourceCategoryId: string;
+  sourceMessageId: string | null;
+  checklistId: string | null;
+  titleDraft: string;
+  tagSelection: string[];
+};
+
+type ChecklistParticipationEntry = {
+  source: ChecklistEditorSource;
+  sourceCategoryId: string;
+  sourceCategoryTitle: string;
+  sourceMessageId: string | null;
+  checklistId: string;
+  checklistTitle: string;
+  tags: string[];
+  checked: boolean;
+};
+
+type ChecklistCategoryOption = {
+  categoryId: string;
+  label: string;
+};
+
 type CategoryFormState = {
   title: string;
   description: string;
   tag: string;
   format: CategoryFormat;
   categoryType: CategoryType;
+};
+
+type RichEditorScope =
+  | {
+      kind: "block";
+      messageId: string;
+    }
+  | {
+      kind: "continuous";
+    };
+
+type SavedRichSelection = {
+  scope: RichEditorScope;
+  range: Range;
 };
 
 type ConfirmDialogTone = "neutral" | "danger";
@@ -214,6 +273,18 @@ const DEFAULT_CATEGORY_FORM: CategoryFormState = {
   categoryType: "learning",
 };
 
+const DEFAULT_TEXT_COLOR = "#1a1a1a";
+
+const TEXT_COLOR_PRESETS = [
+  "#1a1a1a",
+  "#2f5fa3",
+  "#0c7b46",
+  "#8f6500",
+  "#9b1f2a",
+  "#6f2c8f",
+  "#ffffff",
+];
+
 export default function CategoryWorkspace() {
   const [categories, setCategories] = useState<CategoryRow[]>([]);
   const [projects, setProjects] = useState<ProjectRow[]>([]);
@@ -234,6 +305,9 @@ export default function CategoryWorkspace() {
   const [isSavingCategory, setIsSavingCategory] = useState(false);
   const [isSavingMessages, setIsSavingMessages] = useState(false);
   const [continuousDraft, setContinuousDraft] = useState("");
+  const [continuousChecklists, setContinuousChecklists] = useState<ChecklistBlock[]>(
+    []
+  );
   const [loadError, setLoadError] = useState<string | null>(null);
   const [showSearch, setShowSearch] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
@@ -242,6 +316,9 @@ export default function CategoryWorkspace() {
     useState(false);
   const [showCategoryTagLibrary, setShowCategoryTagLibrary] = useState(false);
   const [showProjectCreateModal, setShowProjectCreateModal] = useState(false);
+  const [checklistEditor, setChecklistEditor] =
+    useState<ChecklistEditorState | null>(null);
+  const [checklistTagSearchQuery, setChecklistTagSearchQuery] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [projectTagSearchQuery, setProjectTagSearchQuery] = useState("");
   const [projectTagSelection, setProjectTagSelection] = useState<string[]>([]);
@@ -249,6 +326,18 @@ export default function CategoryWorkspace() {
   const [projectTitleDraftsById, setProjectTitleDraftsById] = useState<
     Record<string, string>
   >({});
+  const [activeRichEditor, setActiveRichEditor] = useState<RichEditorScope | null>(
+    null
+  );
+  const [richToolbarState, setRichToolbarState] = useState({
+    bold: false,
+    italic: false,
+    color: DEFAULT_TEXT_COLOR,
+  });
+  const [customTextColor, setCustomTextColor] = useState(DEFAULT_TEXT_COLOR);
+  const [showTextColorPalette, setShowTextColorPalette] = useState(false);
+  const [showLinkPlaceholderModal, setShowLinkPlaceholderModal] = useState(false);
+  const [linkSelectionPreview, setLinkSelectionPreview] = useState("");
   const [projectSettingsTagDraft, setProjectSettingsTagDraft] = useState("");
   const [categoryMoveParentDraft, setCategoryMoveParentDraft] = useState("");
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -304,6 +393,11 @@ export default function CategoryWorkspace() {
 
   const importFileRef = useRef<HTMLInputElement | null>(null);
   const categoryTagInputRef = useRef<HTMLInputElement | null>(null);
+  const continuousEditorRef = useRef<HTMLDivElement | null>(null);
+  const blockEditorRefsRef = useRef<Record<string, HTMLDivElement | null>>({});
+  const savedRichSelectionRef = useRef<SavedRichSelection | null>(null);
+  const textColorButtonRef = useRef<HTMLButtonElement | null>(null);
+  const textColorPaletteRef = useRef<HTMLDivElement | null>(null);
   const csrfTokenRef = useRef<string | null>(null);
   const confirmResolverRef = useRef<((accepted: boolean) => void) | null>(null);
 
@@ -419,6 +513,24 @@ export default function CategoryWorkspace() {
   const selectedMessage = useMemo(
     () => currentMessages.find((message) => message.id === selectedMessageId) ?? null,
     [currentMessages, selectedMessageId]
+  );
+
+  const hasEditableBlockMessages = useMemo(
+    () =>
+      currentMessages.some(
+        (message) =>
+          typeof message.content === "string" &&
+          !parseMessageChecklistContent(message.content)
+      ),
+    [currentMessages]
+  );
+
+  const canUseRichToolbar = Boolean(
+    currentCategory &&
+      !isMutating &&
+      !isLoading &&
+      !loadError &&
+      (currentCategory.format === "continuous" || hasEditableBlockMessages)
   );
 
   const sidebarFillerCount = Math.max(0, 8 - childCategories.length);
@@ -538,6 +650,32 @@ export default function CategoryWorkspace() {
     [projectTagSelection]
   );
 
+  const checklistTagOptions = useMemo(() => {
+    if (!checklistEditor) {
+      return [];
+    }
+
+    const normalized = checklistTagSearchQuery.trim().toLocaleLowerCase();
+    return allExistingCategoryTags
+      .filter((entry) => {
+        if (!normalized) {
+          return true;
+        }
+
+        return entry.tag.toLocaleLowerCase().includes(normalized);
+      })
+      .slice(0, 80)
+      .map((entry) => entry.tag);
+  }, [allExistingCategoryTags, checklistEditor, checklistTagSearchQuery]);
+
+  const checklistTagSelectionKeySet = useMemo(
+    () =>
+      new Set(
+        (checklistEditor?.tagSelection ?? []).map((tag) => tag.toLocaleLowerCase())
+      ),
+    [checklistEditor]
+  );
+
   const moveParentOptions = useMemo(() => {
     if (!currentCategory) {
       return [] as Array<{
@@ -638,6 +776,173 @@ export default function CategoryWorkspace() {
     return null;
   }, [accountAvatarUrl, accountAvatarUrlDraft]);
 
+  const categoryPlainContentById = useMemo(() => {
+    const map = new Map<string, string>();
+
+    for (const category of categories) {
+      if (category.format === "continuous") {
+        map.set(
+          category.id,
+          richTextToPlainText(parseContinuousContent(category.content).text)
+        );
+        continue;
+      }
+
+      map.set(category.id, richTextToPlainText(category.content));
+    }
+
+    return map;
+  }, [categories]);
+
+  const continuousChecklistCards = useMemo(() => {
+    if (!currentCategory || currentCategory.format !== "continuous") {
+      return [] as Array<{
+        checklist: ChecklistBlock;
+        items: Array<ChecklistCategoryOption & { checked: boolean }>;
+      }>;
+    }
+
+    return continuousChecklists.map((checklist) => {
+      const checkedKeySet = new Set(
+        checklist.checkedCategoryIds.map((id) => id.toLocaleLowerCase())
+      );
+      const items = collectChecklistCategoryOptions(categories, checklist.tags).map(
+        (option) => ({
+          ...option,
+          checked: checkedKeySet.has(option.categoryId.toLocaleLowerCase()),
+        })
+      );
+
+      return {
+        checklist,
+        items,
+      };
+    });
+  }, [categories, continuousChecklists, currentCategory]);
+
+  const blockChecklistCardsByMessageId = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        payload: MessageChecklistPayload;
+        items: Array<ChecklistCategoryOption & { checked: boolean }>;
+      }
+    >();
+
+    if (!currentCategory || currentCategory.format !== "block") {
+      return map;
+    }
+
+    for (const message of currentMessages) {
+      const payload = parseMessageChecklistContent(message.content);
+      if (!payload) {
+        continue;
+      }
+
+      const checkedKeySet = new Set(
+        payload.checkedCategoryIds.map((id) => id.toLocaleLowerCase())
+      );
+      const items = collectChecklistCategoryOptions(categories, payload.tags).map(
+        (option) => ({
+          ...option,
+          checked: checkedKeySet.has(option.categoryId.toLocaleLowerCase()),
+        })
+      );
+
+      map.set(message.id, {
+        payload,
+        items,
+      });
+    }
+
+    return map;
+  }, [categories, currentCategory, currentMessages]);
+
+  const checklistParticipation = useMemo(() => {
+    if (!currentCategory) {
+      return [] as ChecklistParticipationEntry[];
+    }
+
+    const currentCategoryKey = currentCategory.id.toLocaleLowerCase();
+    const entries: ChecklistParticipationEntry[] = [];
+
+    for (const sourceCategory of categories) {
+      if (sourceCategory.format !== "continuous") {
+        continue;
+      }
+
+      const sourceDocument =
+        currentCategory.id === sourceCategory.id && currentCategory.format === "continuous"
+          ? {
+              text: continuousDraft,
+              checklists: continuousChecklists,
+            }
+          : parseContinuousContent(sourceCategory.content);
+
+      for (const checklist of sourceDocument.checklists) {
+        if (!categoryMatchesChecklistTags(currentCategory, checklist.tags)) {
+          continue;
+        }
+
+        entries.push({
+          source: "continuous",
+          sourceCategoryId: sourceCategory.id,
+          sourceCategoryTitle: sourceCategory.title,
+          sourceMessageId: null,
+          checklistId: checklist.id,
+          checklistTitle: checklist.title,
+          tags: checklist.tags,
+          checked: checklist.checkedCategoryIds.some(
+            (id) => id.toLocaleLowerCase() === currentCategoryKey
+          ),
+        });
+      }
+
+      const sourceMessages = messagesByCategory[sourceCategory.id] ?? [];
+      for (const message of sourceMessages) {
+        const checklistPayload = parseMessageChecklistContent(message.content);
+        if (!checklistPayload) {
+          continue;
+        }
+
+        if (!categoryMatchesChecklistTags(currentCategory, checklistPayload.tags)) {
+          continue;
+        }
+
+        entries.push({
+          source: "block-message",
+          sourceCategoryId: sourceCategory.id,
+          sourceCategoryTitle: sourceCategory.title,
+          sourceMessageId: message.id,
+          checklistId: message.id,
+          checklistTitle: message.title,
+          tags: checklistPayload.tags,
+          checked: checklistPayload.checkedCategoryIds.some(
+            (id) => id.toLocaleLowerCase() === currentCategoryKey
+          ),
+        });
+      }
+    }
+
+    return entries.sort((left, right) => {
+      if (left.checklistTitle !== right.checklistTitle) {
+        return left.checklistTitle.localeCompare(right.checklistTitle, "ru-RU");
+      }
+
+      if (left.sourceCategoryTitle !== right.sourceCategoryTitle) {
+        return left.sourceCategoryTitle.localeCompare(right.sourceCategoryTitle, "ru-RU");
+      }
+
+      return left.sourceCategoryId.localeCompare(right.sourceCategoryId);
+    });
+  }, [
+    categories,
+    continuousChecklists,
+    continuousDraft,
+    currentCategory,
+    messagesByCategory,
+  ]);
+
   const allLoadedMessages = useMemo(
     () => Object.values(messagesByCategory).flat(),
     [messagesByCategory]
@@ -651,7 +956,8 @@ export default function CategoryWorkspace() {
 
     const categoryHits: SearchResult[] = visibleCategories
       .filter((category) => {
-        const text = `${category.title} ${category.description} ${category.tag} ${category.content}`.toLowerCase();
+        const plainContent = categoryPlainContentById.get(category.id) ?? "";
+        const text = `${category.title} ${category.description} ${category.tag} ${plainContent}`.toLowerCase();
         return text.includes(normalized);
       })
       .map((category) => ({
@@ -663,14 +969,17 @@ export default function CategoryWorkspace() {
           .map((part) => part.title)
           .join(" / "),
         preview: makePreview(
-          `${category.description || category.content || category.tag}`,
+          `${category.description || (categoryPlainContentById.get(category.id) ?? "") || category.tag}`,
           normalized
         ),
       }));
 
     const messageHits: SearchResult[] = [];
     for (const message of allLoadedMessages) {
-      const messageText = `${message.title} ${message.content}`.toLowerCase();
+      const plainContent = parseMessageChecklistContent(message.content)
+        ? ""
+        : richTextToPlainText(message.content);
+      const messageText = `${message.title} ${plainContent}`.toLowerCase();
       if (!messageText.includes(normalized)) {
         continue;
       }
@@ -695,7 +1004,13 @@ export default function CategoryWorkspace() {
     }
 
     return [...categoryHits, ...messageHits].slice(0, 45);
-  }, [allLoadedMessages, searchQuery, visibleCategories, visibleCategoriesById]);
+  }, [
+    allLoadedMessages,
+    categoryPlainContentById,
+    searchQuery,
+    visibleCategories,
+    visibleCategoriesById,
+  ]);
 
   const statusText = useMemo(() => {
     if (notice?.text) {
@@ -791,6 +1106,8 @@ export default function CategoryWorkspace() {
     messageAckVersionRef.current = {};
     pendingMessageSelectionRef.current = null;
     syncedContinuousCategoryIdRef.current = null;
+    savedRichSelectionRef.current = null;
+    blockEditorRefsRef.current = {};
 
     if (confirmResolverRef.current) {
       confirmResolverRef.current(false);
@@ -819,6 +1136,19 @@ export default function CategoryWorkspace() {
     setConfirmDialog(null);
     setMessageTitleDraft("");
     setContinuousDraft("");
+    setContinuousChecklists([]);
+    setActiveRichEditor(null);
+    setRichToolbarState({
+      bold: false,
+      italic: false,
+      color: DEFAULT_TEXT_COLOR,
+    });
+    setCustomTextColor(DEFAULT_TEXT_COLOR);
+    setShowTextColorPalette(false);
+    setShowLinkPlaceholderModal(false);
+    setLinkSelectionPreview("");
+    setChecklistEditor(null);
+    setChecklistTagSearchQuery("");
     setSource("unknown");
     setLoadError(null);
     setIsLoading(false);
@@ -1310,6 +1640,7 @@ export default function CategoryWorkspace() {
     if (!currentCategory) {
       syncedContinuousCategoryIdRef.current = null;
       setContinuousDraft("");
+      setContinuousChecklists([]);
       return;
     }
 
@@ -1318,7 +1649,9 @@ export default function CategoryWorkspace() {
     }
 
     syncedContinuousCategoryIdRef.current = currentCategory.id;
-    setContinuousDraft(currentCategory.content);
+    const parsedContinuous = parseContinuousContent(currentCategory.content);
+    setContinuousDraft(parsedContinuous.text);
+    setContinuousChecklists(parsedContinuous.checklists);
   }, [currentCategory]);
 
   useEffect(() => {
@@ -1326,6 +1659,117 @@ export default function CategoryWorkspace() {
       setSelectedMessageId(null);
     }
   }, [currentCategory?.format, selectedMessageId]);
+
+  useEffect(() => {
+    if (!activeRichEditor) {
+      return;
+    }
+
+    if (activeRichEditor.kind === "continuous") {
+      if (currentCategory?.format === "continuous") {
+        return;
+      }
+
+      setActiveRichEditor(null);
+      savedRichSelectionRef.current = null;
+      return;
+    }
+
+    const stillExists = currentMessages.some(
+      (message) =>
+        message.id === activeRichEditor.messageId &&
+        !parseMessageChecklistContent(message.content)
+    );
+
+    if (!stillExists) {
+      setActiveRichEditor(null);
+      savedRichSelectionRef.current = null;
+    }
+  }, [activeRichEditor, currentCategory?.format, currentMessages]);
+
+  useEffect(() => {
+    if (!canUseRichToolbar) {
+      setShowTextColorPalette(false);
+      return;
+    }
+
+    if (showLinkPlaceholderModal && !activeRichEditor) {
+      setShowLinkPlaceholderModal(false);
+      setLinkSelectionPreview("");
+    }
+  }, [activeRichEditor, canUseRichToolbar, showLinkPlaceholderModal]);
+
+  useEffect(() => {
+    if (!showTextColorPalette) {
+      return;
+    }
+
+    function handleOutsideClick(event: MouseEvent) {
+      const target = event.target as Node | null;
+      if (!target) {
+        return;
+      }
+
+      const button = textColorButtonRef.current;
+      const panel = textColorPaletteRef.current;
+      if (button?.contains(target) || panel?.contains(target)) {
+        return;
+      }
+
+      setShowTextColorPalette(false);
+    }
+
+    window.addEventListener("mousedown", handleOutsideClick);
+    return () => {
+      window.removeEventListener("mousedown", handleOutsideClick);
+    };
+  }, [showTextColorPalette]);
+
+  useEffect(() => {
+    if (currentCategory?.format !== "continuous") {
+      return;
+    }
+
+    const editor = continuousEditorRef.current;
+    if (!editor) {
+      return;
+    }
+
+    if (editor === document.activeElement) {
+      return;
+    }
+
+    const nextValue = sanitizeRichTextHtml(continuousDraft);
+    if (sanitizeRichTextHtml(editor.innerHTML) === nextValue) {
+      return;
+    }
+
+    editor.innerHTML = nextValue;
+  }, [continuousDraft, currentCategory?.format, currentCategory?.id]);
+
+  useEffect(() => {
+    if (currentCategory?.format !== "block") {
+      return;
+    }
+
+    for (const message of currentMessages) {
+      if (parseMessageChecklistContent(message.content)) {
+        continue;
+      }
+
+      const editor = blockEditorRefsRef.current[message.id];
+      if (!editor || editor === document.activeElement) {
+        continue;
+      }
+
+      const nextValue = normalizePersistedMessageContent(message.content);
+      if (sanitizeRichTextHtml(editor.innerHTML) === nextValue) {
+        continue;
+      }
+
+      editor.innerHTML = nextValue;
+    }
+  }, [currentCategory?.format, currentMessages]);
 
   useEffect(() => {
     function handleEscape(event: KeyboardEvent) {
@@ -1340,6 +1784,11 @@ export default function CategoryWorkspace() {
         setShowMenu(false);
         setShowCategoryTagLibrary(false);
         setShowProjectCreateModal(false);
+        setShowTextColorPalette(false);
+        setShowLinkPlaceholderModal(false);
+        setLinkSelectionPreview("");
+        setChecklistEditor(null);
+        setChecklistTagSearchQuery("");
         setMenuPanel("root");
       }
     }
@@ -1371,9 +1820,422 @@ export default function CategoryWorkspace() {
     };
   }, []);
 
+  function isSameRichEditorScope(
+    left: RichEditorScope | null,
+    right: RichEditorScope | null
+  ): boolean {
+    if (!left || !right) {
+      return false;
+    }
+
+    if (left.kind !== right.kind) {
+      return false;
+    }
+
+    if (left.kind === "continuous" && right.kind === "continuous") {
+      return true;
+    }
+
+    if (left.kind === "block" && right.kind === "block") {
+      return left.messageId === right.messageId;
+    }
+
+    return false;
+  }
+
+  function getEditorElement(scope: RichEditorScope): HTMLDivElement | null {
+    if (scope.kind === "continuous") {
+      return continuousEditorRef.current;
+    }
+
+    return blockEditorRefsRef.current[scope.messageId] ?? null;
+  }
+
+  function setBlockEditorElement(messageId: string, element: HTMLDivElement | null) {
+    if (element) {
+      blockEditorRefsRef.current[messageId] = element;
+      return;
+    }
+
+    delete blockEditorRefsRef.current[messageId];
+  }
+
+  function resolveRichEditorScope(): RichEditorScope | null {
+    if (activeRichEditor) {
+      return activeRichEditor;
+    }
+
+    if (!currentCategory) {
+      return null;
+    }
+
+    if (currentCategory.format === "continuous") {
+      return {
+        kind: "continuous",
+      };
+    }
+
+    if (
+      selectedMessage &&
+      !parseMessageChecklistContent(selectedMessage.content)
+    ) {
+      return {
+        kind: "block",
+        messageId: selectedMessage.id,
+      };
+    }
+
+    const firstEditableMessage = currentMessages.find(
+      (message) => !parseMessageChecklistContent(message.content)
+    );
+
+    if (!firstEditableMessage) {
+      return null;
+    }
+
+    return {
+      kind: "block",
+      messageId: firstEditableMessage.id,
+    };
+  }
+
+  function placeCaretAtEditorEnd(editor: HTMLDivElement) {
+    const selection = window.getSelection();
+    if (!selection) {
+      return;
+    }
+
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  function rememberRichSelection(scope: RichEditorScope) {
+    const editor = getEditorElement(scope);
+    const selection = window.getSelection();
+
+    if (!editor || !selection || selection.rangeCount === 0) {
+      savedRichSelectionRef.current = null;
+      return;
+    }
+
+    const range = selection.getRangeAt(0);
+    if (
+      !editor.contains(range.startContainer) ||
+      !editor.contains(range.endContainer)
+    ) {
+      return;
+    }
+
+    savedRichSelectionRef.current = {
+      scope,
+      range: range.cloneRange(),
+    };
+  }
+
+  function restoreRichSelection(scope: RichEditorScope): boolean {
+    const editor = getEditorElement(scope);
+    const savedSelection = savedRichSelectionRef.current;
+    const selection = window.getSelection();
+
+    if (!editor || !savedSelection || !selection) {
+      return false;
+    }
+
+    if (!isSameRichEditorScope(savedSelection.scope, scope)) {
+      return false;
+    }
+
+    try {
+      selection.removeAllRanges();
+      selection.addRange(savedSelection.range);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function syncRichToolbarState(scope: RichEditorScope | null = activeRichEditor) {
+    if (!scope) {
+      setRichToolbarState((prev) => ({
+        ...prev,
+        bold: false,
+        italic: false,
+      }));
+      return;
+    }
+
+    const editor = getEditorElement(scope);
+    const selection = window.getSelection();
+    if (!editor || !selection || selection.rangeCount === 0) {
+      return;
+    }
+
+    const range = selection.getRangeAt(0);
+    if (
+      !editor.contains(range.startContainer) ||
+      !editor.contains(range.endContainer)
+    ) {
+      return;
+    }
+
+    const nextBold = document.queryCommandState("bold");
+    const nextItalic = document.queryCommandState("italic");
+    const nextColor = normalizeCssColorToHex(document.queryCommandValue("foreColor"));
+
+    setRichToolbarState((prev) => ({
+      bold: nextBold,
+      italic: nextItalic,
+      color: nextColor ?? prev.color,
+    }));
+
+    if (nextColor) {
+      setCustomTextColor(nextColor);
+    }
+  }
+
+  function focusRichEditorForToolbar(scope: RichEditorScope): HTMLDivElement | null {
+    const editor = getEditorElement(scope);
+    if (!editor) {
+      return null;
+    }
+
+    setActiveRichEditor(scope);
+    editor.focus();
+
+    const restored = restoreRichSelection(scope);
+    if (!restored) {
+      const selection = window.getSelection();
+      const anchorNode = selection?.anchorNode ?? null;
+      const hasSelectionInEditor =
+        Boolean(anchorNode) && editor.contains(anchorNode);
+      if (!hasSelectionInEditor) {
+        placeCaretAtEditorEnd(editor);
+      }
+    }
+
+    return editor;
+  }
+
+  function applyEditorDomValue(scope: RichEditorScope, editor: HTMLDivElement): void {
+    const normalizedHtml = sanitizeRichTextHtml(editor.innerHTML);
+
+    if (scope.kind === "continuous") {
+      if (continuousDraft === normalizedHtml) {
+        return;
+      }
+
+      handleContinuousContentChange(normalizedHtml);
+      return;
+    }
+
+    const currentValue =
+      currentMessages.find((message) => message.id === scope.messageId)?.content ?? "";
+    if (currentValue === normalizedHtml) {
+      return;
+    }
+
+    handleMessageContentChange(scope.messageId, normalizedHtml);
+  }
+
+  function normalizeEditorLinks(editor: HTMLDivElement) {
+    const anchors = Array.from(editor.querySelectorAll("a"));
+    for (const anchor of anchors) {
+      const safeHref = normalizeRichLinkUrl(anchor.getAttribute("href") ?? "");
+      if (!safeHref) {
+        const parent = anchor.parentNode;
+        if (!parent) {
+          continue;
+        }
+
+        while (anchor.firstChild) {
+          parent.insertBefore(anchor.firstChild, anchor);
+        }
+        parent.removeChild(anchor);
+        continue;
+      }
+
+      anchor.setAttribute("href", safeHref);
+      anchor.setAttribute("target", "_blank");
+      anchor.setAttribute("rel", "noopener noreferrer");
+    }
+  }
+
+  function runRichTextCommand(command: "bold" | "italic" | "foreColor", value?: string) {
+    const scope = resolveRichEditorScope();
+    if (!scope) {
+      pushNotice("Выбери текстовый редактор для форматирования.", "warn");
+      return;
+    }
+
+    const editor = focusRichEditorForToolbar(scope);
+    if (!editor) {
+      pushNotice("Не удалось открыть редактор текста.", "error");
+      return;
+    }
+
+    document.execCommand(command, false, value);
+    normalizeEditorLinks(editor);
+    applyEditorDomValue(scope, editor);
+    rememberRichSelection(scope);
+    syncRichToolbarState(scope);
+  }
+
+  function handleToolbarBold() {
+    setShowTextColorPalette(false);
+    runRichTextCommand("bold");
+  }
+
+  function handleToolbarItalic() {
+    setShowTextColorPalette(false);
+    runRichTextCommand("italic");
+  }
+
+  function handleToolbarColorChange(color: string) {
+    const normalizedColor = normalizeHexColor(color) ?? DEFAULT_TEXT_COLOR;
+    setCustomTextColor(normalizedColor);
+    runRichTextCommand("foreColor", normalizedColor);
+    setShowTextColorPalette(false);
+  }
+
+  function toggleToolbarColorPalette() {
+    if (!canUseRichToolbar) {
+      return;
+    }
+
+    const scope = resolveRichEditorScope();
+    if (scope) {
+      rememberRichSelection(scope);
+    }
+
+    setShowTextColorPalette((prev) => !prev);
+  }
+
+  function closeLinkPlaceholderModal() {
+    setShowLinkPlaceholderModal(false);
+    setLinkSelectionPreview("");
+  }
+
+  function getSelectionRangeInEditor(scope: RichEditorScope): {
+    editor: HTMLDivElement;
+    selection: Selection;
+    range: Range;
+  } | null {
+    const editor = getEditorElement(scope);
+    const selection = window.getSelection();
+
+    if (!editor || !selection || selection.rangeCount === 0) {
+      return null;
+    }
+
+    const range = selection.getRangeAt(0);
+    if (
+      !editor.contains(range.startContainer) ||
+      !editor.contains(range.endContainer)
+    ) {
+      return null;
+    }
+
+    return {
+      editor,
+      selection,
+      range,
+    };
+  }
+
+  function handleToolbarLink() {
+    const scope = resolveRichEditorScope();
+    if (!scope) {
+      pushNotice("Выбери текстовый редактор для добавления ссылки.", "warn");
+      return;
+    }
+
+    const editor = focusRichEditorForToolbar(scope);
+    if (!editor) {
+      return;
+    }
+
+    const selectionInfo = getSelectionRangeInEditor(scope);
+    if (!selectionInfo || selectionInfo.range.collapsed) {
+      pushNotice("Сначала выдели текст, затем нажми link.", "warn");
+      return;
+    }
+
+    setShowTextColorPalette(false);
+    setLinkSelectionPreview(selectionInfo.selection.toString().trim());
+    setShowLinkPlaceholderModal(true);
+  }
+
+  function handleToolbarControlMouseDown(event: React.MouseEvent<HTMLElement>) {
+    event.preventDefault();
+    const scope = resolveRichEditorScope();
+    if (!scope) {
+      return;
+    }
+
+    rememberRichSelection(scope);
+  }
+
+  function handleToolbarColorInputMouseDown() {
+    const scope = resolveRichEditorScope();
+    if (!scope) {
+      return;
+    }
+
+    rememberRichSelection(scope);
+  }
+
+  function handleRichEditorFocus(scope: RichEditorScope) {
+    setActiveRichEditor(scope);
+    rememberRichSelection(scope);
+    syncRichToolbarState(scope);
+  }
+
+  function handleRichEditorSelectionActivity(scope: RichEditorScope) {
+    setActiveRichEditor(scope);
+    rememberRichSelection(scope);
+    syncRichToolbarState(scope);
+  }
+
+  function handleBlockEditorInput(
+    messageId: string,
+    event: FormEvent<HTMLDivElement>
+  ) {
+    const scope: RichEditorScope = {
+      kind: "block",
+      messageId,
+    };
+
+    handleMessageContentChange(
+      messageId,
+      sanitizeRichTextHtml(event.currentTarget.innerHTML)
+    );
+    handleRichEditorSelectionActivity(scope);
+  }
+
+  function handleContinuousEditorInput(event: FormEvent<HTMLDivElement>) {
+    if (!currentCategory || currentCategory.format !== "continuous") {
+      return;
+    }
+
+    const scope: RichEditorScope = {
+      kind: "continuous",
+    };
+
+    handleContinuousContentChange(sanitizeRichTextHtml(event.currentTarget.innerHTML));
+    handleRichEditorSelectionActivity(scope);
+  }
+
   function openCategory(categoryId: string, messageId?: string) {
     setCurrentCategoryId(categoryId);
     setInsertionTargetId(categoryId);
+    setActiveRichEditor(null);
+    savedRichSelectionRef.current = null;
+    setShowTextColorPalette(false);
+    setShowLinkPlaceholderModal(false);
+    setLinkSelectionPreview("");
     if (messageId) {
       pendingMessageSelectionRef.current = messageId;
     } else {
@@ -1383,6 +2245,8 @@ export default function CategoryWorkspace() {
     setShowSearch(false);
     setShowCategoryTagLibrary(false);
     setShowProjectCreateModal(false);
+    setChecklistEditor(null);
+    setChecklistTagSearchQuery("");
   }
 
   function closeMenu() {
@@ -1424,11 +2288,20 @@ export default function CategoryWorkspace() {
     setCurrentCategoryId(null);
     setInsertionTargetId(null);
     setSelectedMessageId(null);
+    setActiveRichEditor(null);
+    savedRichSelectionRef.current = null;
+    setShowTextColorPalette(false);
+    setShowLinkPlaceholderModal(false);
+    setLinkSelectionPreview("");
     setShowCategoryTagSuggestions(false);
     setShowCategoryTagLibrary(false);
+    setChecklistEditor(null);
+    setChecklistTagSearchQuery("");
   }
 
   function openProjectCreateModal() {
+    setChecklistEditor(null);
+    setChecklistTagSearchQuery("");
     setProjectTagSearchQuery("");
     setProjectTagSelection([]);
     setProjectTitleDraft("");
@@ -2061,6 +2934,8 @@ export default function CategoryWorkspace() {
     content = "",
     messageType: MessageType = "info"
   ): Promise<MessageRow> {
+    const normalizedContent = normalizePersistedMessageContent(content);
+
     const response = await authorizedFetch("/api/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2068,7 +2943,7 @@ export default function CategoryWorkspace() {
         categoryId,
         title,
         messageType,
-        content,
+        content: normalizedContent,
       }),
     });
 
@@ -2144,6 +3019,17 @@ export default function CategoryWorkspace() {
       contentVersion?: number;
     }
   ) {
+    const normalizedPatch = {
+      ...patch,
+      ...(typeof patch.content === "string"
+        ? { content: normalizePersistedMessageContent(patch.content) }
+        : {}),
+    };
+    const normalizedSentContent =
+      typeof options?.sentContent === "string"
+        ? normalizePersistedMessageContent(options.sentContent)
+        : options?.sentContent;
+
     messageRequestCountRef.current += 1;
     syncMessageSavingState();
 
@@ -2151,7 +3037,7 @@ export default function CategoryWorkspace() {
       const response = await authorizedFetch(`/api/messages/${messageId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
+        body: JSON.stringify(normalizedPatch),
       });
 
       const payload = (await response.json()) as MessagePayload;
@@ -2160,20 +3046,20 @@ export default function CategoryWorkspace() {
       }
 
       const updated = normalizeMessageRow(payload.data);
-      const patchHasContent = typeof patch.content === "string";
+      const patchHasContent = typeof normalizedPatch.content === "string";
       const preserveContent = options?.preserveLocalContent || !patchHasContent;
 
       let shouldApplyUpdate = true;
       if (preserveContent) {
         if (options?.preserveLocalContent) {
-          const version = options.contentVersion ?? 0;
-          const ackVersion = messageAckVersionRef.current[updated.id] ?? 0;
-          if (version >= ackVersion) {
-            messageAckVersionRef.current[updated.id] = version;
-            if (typeof options.sentContent === "string") {
-              savedMessageContentRef.current[updated.id] = options.sentContent;
-            }
-          } else {
+            const version = options.contentVersion ?? 0;
+            const ackVersion = messageAckVersionRef.current[updated.id] ?? 0;
+            if (version >= ackVersion) {
+              messageAckVersionRef.current[updated.id] = version;
+              if (typeof normalizedSentContent === "string") {
+                savedMessageContentRef.current[updated.id] = normalizedSentContent;
+              }
+            } else {
             shouldApplyUpdate = false;
           }
         }
@@ -2308,6 +3194,8 @@ export default function CategoryWorkspace() {
       return;
     }
 
+    const normalizedValue = sanitizeRichTextHtml(nextValue);
+
     const nextVersion = (messageDraftVersionRef.current[messageId] ?? 0) + 1;
     messageDraftVersionRef.current[messageId] = nextVersion;
 
@@ -2317,14 +3205,14 @@ export default function CategoryWorkspace() {
         message.id === messageId
           ? {
               ...message,
-              content: nextValue,
+              content: normalizedValue,
               updated_at: new Date().toISOString(),
             }
           : message
       ),
     }));
 
-    scheduleMessageContentSave(currentCategoryId, messageId, nextValue, nextVersion);
+    scheduleMessageContentSave(currentCategoryId, messageId, normalizedValue, nextVersion);
   }
 
   function enqueueContinuousSave(categoryId: string, content: string, version: number) {
@@ -2389,28 +3277,580 @@ export default function CategoryWorkspace() {
     syncCategorySavingState();
   }
 
-  function handleContinuousContentChange(nextValue: string) {
-    if (!currentCategory) {
-      return;
+  function getContinuousDocumentForCategory(
+    categoryId: string
+  ): ContinuousContentModel | null {
+    const sourceCategory = categories.find((category) => category.id === categoryId);
+    if (!sourceCategory || sourceCategory.format !== "continuous") {
+      return null;
     }
 
-    const nextVersion = (categoryDraftVersionRef.current[currentCategory.id] ?? 0) + 1;
-    categoryDraftVersionRef.current[currentCategory.id] = nextVersion;
+    if (currentCategory?.id === categoryId && currentCategory.format === "continuous") {
+      return {
+        text: continuousDraft,
+        checklists: normalizeChecklistBlocks(continuousChecklists),
+      };
+    }
 
-    setContinuousDraft(nextValue);
+    return parseContinuousContent(sourceCategory.content);
+  }
+
+  function commitContinuousDocumentForCategory(
+    categoryId: string,
+    document: ContinuousContentModel
+  ): boolean {
+    const sourceCategory = categories.find((category) => category.id === categoryId);
+    if (!sourceCategory || sourceCategory.format !== "continuous") {
+      return false;
+    }
+
+    const nextDocument: ContinuousContentModel = {
+      text: document.text,
+      checklists: normalizeChecklistBlocks(document.checklists),
+    };
+    const serialized = serializeContinuousContent(nextDocument);
+
+    if (sourceCategory.content === serialized) {
+      if (currentCategory?.id === categoryId && currentCategory.format === "continuous") {
+        setContinuousDraft(nextDocument.text);
+        setContinuousChecklists(nextDocument.checklists);
+      }
+      return false;
+    }
+
+    const nextVersion = (categoryDraftVersionRef.current[categoryId] ?? 0) + 1;
+    categoryDraftVersionRef.current[categoryId] = nextVersion;
+
+    if (currentCategory?.id === categoryId && currentCategory.format === "continuous") {
+      setContinuousDraft(nextDocument.text);
+      setContinuousChecklists(nextDocument.checklists);
+    }
+
     setCategories((prev) =>
       prev.map((category) =>
-        category.id === currentCategory.id
+        category.id === categoryId
           ? {
               ...category,
-              content: nextValue,
+              content: serialized,
               updated_at: new Date().toISOString(),
             }
           : category
       )
     );
 
-    scheduleContinuousSave(currentCategory.id, nextValue, nextVersion);
+    scheduleContinuousSave(categoryId, serialized, nextVersion);
+    return true;
+  }
+
+  function handleContinuousContentChange(nextValue: string) {
+    if (!currentCategory || currentCategory.format !== "continuous") {
+      return;
+    }
+
+    const normalizedValue = sanitizeRichTextHtml(nextValue);
+
+    const document = getContinuousDocumentForCategory(currentCategory.id);
+    if (!document) {
+      return;
+    }
+
+    commitContinuousDocumentForCategory(currentCategory.id, {
+      text: normalizedValue,
+      checklists: document.checklists,
+    });
+  }
+
+  function openChecklistEditorForCreate() {
+    if (!currentCategory) {
+      return;
+    }
+
+    setChecklistTagSearchQuery("");
+    setChecklistEditor({
+      source: currentCategory.format === "block" ? "block-message" : "continuous",
+      sourceCategoryId: currentCategory.id,
+      sourceMessageId: null,
+      checklistId: null,
+      titleDraft: "#Checklist",
+      tagSelection: [],
+    });
+  }
+
+  function openChecklistEditorForChecklist(checklistId: string) {
+    if (!currentCategory || currentCategory.format !== "continuous") {
+      return;
+    }
+
+    const existingChecklist = continuousChecklists.find(
+      (checklist) => checklist.id === checklistId
+    );
+    if (!existingChecklist) {
+      return;
+    }
+
+    setChecklistTagSearchQuery("");
+    setChecklistEditor({
+      source: "continuous",
+      sourceCategoryId: currentCategory.id,
+      sourceMessageId: null,
+      checklistId,
+      titleDraft: existingChecklist.title,
+      tagSelection: existingChecklist.tags,
+    });
+  }
+
+  function openChecklistEditorForBlockMessage(
+    message: MessageRow,
+    checklistPayload: MessageChecklistPayload
+  ) {
+    if (!currentCategory || currentCategory.format !== "block") {
+      return;
+    }
+
+    setChecklistTagSearchQuery("");
+    setChecklistEditor({
+      source: "block-message",
+      sourceCategoryId: currentCategory.id,
+      sourceMessageId: message.id,
+      checklistId: null,
+      titleDraft: message.title,
+      tagSelection: checklistPayload.tags,
+    });
+  }
+
+  function closeChecklistEditor() {
+    setChecklistEditor(null);
+    setChecklistTagSearchQuery("");
+  }
+
+  function updateChecklistEditorTitle(value: string) {
+    setChecklistEditor((prev) => {
+      if (!prev) {
+        return prev;
+      }
+
+      return {
+        ...prev,
+        titleDraft: value,
+      };
+    });
+  }
+
+  function toggleChecklistEditorTag(tag: string) {
+    const normalized = normalizeCategoryTagInput(tag);
+    if (!normalized) {
+      return;
+    }
+
+    const key = normalized.toLocaleLowerCase();
+    setChecklistEditor((prev) => {
+      if (!prev) {
+        return prev;
+      }
+
+      const exists = prev.tagSelection.some(
+        (item) => item.toLocaleLowerCase() === key
+      );
+
+      return {
+        ...prev,
+        tagSelection: exists
+          ? prev.tagSelection.filter((item) => item.toLocaleLowerCase() !== key)
+          : [...prev.tagSelection, normalized],
+      };
+    });
+  }
+
+  async function handleSaveChecklistEditor() {
+    if (!checklistEditor) {
+      return;
+    }
+
+    const nextTags = dedupeCategoryTags(checklistEditor.tagSelection);
+    if (nextTags.length === 0) {
+      pushNotice("Выбери хотя бы один хэштег для #Checklist.", "warn");
+      return;
+    }
+
+    const nextTitle = normalizeChecklistTitle(checklistEditor.titleDraft);
+
+    if (checklistEditor.source === "block-message") {
+      const sourceCategoryId = checklistEditor.sourceCategoryId;
+
+      if (checklistEditor.sourceMessageId) {
+        const targetMessage = (messagesByCategory[sourceCategoryId] ?? []).find(
+          (message) => message.id === checklistEditor.sourceMessageId
+        );
+        if (!targetMessage) {
+          pushNotice("Чеклист-блок не найден.", "warn");
+          closeChecklistEditor();
+          return;
+        }
+
+        const currentPayload = parseMessageChecklistContent(targetMessage.content);
+        if (!currentPayload) {
+          pushNotice("Содержимое блока больше не является #Checklist.", "warn");
+          closeChecklistEditor();
+          return;
+        }
+
+        const eligibleCategoryIdKeySet = new Set(
+          collectChecklistCategoryOptions(categories, nextTags).map((item) =>
+            item.categoryId.toLocaleLowerCase()
+          )
+        );
+
+        const nextPayload: MessageChecklistPayload = {
+          tags: nextTags,
+          checkedCategoryIds: currentPayload.checkedCategoryIds.filter((id) =>
+            eligibleCategoryIdKeySet.has(id.toLocaleLowerCase())
+          ),
+        };
+        const serializedContent = serializeMessageChecklistContent(nextPayload);
+
+        const previousTitle = targetMessage.title;
+        const previousContent = targetMessage.content;
+
+        setMessagesByCategory((prev) => ({
+          ...prev,
+          [sourceCategoryId]: (prev[sourceCategoryId] ?? []).map((message) =>
+            message.id === targetMessage.id
+              ? {
+                  ...message,
+                  title: nextTitle,
+                  content: serializedContent,
+                  updated_at: new Date().toISOString(),
+                }
+              : message
+          ),
+        }));
+
+        try {
+          await patchMessage(targetMessage.id, sourceCategoryId, {
+            title: nextTitle,
+            content: serializedContent,
+          });
+          pushNotice("#Checklist обновлен.");
+        } catch (error) {
+          setMessagesByCategory((prev) => ({
+            ...prev,
+            [sourceCategoryId]: (prev[sourceCategoryId] ?? []).map((message) =>
+              message.id === targetMessage.id
+                ? {
+                    ...message,
+                    title: previousTitle,
+                    content: previousContent,
+                  }
+                : message
+            ),
+          }));
+          pushNotice(toErrorMessage(error, "Не удалось обновить #Checklist."), "error");
+        } finally {
+          closeChecklistEditor();
+        }
+
+        return;
+      }
+
+      setIsMutating(true);
+      try {
+        const created = await createMessageRequest(
+          sourceCategoryId,
+          nextTitle,
+          serializeMessageChecklistContent({
+            tags: nextTags,
+            checkedCategoryIds: [],
+          }),
+          "info"
+        );
+
+        savedMessageContentRef.current[created.id] = created.content;
+        messageDraftVersionRef.current[created.id] = 0;
+        messageAckVersionRef.current[created.id] = 0;
+        clearMessageSaveState(created.id);
+
+        setMessagesByCategory((prev) => ({
+          ...prev,
+          [sourceCategoryId]: [...(prev[sourceCategoryId] ?? []), created].sort(
+            sortMessages
+          ),
+        }));
+        setSelectedMessageId(created.id);
+        pushNotice("#Checklist добавлен.");
+      } catch (error) {
+        pushNotice(toErrorMessage(error, "Не удалось добавить #Checklist."), "error");
+      } finally {
+        setIsMutating(false);
+        closeChecklistEditor();
+      }
+
+      return;
+    }
+
+    const sourceDocument = getContinuousDocumentForCategory(
+      checklistEditor.sourceCategoryId
+    );
+    if (!sourceDocument) {
+      pushNotice("Не удалось открыть источник чеклиста.", "error");
+      return;
+    }
+
+    if (checklistEditor.checklistId) {
+      const eligibleCategoryIdKeySet = new Set(
+        collectChecklistCategoryOptions(categories, nextTags).map((item) =>
+          item.categoryId.toLocaleLowerCase()
+        )
+      );
+
+      let foundChecklist = false;
+      const nextChecklists = sourceDocument.checklists.map((checklist) => {
+        if (checklist.id !== checklistEditor.checklistId) {
+          return checklist;
+        }
+
+        foundChecklist = true;
+        return {
+          ...checklist,
+          title: nextTitle,
+          tags: nextTags,
+          checkedCategoryIds: checklist.checkedCategoryIds.filter((id) =>
+            eligibleCategoryIdKeySet.has(id.toLocaleLowerCase())
+          ),
+        };
+      });
+
+      if (!foundChecklist) {
+        pushNotice("Чеклист не найден.", "warn");
+        closeChecklistEditor();
+        return;
+      }
+
+      commitContinuousDocumentForCategory(checklistEditor.sourceCategoryId, {
+        text: sourceDocument.text,
+        checklists: nextChecklists,
+      });
+      pushNotice("#Checklist обновлен.");
+      closeChecklistEditor();
+      return;
+    }
+
+    const createdChecklist: ChecklistBlock = {
+      id: crypto.randomUUID(),
+      title: nextTitle,
+      tags: nextTags,
+      checkedCategoryIds: [],
+    };
+
+    commitContinuousDocumentForCategory(checklistEditor.sourceCategoryId, {
+      text: sourceDocument.text,
+      checklists: [...sourceDocument.checklists, createdChecklist],
+    });
+    pushNotice("#Checklist добавлен.");
+    closeChecklistEditor();
+  }
+
+  async function handleDeleteChecklistFromEditor() {
+    if (!checklistEditor) {
+      return;
+    }
+
+    if (checklistEditor.source === "block-message") {
+      if (!checklistEditor.sourceMessageId) {
+        closeChecklistEditor();
+        return;
+      }
+
+      const sourceCategoryId = checklistEditor.sourceCategoryId;
+      const messageId = checklistEditor.sourceMessageId;
+
+      setIsMutating(true);
+      try {
+        await deleteMessageRequest(messageId);
+
+        clearMessageSaveState(messageId);
+        delete savedMessageContentRef.current[messageId];
+        delete messageDraftVersionRef.current[messageId];
+        delete messageAckVersionRef.current[messageId];
+        syncMessageSavingState();
+
+        setMessagesByCategory((prev) => ({
+          ...prev,
+          [sourceCategoryId]: (prev[sourceCategoryId] ?? []).filter(
+            (message) => message.id !== messageId
+          ),
+        }));
+
+        if (selectedMessageId === messageId) {
+          setSelectedMessageId(null);
+        }
+
+        pushNotice("#Checklist удален.");
+      } catch (error) {
+        pushNotice(toErrorMessage(error, "Не удалось удалить #Checklist."), "error");
+      } finally {
+        setIsMutating(false);
+        closeChecklistEditor();
+      }
+
+      return;
+    }
+
+    if (!checklistEditor.checklistId) {
+      return;
+    }
+
+    const sourceDocument = getContinuousDocumentForCategory(
+      checklistEditor.sourceCategoryId
+    );
+    if (!sourceDocument) {
+      pushNotice("Не удалось удалить чеклист.", "error");
+      return;
+    }
+
+    const nextChecklists = sourceDocument.checklists.filter(
+      (checklist) => checklist.id !== checklistEditor.checklistId
+    );
+
+    if (nextChecklists.length === sourceDocument.checklists.length) {
+      closeChecklistEditor();
+      return;
+    }
+
+    commitContinuousDocumentForCategory(checklistEditor.sourceCategoryId, {
+      text: sourceDocument.text,
+      checklists: nextChecklists,
+    });
+    pushNotice("#Checklist удален.");
+    closeChecklistEditor();
+  }
+
+  function toggleChecklistMessageCategoryCheckState(
+    sourceCategoryId: string,
+    sourceMessageId: string,
+    targetCategoryId: string,
+    checked: boolean
+  ) {
+    const sourceMessage = (messagesByCategory[sourceCategoryId] ?? []).find(
+      (message) => message.id === sourceMessageId
+    );
+    if (!sourceMessage) {
+      return;
+    }
+
+    const sourcePayload = parseMessageChecklistContent(sourceMessage.content);
+    if (!sourcePayload) {
+      return;
+    }
+
+    const nextPayload: MessageChecklistPayload = {
+      tags: sourcePayload.tags,
+      checkedCategoryIds: togglePlainIdSelection(
+        sourcePayload.checkedCategoryIds,
+        targetCategoryId,
+        checked
+      ),
+    };
+
+    const serializedContent = serializeMessageChecklistContent(nextPayload);
+    if (serializedContent === sourceMessage.content) {
+      return;
+    }
+
+    const nextVersion = (messageDraftVersionRef.current[sourceMessageId] ?? 0) + 1;
+    messageDraftVersionRef.current[sourceMessageId] = nextVersion;
+
+    setMessagesByCategory((prev) => ({
+      ...prev,
+      [sourceCategoryId]: (prev[sourceCategoryId] ?? []).map((message) =>
+        message.id === sourceMessageId
+          ? {
+              ...message,
+              content: serializedContent,
+              updated_at: new Date().toISOString(),
+            }
+          : message
+      ),
+    }));
+
+    scheduleMessageContentSave(
+      sourceCategoryId,
+      sourceMessageId,
+      serializedContent,
+      nextVersion
+    );
+  }
+
+  function toggleChecklistParticipationCheckState(
+    entry: ChecklistParticipationEntry,
+    targetCategoryId: string,
+    checked: boolean
+  ) {
+    if (entry.source === "continuous") {
+      toggleChecklistCategoryCheckState(
+        entry.sourceCategoryId,
+        entry.checklistId,
+        targetCategoryId,
+        checked
+      );
+      return;
+    }
+
+    if (!entry.sourceMessageId) {
+      return;
+    }
+
+    toggleChecklistMessageCategoryCheckState(
+      entry.sourceCategoryId,
+      entry.sourceMessageId,
+      targetCategoryId,
+      checked
+    );
+  }
+
+  function toggleChecklistCategoryCheckState(
+    sourceCategoryId: string,
+    checklistId: string,
+    targetCategoryId: string,
+    checked: boolean
+  ) {
+    const sourceDocument = getContinuousDocumentForCategory(sourceCategoryId);
+    if (!sourceDocument) {
+      return;
+    }
+
+    const nextChecklists = sourceDocument.checklists.map((checklist) => {
+      if (checklist.id !== checklistId) {
+        return checklist;
+      }
+
+      return {
+        ...checklist,
+        checkedCategoryIds: togglePlainIdSelection(
+          checklist.checkedCategoryIds,
+          targetCategoryId,
+          checked
+        ),
+      };
+    });
+
+    commitContinuousDocumentForCategory(sourceCategoryId, {
+      text: sourceDocument.text,
+      checklists: nextChecklists,
+    });
+  }
+
+  function handleOpenChecklistSourceCategory(
+    sourceCategoryId: string,
+    sourceMessageId?: string | null
+  ) {
+    const sourceExists = categories.some((category) => category.id === sourceCategoryId);
+    if (!sourceExists) {
+      pushNotice("Категория со списком не найдена.", "warn");
+      return;
+    }
+
+    setActiveProjectId(null);
+    openCategory(sourceCategoryId, sourceMessageId ?? undefined);
   }
 
   async function handleMessageTypeChange(nextType: MessageType) {
@@ -2835,6 +4275,8 @@ export default function CategoryWorkspace() {
           format: nextFormat,
           content: textFromContinuous,
         });
+
+        setContinuousChecklists([]);
       } else if (previousFormat === "block" && nextFormat === "continuous") {
         const orderedMessages = [...currentMessages].sort(sortMessages);
         const mergedText = orderedMessages.map((message) => message.content).join("\n\n");
@@ -2858,6 +4300,7 @@ export default function CategoryWorkspace() {
           [categoryId]: [],
         }));
         setContinuousDraft(mergedText);
+        setContinuousChecklists([]);
         setSelectedMessageId(null);
       } else {
         await patchCategoryById(categoryId, { format: nextFormat });
@@ -3369,6 +4812,103 @@ export default function CategoryWorkspace() {
     }
   }
 
+  function renderRichTextTools(scopePrefix: "block" | "continuous") {
+    return (
+      <>
+        <div className="text-tools-inline">
+          <button
+            type="button"
+            className={`mini-action text-tool-button ${richToolbarState.bold ? "text-tool-button-active" : ""}`}
+            onMouseDown={handleToolbarControlMouseDown}
+            onClick={handleToolbarBold}
+            disabled={!canUseRichToolbar}
+            aria-label="Жирный"
+          >
+            B
+          </button>
+
+          <button
+            type="button"
+            className={`mini-action text-tool-button ${richToolbarState.italic ? "text-tool-button-active" : ""}`}
+            onMouseDown={handleToolbarControlMouseDown}
+            onClick={handleToolbarItalic}
+            disabled={!canUseRichToolbar}
+            aria-label="Курсив"
+          >
+            I
+          </button>
+
+          <button
+            type="button"
+            className="mini-action text-tool-button"
+            onMouseDown={handleToolbarControlMouseDown}
+            onClick={handleToolbarLink}
+            disabled={!canUseRichToolbar}
+          >
+            link
+          </button>
+
+          <div className="text-color-wrap">
+            <button
+              ref={textColorButtonRef}
+              type="button"
+              className={`mini-action text-tool-button text-color-trigger ${showTextColorPalette ? "text-tool-button-active" : ""}`}
+              onMouseDown={handleToolbarControlMouseDown}
+              onClick={toggleToolbarColorPalette}
+              disabled={!canUseRichToolbar}
+              aria-label="Открыть палитру цвета"
+            >
+              color
+              <span
+                className="text-color-chip"
+                style={{ backgroundColor: richToolbarState.color }}
+                aria-hidden="true"
+              />
+            </button>
+
+            {showTextColorPalette && (
+              <div
+                ref={textColorPaletteRef}
+                className="text-color-popover"
+                role="dialog"
+                aria-label="Палитра цвета текста"
+              >
+                <div className="text-color-palette" role="group" aria-label="Цвет текста">
+                  {TEXT_COLOR_PRESETS.map((color) => (
+                    <button
+                      key={`${scopePrefix}-text-color-${color}`}
+                      type="button"
+                      className={`text-color-swatch ${
+                        richToolbarState.color === color ? "text-color-swatch-active" : ""
+                      }`}
+                      style={{ backgroundColor: color }}
+                      onMouseDown={handleToolbarControlMouseDown}
+                      onClick={() => handleToolbarColorChange(color)}
+                      disabled={!canUseRichToolbar}
+                      aria-label={`Цвет текста ${color}`}
+                    />
+                  ))}
+                </div>
+
+                <input
+                  type="color"
+                  value={customTextColor}
+                  className="text-color-picker"
+                  onMouseDown={handleToolbarColorInputMouseDown}
+                  onChange={(event) => handleToolbarColorChange(event.target.value)}
+                  disabled={!canUseRichToolbar}
+                  aria-label="Выбрать свой цвет текста"
+                />
+              </div>
+            )}
+          </div>
+        </div>
+
+        <span className="toolbar-meta">инструменты текста</span>
+      </>
+    );
+  }
+
   if (!isAuthReady) {
     return (
       <main className="workspace-root flex w-full items-stretch p-0">
@@ -3670,73 +5210,166 @@ export default function CategoryWorkspace() {
                   <span className="toolbar-meta">формат: блочный</span>
                 </div>
 
-                <div className="message-board message-board-block" onClick={() => setSelectedMessageId(null)}>
+                <div className="message-toolbar message-toolbar-tools">
+                  <button
+                    type="button"
+                    className="mini-action"
+                    onClick={openChecklistEditorForCreate}
+                    disabled={!currentCategoryId || isMutating || isLoading}
+                  >
+                    #CL
+                  </button>
+                  {renderRichTextTools("block")}
+                </div>
+
+                <div
+                  className="message-board message-board-block"
+                  onClick={() => {
+                    setSelectedMessageId(null);
+                    setActiveRichEditor(null);
+                    savedRichSelectionRef.current = null;
+                    setShowTextColorPalette(false);
+                  }}
+                >
                   {currentMessages.length === 0 ? (
                     <p className="empty-note">В этой категории пока нет сообщений. Нажми + сообщение.</p>
                   ) : (
-                    currentMessages.map((message) => (
-                      <article
-                        key={message.id}
-                        className={`message-item message-item-block ${
-                          selectedMessageId === message.id ? "message-item-active" : ""
-                        }`}
-                        onDragOver={(event) => {
-                          if (dragMessageId && dragMessageId !== message.id) {
-                            event.preventDefault();
-                          }
-                        }}
-                        onDrop={(event) => {
-                          if (!dragMessageId) {
-                            return;
-                          }
-                          event.preventDefault();
-                          handleDropOnMessage(message.id);
-                        }}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          setSelectedMessageId(message.id);
-                        }}
-                      >
-                        <div className="message-head">
-                          <span className="message-title">{message.title}</span>
-                          <div className="message-head-right">
-                            <span className="message-kind">
-                              {toMessageTypeLabel(message.message_type)}
-                            </span>
-                            <button
-                              type="button"
-                              className={`message-drag ${
-                                dragMessageId === message.id ? "message-drag-active" : ""
-                              }`}
-                              draggable={currentMessages.length > 1}
-                              onMouseDown={(event) => event.stopPropagation()}
-                              onDragStart={(event) => {
-                                event.stopPropagation();
-                                if (event.dataTransfer) {
-                                  event.dataTransfer.effectAllowed = "move";
-                                  event.dataTransfer.setData("text/plain", message.id);
-                                }
-                                setDragMessageId(message.id);
-                              }}
-                              onDragEnd={() => setDragMessageId(null)}
-                              aria-label="Перетащить блок"
-                            >
-                              ::
-                            </button>
-                          </div>
-                        </div>
+                    currentMessages.map((message) => {
+                      const checklistCard = blockChecklistCardsByMessageId.get(message.id);
 
-                        <textarea
-                          value={message.content}
-                          onChange={(event) =>
-                            handleMessageContentChange(message.id, event.target.value)
-                          }
-                          onFocus={() => setSelectedMessageId(message.id)}
-                          className="message-editor"
-                          placeholder="Текст сообщения..."
-                        />
-                      </article>
-                    ))
+                      return (
+                        <article
+                          key={message.id}
+                          className={`message-item message-item-block ${
+                            selectedMessageId === message.id ? "message-item-active" : ""
+                          }`}
+                          onDragOver={(event) => {
+                            if (dragMessageId && dragMessageId !== message.id) {
+                              event.preventDefault();
+                            }
+                          }}
+                          onDrop={(event) => {
+                            if (!dragMessageId) {
+                              return;
+                            }
+                            event.preventDefault();
+                            handleDropOnMessage(message.id);
+                          }}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setSelectedMessageId(message.id);
+                          }}
+                        >
+                          <div className="message-head">
+                            <span className="message-title">{message.title}</span>
+                            <div className="message-head-right">
+                              <span className="message-kind">
+                                {checklistCard
+                                  ? "#Checklist"
+                                  : toMessageTypeLabel(message.message_type)}
+                              </span>
+                              {checklistCard && (
+                                <button
+                                  type="button"
+                                  className="continuous-checklist-gear"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    openChecklistEditorForBlockMessage(
+                                      message,
+                                      checklistCard.payload
+                                    );
+                                  }}
+                                  aria-label={`Открыть настройки списка ${message.title}`}
+                                >
+                                  gear
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                className={`message-drag ${
+                                  dragMessageId === message.id ? "message-drag-active" : ""
+                                }`}
+                                draggable={currentMessages.length > 1}
+                                onMouseDown={(event) => event.stopPropagation()}
+                                onDragStart={(event) => {
+                                  event.stopPropagation();
+                                  if (event.dataTransfer) {
+                                    event.dataTransfer.effectAllowed = "move";
+                                    event.dataTransfer.setData("text/plain", message.id);
+                                  }
+                                  setDragMessageId(message.id);
+                                }}
+                                onDragEnd={() => setDragMessageId(null)}
+                                aria-label="Перетащить блок"
+                              >
+                                ::
+                              </button>
+                            </div>
+                          </div>
+
+                          {checklistCard ? (
+                            <div className="message-editor">
+                              <div className="continuous-checklist-items">
+                                {checklistCard.items.map((item) => (
+                                  <label
+                                    key={`block-checklist-item-${message.id}-${item.categoryId}`}
+                                    className="continuous-checklist-item"
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={item.checked}
+                                      onChange={(event) => {
+                                        if (!currentCategoryId) {
+                                          return;
+                                        }
+
+                                        toggleChecklistMessageCategoryCheckState(
+                                          currentCategoryId,
+                                          message.id,
+                                          item.categoryId,
+                                          event.target.checked
+                                        );
+                                      }}
+                                    />
+                                    <span>{item.label}</span>
+                                  </label>
+                                ))}
+                              </div>
+                            </div>
+                          ) : (
+                            <div
+                              ref={(element) => setBlockEditorElement(message.id, element)}
+                              contentEditable={!isMutating && !isLoading}
+                              suppressContentEditableWarning
+                              onInput={(event) => handleBlockEditorInput(message.id, event)}
+                              onFocus={() => {
+                                setSelectedMessageId(message.id);
+                                handleRichEditorFocus({
+                                  kind: "block",
+                                  messageId: message.id,
+                                });
+                              }}
+                              onMouseUp={() =>
+                                handleRichEditorSelectionActivity({
+                                  kind: "block",
+                                  messageId: message.id,
+                                })
+                              }
+                              onKeyUp={() =>
+                                handleRichEditorSelectionActivity({
+                                  kind: "block",
+                                  messageId: message.id,
+                                })
+                              }
+                              className="message-editor message-editor-rich"
+                              data-placeholder="Текст сообщения..."
+                              role="textbox"
+                              aria-multiline="true"
+                            />
+                          )}
+                        </article>
+                      );
+                    })
                   )}
                 </div>
               </>
@@ -3745,16 +5378,98 @@ export default function CategoryWorkspace() {
                 <div className="message-toolbar">
                   <span className="toolbar-meta">формат: сплошной</span>
                 </div>
+                <div className="message-toolbar message-toolbar-tools">
+                  <button
+                    type="button"
+                    className="mini-action"
+                    onClick={openChecklistEditorForCreate}
+                    disabled={!currentCategoryId || isMutating || isLoading}
+                  >
+                    #CL
+                  </button>
+                  {renderRichTextTools("continuous")}
+                </div>
                 <div className="continuous-wrap">
-                  <textarea
-                    value={continuousDraft}
-                    onChange={(event) =>
-                      handleContinuousContentChange(event.target.value)
+                  {continuousChecklistCards.length > 0 && (
+                    <div className="continuous-checklist-board">
+                      {continuousChecklistCards.map(({ checklist, items }) => (
+                        <article
+                          key={`continuous-checklist-${checklist.id}`}
+                          className="continuous-checklist-card"
+                        >
+                          <div className="continuous-checklist-head">
+                            <div className="min-w-0">
+                              <p className="continuous-checklist-title">{checklist.title}</p>
+                              <p className="continuous-checklist-tags">
+                                {checklist.tags.join(" ")}
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              className="continuous-checklist-gear"
+                              onClick={() => openChecklistEditorForChecklist(checklist.id)}
+                              aria-label={`Открыть настройки списка ${checklist.title}`}
+                            >
+                              gear
+                            </button>
+                          </div>
+
+                          <div className="continuous-checklist-items">
+                            {items.map((item) => (
+                              <label
+                                key={`checklist-item-${checklist.id}-${item.categoryId}`}
+                                className="continuous-checklist-item"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={item.checked}
+                                  onChange={(event) => {
+                                    if (!currentCategoryId) {
+                                      return;
+                                    }
+
+                                    toggleChecklistCategoryCheckState(
+                                      currentCategoryId,
+                                      checklist.id,
+                                      item.categoryId,
+                                      event.target.checked
+                                    );
+                                  }}
+                                />
+                                <span>{item.label}</span>
+                              </label>
+                            ))}
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  )}
+
+                  <div
+                    ref={continuousEditorRef}
+                    contentEditable={!(!currentCategoryId || isLoading || Boolean(loadError))}
+                    suppressContentEditableWarning
+                    onInput={handleContinuousEditorInput}
+                    onFocus={() => {
+                      setSelectedMessageId(null);
+                      handleRichEditorFocus({
+                        kind: "continuous",
+                      });
+                    }}
+                    onMouseUp={() =>
+                      handleRichEditorSelectionActivity({
+                        kind: "continuous",
+                      })
                     }
-                    onFocus={() => setSelectedMessageId(null)}
-                    className="continuous-editor"
-                    placeholder="Пиши сплошной текст как в Word..."
-                    disabled={!currentCategoryId || isLoading || Boolean(loadError)}
+                    onKeyUp={() =>
+                      handleRichEditorSelectionActivity({
+                        kind: "continuous",
+                      })
+                    }
+                    className="continuous-editor continuous-editor-main continuous-editor-rich"
+                    data-placeholder="Пиши сплошной текст как в Word..."
+                    role="textbox"
+                    aria-multiline="true"
                   />
                 </div>
               </>
@@ -4048,6 +5763,64 @@ export default function CategoryWorkspace() {
                   </>
                 )}
 
+                <label className="settings-label">участие в #Checklist</label>
+                <div className="settings-checklist-links">
+                  {checklistParticipation.length === 0 ? (
+                    <p className="settings-hint">
+                      Эта категория пока не участвует ни в одном #Checklist.
+                    </p>
+                  ) : (
+                    checklistParticipation.map((entry) => {
+                      const sourceIsCurrent = entry.sourceCategoryId === currentCategory.id;
+
+                      return (
+                        <div
+                          key={`settings-checklist-${entry.source}-${entry.sourceCategoryId}-${entry.checklistId}`}
+                          className="settings-checklist-link-item"
+                        >
+                          <label className="settings-checklist-toggle">
+                            <input
+                              type="checkbox"
+                              checked={entry.checked}
+                              onChange={(event) =>
+                                toggleChecklistParticipationCheckState(
+                                  entry,
+                                  currentCategory.id,
+                                  event.target.checked
+                                )
+                              }
+                              disabled={isMutating || isLoading}
+                            />
+                            <span>
+                              {entry.checklistTitle}
+                              {entry.tags.length > 0 ? ` ${entry.tags.join(" ")}` : ""}
+                            </span>
+                          </label>
+
+                          <div className="settings-checklist-actions">
+                            <p className="settings-hint">
+                              источник: {entry.sourceCategoryTitle}
+                            </p>
+                            <button
+                              type="button"
+                              className="mini-action settings-checklist-open"
+                              onClick={() =>
+                                handleOpenChecklistSourceCategory(
+                                  entry.sourceCategoryId,
+                                  entry.sourceMessageId
+                                )
+                              }
+                              disabled={sourceIsCurrent}
+                            >
+                              {sourceIsCurrent ? "здесь" : "к списку"}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+
                 <label className="settings-label">формат категории</label>
                 <select
                   value={categoryForm.format}
@@ -4168,6 +5941,48 @@ export default function CategoryWorkspace() {
             </button>
           </div>
         </footer>
+
+        {showLinkPlaceholderModal && (
+          <div className="absolute inset-0 z-[68] flex items-center justify-center p-3">
+            <button
+              type="button"
+              className="absolute inset-0 bg-black/45"
+              onClick={closeLinkPlaceholderModal}
+              aria-label="Закрыть окно ссылки"
+            />
+
+            <div className="confirm-modal popup-3d relative z-10 w-full max-w-lg p-4 sm:p-5">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <h2 className="font-display text-4xl leading-none">Ссылка</h2>
+                <button
+                  type="button"
+                  className="menu-action h-9 w-9 text-xl"
+                  onClick={closeLinkPlaceholderModal}
+                  aria-label="Закрыть окно ссылки"
+                >
+                  x
+                </button>
+              </div>
+
+              <p className="settings-hint">
+                Здесь появится выбор, на что ссылаться. Пока это окно-заглушка.
+              </p>
+              <p className="settings-hint mt-2 break-words">
+                Выделенный текст: {linkSelectionPreview || "(пусто)"}
+              </p>
+
+              <div className="confirm-modal-actions">
+                <button
+                  type="button"
+                  className="mini-action"
+                  onClick={closeLinkPlaceholderModal}
+                >
+                  закрыть
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {confirmDialog && (
           <div className="absolute inset-0 z-[70] flex items-center justify-center p-3">
@@ -4366,6 +6181,100 @@ export default function CategoryWorkspace() {
               >
                 создать проект
               </button>
+            </div>
+          </div>
+        )}
+
+        {checklistEditor && (
+          <div className="absolute inset-0 z-50 flex items-center justify-center p-3">
+            <button
+              type="button"
+              className="absolute inset-0 bg-black/45"
+              onClick={closeChecklistEditor}
+              aria-label="Закрыть окно чеклиста"
+            />
+
+            <div className="project-create-modal checklist-editor-modal popup-3d relative z-10 w-full max-w-2xl p-4 sm:p-5">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <h2 className="font-display text-4xl leading-none">
+                  {checklistEditor.checklistId ? "Настройки #Checklist" : "Новый #Checklist"}
+                </h2>
+                <button
+                  type="button"
+                  className="menu-action h-9 w-9 text-xl"
+                  onClick={closeChecklistEditor}
+                  aria-label="Закрыть окно чеклиста"
+                >
+                  x
+                </button>
+              </div>
+
+              <label className="settings-label">название списка</label>
+              <input
+                value={checklistEditor.titleDraft}
+                onChange={(event) => updateChecklistEditorTitle(event.target.value)}
+                className="settings-input"
+                placeholder="Например: уроки"
+              />
+
+              <label className="settings-label mt-3">поиск хэштега</label>
+              <input
+                autoFocus
+                value={checklistTagSearchQuery}
+                onChange={(event) => setChecklistTagSearchQuery(event.target.value)}
+                className="settings-input"
+                placeholder="Искать #хэштеги..."
+              />
+
+              <div className="project-create-tag-list mt-3">
+                {checklistTagOptions.length === 0 ? (
+                  <p className="settings-hint">Не нашел хэштегов по этому запросу.</p>
+                ) : (
+                  checklistTagOptions.map((tag) => {
+                    const checked = checklistTagSelectionKeySet.has(
+                      tag.toLocaleLowerCase()
+                    );
+
+                    return (
+                      <label key={`checklist-create-${tag}`} className="project-create-tag-option">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleChecklistEditorTag(tag)}
+                        />
+                        <span>{tag}</span>
+                      </label>
+                    );
+                  })
+                )}
+              </div>
+
+              <p className="settings-hint mt-2">
+                Выбрано хэштегов: {checklistEditor.tagSelection.length}
+              </p>
+
+              <div className="checklist-editor-actions">
+                {(checklistEditor.source === "continuous" &&
+                  checklistEditor.checklistId) ||
+                (checklistEditor.source === "block-message" &&
+                  checklistEditor.sourceMessageId) ? (
+                  <button
+                    type="button"
+                    className="danger-action"
+                    onClick={() => void handleDeleteChecklistFromEditor()}
+                  >
+                    удалить список
+                  </button>
+                ) : null}
+
+                <button
+                  type="button"
+                  className="mini-action"
+                  onClick={() => void handleSaveChecklistEditor()}
+                >
+                  сохранить
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -4751,11 +6660,18 @@ export default function CategoryWorkspace() {
 }
 
 function normalizeCategoryRow(category: CategoryRow): CategoryRow {
+  const normalizedFormat = category.format ?? "continuous";
+  const normalizedContent =
+    normalizedFormat === "continuous"
+      ? serializeContinuousContent(parseContinuousContent(category.content))
+      : sanitizeRichTextHtml(category.content);
+
   return {
     ...category,
+    content: normalizedContent,
     description: category.description ?? "",
     tag: category.tag ?? "",
-    format: category.format ?? "continuous",
+    format: normalizedFormat,
     category_type: category.category_type ?? "learning",
   };
 }
@@ -4916,6 +6832,550 @@ function serializeCategoryTags(tags: string[]): string {
   return dedupeCategoryTags(tags).join("\n");
 }
 
+const RICH_ALLOWED_TAGS = new Set([
+  "A",
+  "BR",
+  "DIV",
+  "EM",
+  "LI",
+  "OL",
+  "P",
+  "SPAN",
+  "STRONG",
+  "UL",
+]);
+
+function looksLikeHtml(value: string): boolean {
+  return /<\/?[a-z][^>]*>/i.test(value);
+}
+
+function escapeHtmlText(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function normalizeHexColor(value: string): string | null {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized.startsWith("#")) {
+    return null;
+  }
+
+  const hex = normalized.slice(1);
+  if (!/^[0-9a-f]+$/i.test(hex)) {
+    return null;
+  }
+
+  if (hex.length === 3) {
+    return `#${hex
+      .split("")
+      .map((char) => `${char}${char}`)
+      .join("")}`;
+  }
+
+  if (hex.length === 6) {
+    return `#${hex}`;
+  }
+
+  return null;
+}
+
+function normalizeCssColorToHex(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const fromHex = normalizeHexColor(trimmed);
+  if (fromHex) {
+    return fromHex;
+  }
+
+  const rgbMatch = trimmed.match(
+    /^rgba?\((\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})(?:\s*,\s*[\d.]+)?\)$/i
+  );
+  if (rgbMatch) {
+    const red = Number(rgbMatch[1]);
+    const green = Number(rgbMatch[2]);
+    const blue = Number(rgbMatch[3]);
+    if (
+      Number.isFinite(red) &&
+      Number.isFinite(green) &&
+      Number.isFinite(blue) &&
+      red >= 0 &&
+      red <= 255 &&
+      green >= 0 &&
+      green <= 255 &&
+      blue >= 0 &&
+      blue <= 255
+    ) {
+      const toHex = (channel: number) =>
+        Math.round(channel).toString(16).padStart(2, "0");
+      return `#${toHex(red)}${toHex(green)}${toHex(blue)}`;
+    }
+  }
+
+  if (typeof window === "undefined" || typeof document === "undefined") {
+    return null;
+  }
+
+  const probe = document.createElement("span");
+  probe.style.color = "";
+  probe.style.color = trimmed;
+
+  if (!probe.style.color || !document.body) {
+    return null;
+  }
+
+  document.body.appendChild(probe);
+  const computed = window.getComputedStyle(probe).color;
+  probe.remove();
+
+  if (!computed || computed.toLowerCase() === trimmed.toLowerCase()) {
+    return null;
+  }
+
+  return normalizeCssColorToHex(computed);
+}
+
+function normalizeRichLinkUrl(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (trimmed.startsWith("/")) {
+    return trimmed;
+  }
+
+  let candidate = trimmed;
+  if (
+    !/^(https?:|mailto:|tel:)/i.test(candidate) &&
+    /^[^\s]+\.[^\s]+/.test(candidate)
+  ) {
+    candidate = `https://${candidate}`;
+  }
+
+  try {
+    const parsed = new URL(candidate);
+    if (
+      parsed.protocol === "http:" ||
+      parsed.protocol === "https:" ||
+      parsed.protocol === "mailto:" ||
+      parsed.protocol === "tel:"
+    ) {
+      return parsed.toString();
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function sanitizeRichNode(sourceNode: Node, ownerDocument: Document): Node | null {
+  if (sourceNode.nodeType === Node.TEXT_NODE) {
+    return ownerDocument.createTextNode(sourceNode.textContent ?? "");
+  }
+
+  if (sourceNode.nodeType !== Node.ELEMENT_NODE) {
+    return null;
+  }
+
+  const sourceElement = sourceNode as HTMLElement;
+  const sourceTag = sourceElement.tagName.toUpperCase();
+  const normalizedTag =
+    sourceTag === "B"
+      ? "STRONG"
+      : sourceTag === "I"
+        ? "EM"
+        : sourceTag === "FONT"
+          ? "SPAN"
+          : sourceTag;
+
+  const appendChildren = (targetNode: Node) => {
+    for (const child of Array.from(sourceElement.childNodes)) {
+      const sanitizedChild = sanitizeRichNode(child, ownerDocument);
+      if (sanitizedChild) {
+        targetNode.appendChild(sanitizedChild);
+      }
+    }
+  };
+
+  if (normalizedTag === "BR") {
+    return ownerDocument.createElement("br");
+  }
+
+  if (!RICH_ALLOWED_TAGS.has(normalizedTag)) {
+    const fragment = ownerDocument.createDocumentFragment();
+    appendChildren(fragment);
+    return fragment;
+  }
+
+  if (normalizedTag === "A") {
+    const href = normalizeRichLinkUrl(sourceElement.getAttribute("href") ?? "");
+    if (!href) {
+      const fragment = ownerDocument.createDocumentFragment();
+      appendChildren(fragment);
+      return fragment;
+    }
+
+    const anchor = ownerDocument.createElement("a");
+    anchor.setAttribute("href", href);
+    anchor.setAttribute("target", "_blank");
+    anchor.setAttribute("rel", "noopener noreferrer");
+    appendChildren(anchor);
+    return anchor;
+  }
+
+  if (normalizedTag === "SPAN") {
+    const safeColor = normalizeCssColorToHex(
+      sourceElement.style.color || sourceElement.getAttribute("color") || ""
+    );
+    if (!safeColor) {
+      const fragment = ownerDocument.createDocumentFragment();
+      appendChildren(fragment);
+      return fragment;
+    }
+
+    const span = ownerDocument.createElement("span");
+    span.style.color = safeColor;
+    appendChildren(span);
+    return span;
+  }
+
+  const safeElement = ownerDocument.createElement(normalizedTag.toLowerCase());
+  appendChildren(safeElement);
+  return safeElement;
+}
+
+function sanitizeRichTextHtml(value: string | null | undefined): string {
+  const raw = typeof value === "string" ? value : "";
+  if (!raw.trim()) {
+    return "";
+  }
+
+  if (!looksLikeHtml(raw)) {
+    return escapeHtmlText(raw).replace(/\r?\n/g, "<br>");
+  }
+
+  if (typeof DOMParser === "undefined") {
+    return escapeHtmlText(raw).replace(/\r?\n/g, "<br>");
+  }
+
+  const parser = new DOMParser();
+  const parsed = parser.parseFromString(`<div>${raw}</div>`, "text/html");
+  const sourceRoot = parsed.body.firstElementChild;
+
+  if (!sourceRoot) {
+    return "";
+  }
+
+  const safeRoot = parsed.createElement("div");
+  for (const child of Array.from(sourceRoot.childNodes)) {
+    const sanitizedChild = sanitizeRichNode(child, parsed);
+    if (sanitizedChild) {
+      safeRoot.appendChild(sanitizedChild);
+    }
+  }
+
+  return safeRoot.innerHTML.trim();
+}
+
+function richTextToPlainText(value: string | null | undefined): string {
+  const raw = typeof value === "string" ? value : "";
+  if (!raw) {
+    return "";
+  }
+
+  if (!looksLikeHtml(raw)) {
+    return raw;
+  }
+
+  const htmlWithBreaks = sanitizeRichTextHtml(raw)
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(div|p|li)>/gi, "\n");
+
+  if (typeof document === "undefined") {
+    return htmlWithBreaks
+      .replace(/<[^>]+>/g, "")
+      .replace(/\u00a0/g, " ")
+      .replace(/\r/g, "")
+      .replace(/\n{3,}/g, "\n\n");
+  }
+
+  const probe = document.createElement("div");
+  probe.innerHTML = htmlWithBreaks;
+  return (probe.textContent ?? "")
+    .replace(/\u00a0/g, " ")
+    .replace(/\r/g, "")
+    .replace(/\n{3,}/g, "\n\n");
+}
+
+const CONTINUOUS_CONTENT_KIND = "itemkey-continuous-v1";
+const MESSAGE_CHECKLIST_KIND = "itemkey-message-checklist-v1";
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function normalizeChecklistTitle(value: string | null | undefined): string {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!normalized) {
+    return "#Checklist";
+  }
+
+  return normalized.slice(0, 80);
+}
+
+function normalizeMessageChecklistPayload(
+  payload: MessageChecklistPayload
+): MessageChecklistPayload {
+  return {
+    tags: dedupeCategoryTags(payload.tags),
+    checkedCategoryIds: dedupePlainList(payload.checkedCategoryIds),
+  };
+}
+
+function parseMessageChecklistContent(
+  value: string | null | undefined
+): MessageChecklistPayload | null {
+  const raw = typeof value === "string" ? value : "";
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("{")) {
+    return null;
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (!isObjectRecord(parsed) || parsed.kind !== MESSAGE_CHECKLIST_KIND) {
+      return null;
+    }
+
+    const tags = Array.isArray(parsed.tags)
+      ? parsed.tags.filter((tag): tag is string => typeof tag === "string")
+      : [];
+    const checkedCategoryIds = Array.isArray(parsed.checkedCategoryIds)
+      ? parsed.checkedCategoryIds.filter((id): id is string => typeof id === "string")
+      : [];
+
+    const normalized = normalizeMessageChecklistPayload({ tags, checkedCategoryIds });
+    if (normalized.tags.length === 0) {
+      return null;
+    }
+
+    return normalized;
+  } catch {
+    return null;
+  }
+}
+
+function serializeMessageChecklistContent(payload: MessageChecklistPayload): string {
+  const normalized = normalizeMessageChecklistPayload(payload);
+  return JSON.stringify({
+    kind: MESSAGE_CHECKLIST_KIND,
+    tags: normalized.tags,
+    checkedCategoryIds: normalized.checkedCategoryIds,
+  });
+}
+
+function normalizePersistedMessageContent(value: string): string {
+  const checklistPayload = parseMessageChecklistContent(value);
+  if (checklistPayload) {
+    return serializeMessageChecklistContent(checklistPayload);
+  }
+
+  return sanitizeRichTextHtml(value);
+}
+
+function normalizeChecklistBlocks(checklists: ChecklistBlock[]): ChecklistBlock[] {
+  const seen = new Set<string>();
+  const result: ChecklistBlock[] = [];
+
+  for (let index = 0; index < checklists.length; index += 1) {
+    const checklist = checklists[index];
+    const rawId = typeof checklist.id === "string" ? checklist.id.trim() : "";
+    const baseId = rawId || `checklist-${index + 1}`;
+
+    let resolvedId = baseId;
+    let suffix = 2;
+    while (seen.has(resolvedId.toLocaleLowerCase())) {
+      resolvedId = `${baseId}-${suffix}`;
+      suffix += 1;
+    }
+    seen.add(resolvedId.toLocaleLowerCase());
+
+    result.push({
+      id: resolvedId,
+      title: normalizeChecklistTitle(checklist.title),
+      tags: dedupeCategoryTags(checklist.tags),
+      checkedCategoryIds: dedupePlainList(checklist.checkedCategoryIds),
+    });
+  }
+
+  return result;
+}
+
+function parseContinuousContent(value: string | null | undefined): ContinuousContentModel {
+  const raw = typeof value === "string" ? value : "";
+  const trimmed = raw.trim();
+
+  if (!trimmed.startsWith("{")) {
+    return {
+      text: sanitizeRichTextHtml(raw),
+      checklists: [],
+    };
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (!isObjectRecord(parsed)) {
+      return {
+        text: sanitizeRichTextHtml(raw),
+        checklists: [],
+      };
+    }
+
+    if (
+      parsed.kind !== CONTINUOUS_CONTENT_KIND ||
+      typeof parsed.text !== "string" ||
+      !Array.isArray(parsed.checklists)
+    ) {
+      return {
+        text: sanitizeRichTextHtml(raw),
+        checklists: [],
+      };
+    }
+
+    const parsedChecklists: ChecklistBlock[] = [];
+    for (const rawChecklist of parsed.checklists) {
+      if (!isObjectRecord(rawChecklist)) {
+        continue;
+      }
+
+      const tags = Array.isArray(rawChecklist.tags)
+        ? rawChecklist.tags.filter((tag): tag is string => typeof tag === "string")
+        : [];
+
+      const checkedCategoryIds = Array.isArray(rawChecklist.checkedCategoryIds)
+        ? rawChecklist.checkedCategoryIds.filter(
+            (id): id is string => typeof id === "string"
+          )
+        : [];
+
+      parsedChecklists.push({
+        id: typeof rawChecklist.id === "string" ? rawChecklist.id : "",
+        title: typeof rawChecklist.title === "string" ? rawChecklist.title : "",
+        tags,
+        checkedCategoryIds,
+      });
+    }
+
+    return {
+      text: sanitizeRichTextHtml(parsed.text),
+      checklists: normalizeChecklistBlocks(parsedChecklists),
+    };
+  } catch {
+    return {
+      text: sanitizeRichTextHtml(raw),
+      checklists: [],
+    };
+  }
+}
+
+function serializeContinuousContent(document: ContinuousContentModel): string {
+  const nextDocument: ContinuousContentModel = {
+    text: sanitizeRichTextHtml(document.text),
+    checklists: normalizeChecklistBlocks(document.checklists),
+  };
+
+  if (nextDocument.checklists.length === 0) {
+    return nextDocument.text;
+  }
+
+  return JSON.stringify({
+    kind: CONTINUOUS_CONTENT_KIND,
+    text: nextDocument.text,
+    checklists: nextDocument.checklists,
+  });
+}
+
+function categoryMatchesChecklistTags(category: CategoryRow, tags: string[]): boolean {
+  const normalizedTags = dedupeCategoryTags(tags);
+  if (normalizedTags.length === 0) {
+    return false;
+  }
+
+  const selectedTagKeySet = new Set(
+    normalizedTags.map((tag) => tag.toLocaleLowerCase())
+  );
+
+  return parseCategoryTags(category.tag).some((tag) =>
+    selectedTagKeySet.has(tag.toLocaleLowerCase())
+  );
+}
+
+function collectChecklistCategoryOptions(
+  categories: CategoryRow[],
+  tags: string[]
+): ChecklistCategoryOption[] {
+  const normalizedTags = dedupeCategoryTags(tags);
+  if (normalizedTags.length === 0) {
+    return [];
+  }
+
+  return categories
+    .filter((category) => categoryMatchesChecklistTags(category, normalizedTags))
+    .map((category) => ({
+      categoryId: category.id,
+      label: buildCategoryPath(categories, category.id)
+        .map((part) => part.title)
+        .join(" / "),
+    }))
+    .sort((left, right) => {
+      if (left.label !== right.label) {
+        return left.label.localeCompare(right.label, "ru-RU");
+      }
+
+      return left.categoryId.localeCompare(right.categoryId);
+    });
+}
+
+function togglePlainIdSelection(
+  source: string[],
+  targetId: string,
+  checked: boolean
+): string[] {
+  const normalizedTarget = targetId.trim();
+  const current = dedupePlainList(source);
+
+  if (!normalizedTarget) {
+    return current;
+  }
+
+  const targetKey = normalizedTarget.toLocaleLowerCase();
+  const hasTarget = current.some((id) => id.toLocaleLowerCase() === targetKey);
+
+  if (checked) {
+    if (hasTarget) {
+      return current;
+    }
+
+    return [...current, normalizedTarget];
+  }
+
+  if (!hasTarget) {
+    return current;
+  }
+
+  return current.filter((id) => id.toLocaleLowerCase() !== targetKey);
+}
+
 type ProjectVisibility = {
   visibleCategoryIdSet: Set<string>;
   rootIds: string[];
@@ -5054,6 +7514,7 @@ function sortProjectRootCategory(
 function normalizeMessageRow(message: MessageRow): MessageRow {
   return {
     ...message,
+    content: normalizePersistedMessageContent(message.content),
     title: normalizeMessageTitle(message.title),
     message_type: message.message_type ?? "info",
   };
@@ -5089,7 +7550,8 @@ function reorderMessages(
 }
 
 function makePreview(content: string, query: string): string {
-  const trimmed = content.trim();
+  const plainText = richTextToPlainText(content);
+  const trimmed = plainText.trim();
   if (!trimmed) {
     return "(пустой текст)";
   }
@@ -5150,7 +7612,7 @@ function normalizeMessageTitle(title: string | null | undefined): string {
 }
 
 function makeMessageTitleFromContent(content: string): string {
-  const firstLine = content
+  const firstLine = richTextToPlainText(content)
     .split(/\r?\n/)
     .map((line) => line.trim())
     .find((line) => line.length > 0);
