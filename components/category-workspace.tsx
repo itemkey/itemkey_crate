@@ -347,88 +347,26 @@ export default function CategoryWorkspace() {
   const pendingMessageSelectionRef = useRef<string | null>(null);
   const syncedContinuousCategoryIdRef = useRef<string | null>(null);
 
-  const allCategoriesById = useMemo(
-    () => new Map(categories.map((category) => [category.id, category])),
-    [categories]
-  );
-
   const sortedProjects = useMemo(() => [...projects].sort(sortProjects), [projects]);
 
   const activeProject = useMemo(
     () => sortedProjects.find((project) => project.id === activeProjectId) ?? null,
     [activeProjectId, sortedProjects]
   );
+  const isProjectMode = Boolean(activeProject);
 
   const activeProjectTags = useMemo(
     () => parseCategoryTags(activeProject?.tag_filter ?? ""),
     [activeProject?.tag_filter]
   );
 
-  const activeProjectTagKeySet = useMemo(
-    () => new Set(activeProjectTags.map((tag) => tag.toLocaleLowerCase())),
-    [activeProjectTags]
+  const projectVisibility = useMemo(
+    () => collectProjectVisibility(categories, activeProject),
+    [activeProject, categories]
   );
-
-  const activeProjectContainerIds = useMemo(
-    () => parsePlainList(activeProject?.container_category_ids ?? ""),
-    [activeProject?.container_category_ids]
-  );
-
-  const visibleCategoryIdSet = useMemo(() => {
-    const ids = new Set<string>();
-
-    if (!activeProject) {
-      for (const category of categories) {
-        ids.add(category.id);
-      }
-      return ids;
-    }
-
-    for (const category of categories) {
-      const categoryTags = parseCategoryTags(category.tag);
-      const hasProjectTag = categoryTags.some((tag) =>
-        activeProjectTagKeySet.has(tag.toLocaleLowerCase())
-      );
-      if (hasProjectTag) {
-        ids.add(category.id);
-      }
-    }
-
-    for (const containerId of activeProjectContainerIds) {
-      if (allCategoriesById.has(containerId)) {
-        ids.add(containerId);
-      }
-    }
-
-    const mainRoot = categories.find((node) => isMainRootCategory(node));
-    if (mainRoot) {
-      ids.add(mainRoot.id);
-    }
-
-    const queue = [...ids];
-    while (queue.length > 0) {
-      const nextId = queue.shift();
-      if (!nextId) {
-        continue;
-      }
-
-      const node = allCategoriesById.get(nextId);
-      if (!node?.parent_id || ids.has(node.parent_id)) {
-        continue;
-      }
-
-      ids.add(node.parent_id);
-      queue.push(node.parent_id);
-    }
-
-    return ids;
-  }, [
-    activeProject,
-    activeProjectContainerIds,
-    activeProjectTagKeySet,
-    allCategoriesById,
-    categories,
-  ]);
+  const visibleCategoryIdSet = projectVisibility.visibleCategoryIdSet;
+  const projectRootIds = projectVisibility.rootIds;
+  const projectRootIdSet = useMemo(() => new Set(projectRootIds), [projectRootIds]);
 
   const visibleCategories = useMemo(
     () => categories.filter((category) => visibleCategoryIdSet.has(category.id)),
@@ -450,13 +388,25 @@ export default function CategoryWorkspace() {
     [visibleCategoriesById, insertionTargetId]
   );
 
+  const projectRootCategories = useMemo(
+    () =>
+      projectRootIds
+        .map((rootId) => visibleCategoriesById.get(rootId))
+        .filter((category): category is CategoryRow => Boolean(category)),
+    [projectRootIds, visibleCategoriesById]
+  );
+
   const childCategories = useMemo(() => {
     if (!currentCategoryId) {
+      if (isProjectMode) {
+        return projectRootCategories;
+      }
+
       return getChildren(visibleCategories, null);
     }
 
     return getChildren(visibleCategories, currentCategoryId);
-  }, [visibleCategories, currentCategoryId]);
+  }, [currentCategoryId, isProjectMode, projectRootCategories, visibleCategories]);
 
   const currentMessages = useMemo(() => {
     if (!currentCategoryId) {
@@ -472,11 +422,15 @@ export default function CategoryWorkspace() {
   );
 
   const sidebarFillerCount = Math.max(0, 8 - childCategories.length);
-  const canGoBack = Boolean(currentCategory?.parent_id);
-  const canCreate = Boolean(insertionTargetId);
+  const canGoBack = Boolean(
+    currentCategory &&
+      ((currentCategory.parent_id &&
+        visibleCategoriesById.has(currentCategory.parent_id)) ||
+        (isProjectMode && projectRootIdSet.has(currentCategory.id)))
+  );
+  const canCreate = Boolean(insertionTargetId) || isProjectMode;
   const canDelete = Boolean(insertionTargetId) && !isMainRootCategory(insertionTarget);
   const isAuthenticated = Boolean(authUser);
-  const isProjectMode = Boolean(activeProject);
   const currentCategoryTags = useMemo(
     () => parseCategoryTags(currentCategory?.tag ?? ""),
     [currentCategory?.tag]
@@ -1321,14 +1275,20 @@ export default function CategoryWorkspace() {
       return;
     }
 
-    const fallbackId =
-      getInitialCategoryId(visibleCategories) ?? visibleCategories[0]?.id ?? null;
-
-    if (!fallbackId) {
-      return;
-    }
-
     if (!currentCategoryId || !visibleCategoriesById.has(currentCategoryId)) {
+      if (isProjectMode) {
+        setCurrentCategoryId(null);
+        setInsertionTargetId(null);
+        setSelectedMessageId(null);
+        return;
+      }
+
+      const fallbackId =
+        getInitialCategoryId(visibleCategories) ?? visibleCategories[0]?.id ?? null;
+      if (!fallbackId) {
+        return;
+      }
+
       setCurrentCategoryId(fallbackId);
       setInsertionTargetId(fallbackId);
       setSelectedMessageId(null);
@@ -1341,6 +1301,7 @@ export default function CategoryWorkspace() {
   }, [
     currentCategoryId,
     insertionTargetId,
+    isProjectMode,
     visibleCategories,
     visibleCategoriesById,
   ]);
@@ -1460,6 +1421,8 @@ export default function CategoryWorkspace() {
 
   function handleSelectProjectTab(projectId: string | null) {
     setActiveProjectId(projectId);
+    setCurrentCategoryId(null);
+    setInsertionTargetId(null);
     setSelectedMessageId(null);
     setShowCategoryTagSuggestions(false);
     setShowCategoryTagLibrary(false);
@@ -1907,15 +1870,28 @@ export default function CategoryWorkspace() {
   }
 
   async function handleBack() {
-    if (!currentCategory?.parent_id) {
+    if (!currentCategory) {
       return;
     }
 
-    openCategory(currentCategory.parent_id);
+    const parentId = currentCategory.parent_id;
+    if (parentId && visibleCategoriesById.has(parentId)) {
+      openCategory(parentId);
+      return;
+    }
+
+    if (isProjectMode && projectRootIdSet.has(currentCategory.id)) {
+      pendingMessageSelectionRef.current = null;
+      setCurrentCategoryId(null);
+      setInsertionTargetId(null);
+      setSelectedMessageId(null);
+    }
   }
 
   async function handleAddCategory() {
-    if (!insertionTargetId) {
+    const parentId = insertionTargetId ?? null;
+
+    if (!parentId && !isProjectMode) {
       pushNotice("Нажми на категорию, куда нужно добавить новую.", "warn");
       return;
     }
@@ -1926,7 +1902,7 @@ export default function CategoryWorkspace() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          parentId: insertionTargetId,
+          parentId,
           projectId: activeProjectId,
         }),
       });
@@ -4938,6 +4914,141 @@ function parseCategoryTags(value: string | null | undefined): string[] {
 
 function serializeCategoryTags(tags: string[]): string {
   return dedupeCategoryTags(tags).join("\n");
+}
+
+type ProjectVisibility = {
+  visibleCategoryIdSet: Set<string>;
+  rootIds: string[];
+};
+
+function collectProjectVisibility(
+  categories: CategoryRow[],
+  project: ProjectRow | null
+): ProjectVisibility {
+  const visibleCategoryIdSet = new Set<string>();
+
+  if (!project) {
+    for (const category of categories) {
+      visibleCategoryIdSet.add(category.id);
+    }
+    return {
+      visibleCategoryIdSet,
+      rootIds: [],
+    };
+  }
+
+  const categoryById = new Map(categories.map((category) => [category.id, category]));
+  const projectTagKeySet = new Set(
+    parseCategoryTags(project.tag_filter).map((tag) => tag.toLocaleLowerCase())
+  );
+
+  const candidateRootIds = new Set<string>();
+  for (const category of categories) {
+    const categoryTags = parseCategoryTags(category.tag);
+    const hasProjectTag = categoryTags.some((tag) =>
+      projectTagKeySet.has(tag.toLocaleLowerCase())
+    );
+
+    if (hasProjectTag) {
+      candidateRootIds.add(category.id);
+    }
+  }
+
+  for (const categoryId of parsePlainList(project.container_category_ids)) {
+    if (categoryById.has(categoryId)) {
+      candidateRootIds.add(categoryId);
+    }
+  }
+
+  const rootIds: string[] = [];
+  for (const categoryId of candidateRootIds) {
+    if (hasCandidateAncestor(categoryId, candidateRootIds, categoryById)) {
+      continue;
+    }
+
+    rootIds.push(categoryId);
+  }
+
+  rootIds.sort((leftId, rightId) =>
+    sortProjectRootCategory(
+      categoryById.get(leftId) ?? null,
+      categoryById.get(rightId) ?? null
+    )
+  );
+
+  const links = categories.map((node) => ({
+    id: node.id,
+    parent_id: node.parent_id,
+  }));
+
+  for (const rootId of rootIds) {
+    visibleCategoryIdSet.add(rootId);
+
+    for (const descendantId of collectDescendantIds(links, rootId)) {
+      visibleCategoryIdSet.add(descendantId);
+    }
+  }
+
+  return {
+    visibleCategoryIdSet,
+    rootIds,
+  };
+}
+
+function hasCandidateAncestor(
+  categoryId: string,
+  candidateIds: Set<string>,
+  categoryById: Map<string, CategoryRow>
+): boolean {
+  let parentId = categoryById.get(categoryId)?.parent_id ?? null;
+  const visited = new Set<string>();
+
+  while (parentId) {
+    if (visited.has(parentId)) {
+      return false;
+    }
+
+    visited.add(parentId);
+
+    if (candidateIds.has(parentId)) {
+      return true;
+    }
+
+    parentId = categoryById.get(parentId)?.parent_id ?? null;
+  }
+
+  return false;
+}
+
+function sortProjectRootCategory(
+  left: CategoryRow | null,
+  right: CategoryRow | null
+): number {
+  if (!left && !right) {
+    return 0;
+  }
+
+  if (!left) {
+    return 1;
+  }
+
+  if (!right) {
+    return -1;
+  }
+
+  if (left.updated_at !== right.updated_at) {
+    return right.updated_at.localeCompare(left.updated_at);
+  }
+
+  if (left.created_at !== right.created_at) {
+    return right.created_at.localeCompare(left.created_at);
+  }
+
+  if (left.position !== right.position) {
+    return left.position - right.position;
+  }
+
+  return left.title.localeCompare(right.title, "ru-RU");
 }
 
 function normalizeMessageRow(message: MessageRow): MessageRow {
