@@ -262,7 +262,7 @@ type ConfirmDialogState = {
   tone: ConfirmDialogTone;
 };
 
-type MenuPanel = "root" | "account" | "settings";
+type MenuPanel = "main" | "account" | "settings";
 type AuthTab = "login" | "register";
 
 const DEFAULT_CATEGORY_FORM: CategoryFormState = {
@@ -311,7 +311,7 @@ export default function CategoryWorkspace() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [showSearch, setShowSearch] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
-  const [menuPanel, setMenuPanel] = useState<MenuPanel>("root");
+  const [menuPanel, setMenuPanel] = useState<MenuPanel>("main");
   const [showCategoryTagSuggestions, setShowCategoryTagSuggestions] =
     useState(false);
   const [showCategoryTagLibrary, setShowCategoryTagLibrary] = useState(false);
@@ -1182,7 +1182,7 @@ export default function CategoryWorkspace() {
     setIsSavingAccountPassword(false);
     setIsCreatingProject(false);
     setIsSavingProject(false);
-    setMenuPanel("root");
+    setMenuPanel("main");
   }, []);
 
   const handleUnauthorizedState = useCallback(() => {
@@ -1789,7 +1789,7 @@ export default function CategoryWorkspace() {
         setLinkSelectionPreview("");
         setChecklistEditor(null);
         setChecklistTagSearchQuery("");
-        setMenuPanel("root");
+        setMenuPanel("main");
       }
     }
 
@@ -2251,26 +2251,31 @@ export default function CategoryWorkspace() {
 
   function closeMenu() {
     setShowMenu(false);
-    setMenuPanel("root");
+    setMenuPanel("main");
   }
 
-  function toggleMenu() {
-    setShowMenu((prev) => {
-      const next = !prev;
-      if (next) {
-        setMenuPanel("root");
-      }
-      return next;
-    });
-  }
-
-  function openMenuPanel(panel: Exclude<MenuPanel, "root">) {
+  function openMenuPanel(panel: Exclude<MenuPanel, "main">) {
     setMenuPanel(panel);
     pushNotice(
       panel === "account"
         ? "Открыт раздел «Аккаунт»."
         : "Открыт раздел «Настройки»."
     );
+  }
+
+  function goToEntryMenu() {
+    closeMenu();
+    window.location.assign("/");
+  }
+
+  function toggleMenu() {
+    setShowMenu((prev) => {
+      const next = !prev;
+      if (next) {
+        setMenuPanel("main");
+      }
+      return next;
+    });
   }
 
   function selectCurrentCategoryAsTarget() {
@@ -6435,7 +6440,7 @@ export default function CategoryWorkspace() {
                 аккаунт: {accountEmailLabel}
               </p>
 
-              {menuPanel === "root" ? (
+              {menuPanel === "main" ? (
                 <div className="menu-scroll mt-4 flex flex-1 flex-col gap-3 overflow-y-auto pr-1">
                   <button
                     type="button"
@@ -6451,6 +6456,14 @@ export default function CategoryWorkspace() {
                     onClick={() => openMenuPanel("settings")}
                   >
                     Настройки
+                  </button>
+
+                  <button
+                    type="button"
+                    className="menu-action px-4 py-3 text-left text-lg font-semibold"
+                    onClick={goToEntryMenu}
+                  >
+                    Главное меню
                   </button>
 
                   <div className="mt-auto">
@@ -6469,7 +6482,7 @@ export default function CategoryWorkspace() {
                   <button
                     type="button"
                     className="mini-action self-start"
-                    onClick={() => setMenuPanel("root")}
+                    onClick={() => setMenuPanel("main")}
                   >
                     &lt; назад
                   </button>
@@ -6543,7 +6556,15 @@ export default function CategoryWorkspace() {
                     </button>
                   </div>
 
-                  <div className="mt-auto pt-2">
+                  <div className="mt-auto flex flex-col gap-2 pt-2">
+                    <button
+                      type="button"
+                      className="menu-action w-full px-4 py-3 text-left text-base font-semibold"
+                      onClick={goToEntryMenu}
+                      disabled={isAuthBusy}
+                    >
+                      Главное меню
+                    </button>
                     <button
                       type="button"
                       className="danger-action w-full px-4 py-3 text-left text-base font-semibold"
@@ -6559,7 +6580,7 @@ export default function CategoryWorkspace() {
                   <button
                     type="button"
                     className="mini-action self-start"
-                    onClick={() => setMenuPanel("root")}
+                    onClick={() => setMenuPanel("main")}
                   >
                     &lt; назад
                   </button>
@@ -6639,7 +6660,15 @@ export default function CategoryWorkspace() {
                     </p>
                   )}
 
-                  <div className="mt-auto pt-2">
+                  <div className="mt-auto flex flex-col gap-2 pt-2">
+                    <button
+                      type="button"
+                      className="menu-action w-full px-4 py-3 text-left text-base font-semibold"
+                      onClick={goToEntryMenu}
+                      disabled={isAuthBusy}
+                    >
+                      Главное меню
+                    </button>
                     <button
                       type="button"
                       className="danger-action w-full px-4 py-3 text-left text-base font-semibold"

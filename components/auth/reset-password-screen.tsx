@@ -118,7 +118,10 @@ export default function ResetPasswordScreen({ token }: ResetPasswordScreenProps)
                 >
                   сохранить пароль
                 </button>
-                <Link href="/" className="mini-action inline-flex items-center justify-center">
+                <Link
+                  href="/crate"
+                  className="mini-action inline-flex items-center justify-center"
+                >
                   в workspace
                 </Link>
               </div>

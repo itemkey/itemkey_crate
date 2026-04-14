@@ -89,7 +89,10 @@ export default function VerifyEmailScreen({ token }: VerifyEmailScreenProps) {
           )}
 
           <div className="mt-4 flex flex-wrap items-center gap-2">
-            <Link href="/" className="mini-action inline-flex items-center justify-center">
+            <Link
+              href="/crate"
+              className="mini-action inline-flex items-center justify-center"
+            >
               в workspace
             </Link>
             <Link

@@ -96,7 +96,10 @@ export default function ForgotPasswordPage() {
             >
               отправить ссылку
             </button>
-            <Link href="/" className="mini-action inline-flex items-center justify-center">
+            <Link
+              href="/crate"
+              className="mini-action inline-flex items-center justify-center"
+            >
               назад к входу
             </Link>
           </div>
