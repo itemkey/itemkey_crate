@@ -9,12 +9,19 @@ export default function Home() {
             IK_Creativity
           </h1>
 
-          <div className="entry-actions mt-6">
+          <div className="entry-actions mt-6 flex-col items-center gap-3">
             <Link
               href="/crate"
               className="mini-action entry-button inline-flex items-center justify-center"
             >
-              crate
+              Crate
+            </Link>
+
+            <Link
+              href="/media-converter"
+              className="mini-action entry-button inline-flex items-center justify-center"
+            >
+              Media Converter
             </Link>
           </div>
         </div>
