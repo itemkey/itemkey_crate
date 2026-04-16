@@ -2,6 +2,7 @@
 
 import {
   type ChangeEvent,
+  type DragEvent,
   type FormEvent,
   type FocusEvent,
   useCallback,
@@ -186,11 +187,15 @@ type SearchResult = {
   preview: string;
 };
 
+type ChecklistItemOrderMode = "auto" | "custom";
+
 type ChecklistBlock = {
   id: string;
   title: string;
   tags: string[];
   checkedCategoryIds: string[];
+  orderMode: ChecklistItemOrderMode;
+  customOrderCategoryIds: string[];
 };
 
 type ContinuousContentModel = {
@@ -201,6 +206,8 @@ type ContinuousContentModel = {
 type MessageChecklistPayload = {
   tags: string[];
   checkedCategoryIds: string[];
+  orderMode: ChecklistItemOrderMode;
+  customOrderCategoryIds: string[];
 };
 
 type ChecklistEditorSource = "continuous" | "block-message";
@@ -212,6 +219,8 @@ type ChecklistEditorState = {
   checklistId: string | null;
   titleDraft: string;
   tagSelection: string[];
+  orderMode: ChecklistItemOrderMode;
+  customOrderCategoryIds: string[];
 };
 
 type ChecklistParticipationEntry = {
@@ -228,6 +237,17 @@ type ChecklistParticipationEntry = {
 type ChecklistCategoryOption = {
   categoryId: string;
   label: string;
+  createdAt: string;
+  position: number;
+};
+
+type ChecklistDragItem = {
+  source: ChecklistEditorSource;
+  sourceCategoryId: string;
+  sourceMessageId: string | null;
+  checklistId: string;
+  categoryId: string;
+  checked: boolean;
 };
 
 type CategoryFormState = {
@@ -252,6 +272,37 @@ type SavedRichSelection = {
   range: Range;
 };
 
+type RichImageSelection = {
+  scope: RichEditorScope;
+  imageId: string;
+};
+
+type DraggedRichImage = {
+  scope: RichEditorScope;
+  imageId: string;
+};
+
+type RichImageResizeEdge = "left" | "right" | "top" | "bottom";
+
+type RichImageResizeState = {
+  pointerId: number;
+  scope: RichEditorScope;
+  imageId: string;
+  edge: RichImageResizeEdge;
+  startX: number;
+  startY: number;
+  startWidth: number;
+  editor: HTMLDivElement;
+  figure: HTMLElement;
+};
+
+type RichImageOverlayRect = {
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+};
+
 type ConfirmDialogTone = "neutral" | "danger";
 
 type ConfirmDialogState = {
@@ -274,6 +325,10 @@ const DEFAULT_CATEGORY_FORM: CategoryFormState = {
 };
 
 const DEFAULT_TEXT_COLOR = "#1a1a1a";
+const DEFAULT_EDITOR_TEXT_SCALE_PERCENT = 100;
+const MIN_EDITOR_TEXT_SCALE_PERCENT = 70;
+const MAX_EDITOR_TEXT_SCALE_PERCENT = 180;
+const EDITOR_TEXT_SCALE_STEP_PERCENT = 10;
 
 const TEXT_COLOR_PRESETS = [
   "#1a1a1a",
@@ -284,6 +339,20 @@ const TEXT_COLOR_PRESETS = [
   "#6f2c8f",
   "#ffffff",
 ];
+
+const RICH_IMAGE_CLASS_NAME = "rich-image-block";
+const RICH_IMAGE_SELECTED_CLASS_NAME = "rich-image-selected";
+const RICH_IMAGE_DELETE_CONFIRM_CLASS_NAME = "rich-image-delete-confirm";
+const RICH_IMAGE_DELETE_ROW_CLASS_NAME = "rich-image-delete-row";
+const RICH_IMAGE_DELETE_LINE_CLASS_NAME = "rich-image-delete-line";
+const RICH_IMAGE_DELETE_LINE_ACTIVE_CLASS_NAME = "rich-image-delete-line-active";
+const RICH_IMAGE_DRAGGING_CLASS_NAME = "rich-image-dragging";
+const RICH_IMAGE_RESIZING_CLASS_NAME = "rich-image-resizing";
+const DEFAULT_RICH_IMAGE_WIDTH = 320;
+const MIN_RICH_IMAGE_WIDTH = 92;
+const MAX_RICH_IMAGE_WIDTH = 1400;
+const MAX_RICH_IMAGE_FILE_BYTES = 8 * 1024 * 1024;
+const RICH_IMAGE_EDGE_HIT_SIZE = 12;
 
 export default function CategoryWorkspace() {
   const [categories, setCategories] = useState<CategoryRow[]>([]);
@@ -296,6 +365,9 @@ export default function CategoryWorkspace() {
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
   const [dragMessageId, setDragMessageId] = useState<string | null>(null);
+  const [dragChecklistItem, setDragChecklistItem] = useState<ChecklistDragItem | null>(
+    null
+  );
   const [categoryForm, setCategoryForm] =
     useState<CategoryFormState>(DEFAULT_CATEGORY_FORM);
   const [messageTitleDraft, setMessageTitleDraft] = useState("");
@@ -307,6 +379,9 @@ export default function CategoryWorkspace() {
   const [continuousDraft, setContinuousDraft] = useState("");
   const [continuousChecklists, setContinuousChecklists] = useState<ChecklistBlock[]>(
     []
+  );
+  const [editorTextScalePercent, setEditorTextScalePercent] = useState(
+    DEFAULT_EDITOR_TEXT_SCALE_PERCENT
   );
   const [loadError, setLoadError] = useState<string | null>(null);
   const [showSearch, setShowSearch] = useState(false);
@@ -338,6 +413,14 @@ export default function CategoryWorkspace() {
   const [showTextColorPalette, setShowTextColorPalette] = useState(false);
   const [showLinkPlaceholderModal, setShowLinkPlaceholderModal] = useState(false);
   const [linkSelectionPreview, setLinkSelectionPreview] = useState("");
+  const [selectedRichImage, setSelectedRichImage] =
+    useState<RichImageSelection | null>(null);
+  const [activeRichImageDeleteLine, setActiveRichImageDeleteLine] =
+    useState<RichImageSelection | null>(null);
+  const [richImageDeleteConfirm, setRichImageDeleteConfirm] =
+    useState<RichImageSelection | null>(null);
+  const [richImageDeleteConfirmRect, setRichImageDeleteConfirmRect] =
+    useState<RichImageOverlayRect | null>(null);
   const [projectSettingsTagDraft, setProjectSettingsTagDraft] = useState("");
   const [categoryMoveParentDraft, setCategoryMoveParentDraft] = useState("");
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -392,10 +475,34 @@ export default function CategoryWorkspace() {
   const [isSavingProject, setIsSavingProject] = useState(false);
 
   const importFileRef = useRef<HTMLInputElement | null>(null);
+  const richImageFileRef = useRef<HTMLInputElement | null>(null);
   const categoryTagInputRef = useRef<HTMLInputElement | null>(null);
   const continuousEditorRef = useRef<HTMLDivElement | null>(null);
   const blockEditorRefsRef = useRef<Record<string, HTMLDivElement | null>>({});
   const savedRichSelectionRef = useRef<SavedRichSelection | null>(null);
+  const draggedRichImageRef = useRef<DraggedRichImage | null>(null);
+  const richImageResizeStateRef = useRef<RichImageResizeState | null>(null);
+  const ensureRichImageDeleteLinesRef = useRef<(editor: HTMLDivElement) => void>(() => {
+    return;
+  });
+  const deleteRichImageBySelectionRef = useRef<
+    (selection: RichImageSelection) => boolean
+  >(() => {
+    return false;
+  });
+  const applyEditorDomValueRef = useRef<
+    (scope: RichEditorScope, editor: HTMLDivElement) => void
+  >(() => {
+    return;
+  });
+  const rememberRichSelectionRef = useRef<(scope: RichEditorScope) => void>(() => {
+    return;
+  });
+  const syncRichToolbarStateRef = useRef<
+    (scope: RichEditorScope | null | undefined) => void
+  >(() => {
+    return;
+  });
   const textColorButtonRef = useRef<HTMLButtonElement | null>(null);
   const textColorPaletteRef = useRef<HTMLDivElement | null>(null);
   const csrfTokenRef = useRef<string | null>(null);
@@ -531,6 +638,22 @@ export default function CategoryWorkspace() {
       !isLoading &&
       !loadError &&
       (currentCategory.format === "continuous" || hasEditableBlockMessages)
+  );
+  const canAdjustEditorTextScale = Boolean(
+    currentCategory &&
+      !isLoading &&
+      !loadError &&
+      (currentCategory.format === "continuous" || hasEditableBlockMessages)
+  );
+  const canDecreaseEditorTextScale =
+    canAdjustEditorTextScale && editorTextScalePercent > MIN_EDITOR_TEXT_SCALE_PERCENT;
+  const canIncreaseEditorTextScale =
+    canAdjustEditorTextScale && editorTextScalePercent < MAX_EDITOR_TEXT_SCALE_PERCENT;
+  const editorTextScaleStyle = useMemo(
+    () => ({
+      fontSize: `${editorTextScalePercent}%`,
+    }),
+    [editorTextScalePercent]
   );
 
   const sidebarFillerCount = Math.max(0, 8 - childCategories.length);
@@ -806,11 +929,11 @@ export default function CategoryWorkspace() {
       const checkedKeySet = new Set(
         checklist.checkedCategoryIds.map((id) => id.toLocaleLowerCase())
       );
-      const items = collectChecklistCategoryOptions(categories, checklist.tags).map(
-        (option) => ({
-          ...option,
-          checked: checkedKeySet.has(option.categoryId.toLocaleLowerCase()),
-        })
+      const items = buildChecklistDisplayItems(
+        collectChecklistCategoryOptions(categories, checklist.tags),
+        checkedKeySet,
+        checklist.orderMode,
+        checklist.customOrderCategoryIds
       );
 
       return {
@@ -842,11 +965,11 @@ export default function CategoryWorkspace() {
       const checkedKeySet = new Set(
         payload.checkedCategoryIds.map((id) => id.toLocaleLowerCase())
       );
-      const items = collectChecklistCategoryOptions(categories, payload.tags).map(
-        (option) => ({
-          ...option,
-          checked: checkedKeySet.has(option.categoryId.toLocaleLowerCase()),
-        })
+      const items = buildChecklistDisplayItems(
+        collectChecklistCategoryOptions(categories, payload.tags),
+        checkedKeySet,
+        payload.orderMode,
+        payload.customOrderCategoryIds
       );
 
       map.set(message.id, {
@@ -1107,6 +1230,8 @@ export default function CategoryWorkspace() {
     pendingMessageSelectionRef.current = null;
     syncedContinuousCategoryIdRef.current = null;
     savedRichSelectionRef.current = null;
+    draggedRichImageRef.current = null;
+    richImageResizeStateRef.current = null;
     blockEditorRefsRef.current = {};
 
     if (confirmResolverRef.current) {
@@ -1121,6 +1246,7 @@ export default function CategoryWorkspace() {
     setInsertionTargetId(null);
     setActiveProjectId(null);
     setSelectedMessageId(null);
+    setDragChecklistItem(null);
     setShowSearch(false);
     setShowMenu(false);
     setShowCategoryTagLibrary(false);
@@ -1147,6 +1273,7 @@ export default function CategoryWorkspace() {
     setShowTextColorPalette(false);
     setShowLinkPlaceholderModal(false);
     setLinkSelectionPreview("");
+    setSelectedRichImage(null);
     setChecklistEditor(null);
     setChecklistTagSearchQuery("");
     setSource("unknown");
@@ -1357,11 +1484,15 @@ export default function CategoryWorkspace() {
       messageAckVersionRef.current = {};
       pendingMessageSelectionRef.current = null;
       syncedContinuousCategoryIdRef.current = null;
+      draggedRichImageRef.current = null;
+      richImageResizeStateRef.current = null;
+      savedRichSelectionRef.current = null;
 
       setCategories(rows);
       setCurrentCategoryId(initialId);
       setInsertionTargetId(initialId);
       setSelectedMessageId(null);
+      setSelectedRichImage(null);
       setSource(payload.source ?? "unknown");
       setMessagesByCategory({});
 
@@ -1726,6 +1857,298 @@ export default function CategoryWorkspace() {
   }, [showTextColorPalette]);
 
   useEffect(() => {
+    if (!selectedRichImage) {
+      setActiveRichImageDeleteLine(null);
+    }
+  }, [selectedRichImage]);
+
+  useEffect(() => {
+    const editors: HTMLDivElement[] = [];
+    if (continuousEditorRef.current) {
+      editors.push(continuousEditorRef.current);
+    }
+    for (const editor of Object.values(blockEditorRefsRef.current)) {
+      if (editor) {
+        editors.push(editor);
+      }
+    }
+
+    for (const editor of editors) {
+      ensureRichImageDeleteLinesRef.current(editor);
+
+      for (const node of Array.from(
+        editor.querySelectorAll<HTMLElement>(
+          [
+            `.${RICH_IMAGE_CLASS_NAME}.${RICH_IMAGE_SELECTED_CLASS_NAME}`,
+            `.${RICH_IMAGE_CLASS_NAME}.${RICH_IMAGE_DELETE_CONFIRM_CLASS_NAME}`,
+            `.${RICH_IMAGE_DELETE_LINE_CLASS_NAME}.${RICH_IMAGE_DELETE_LINE_ACTIVE_CLASS_NAME}`,
+          ].join(",")
+        )
+      )) {
+        node.classList.remove(RICH_IMAGE_SELECTED_CLASS_NAME);
+        node.classList.remove(RICH_IMAGE_DELETE_CONFIRM_CLASS_NAME);
+        node.classList.remove(RICH_IMAGE_DELETE_LINE_ACTIVE_CLASS_NAME);
+      }
+    }
+
+    if (selectedRichImage) {
+      const editor = getEditorElement(selectedRichImage.scope);
+      if (!editor) {
+        setSelectedRichImage(null);
+      } else {
+        const imageNode = getRichImageElementById(editor, selectedRichImage.imageId);
+        if (!imageNode) {
+          setSelectedRichImage(null);
+        } else {
+          imageNode.classList.add(RICH_IMAGE_SELECTED_CLASS_NAME);
+        }
+      }
+    }
+
+    if (activeRichImageDeleteLine) {
+      const deleteLineEditor = getEditorElement(activeRichImageDeleteLine.scope);
+      if (!deleteLineEditor) {
+        setActiveRichImageDeleteLine(null);
+      } else {
+        const deleteLineNode = getRichImageDeleteLineElementById(
+          deleteLineEditor,
+          activeRichImageDeleteLine.imageId
+        );
+        if (!deleteLineNode) {
+          setActiveRichImageDeleteLine(null);
+        } else {
+          deleteLineNode.classList.add(RICH_IMAGE_DELETE_LINE_ACTIVE_CLASS_NAME);
+        }
+      }
+    }
+
+    if (!richImageDeleteConfirm) {
+      return;
+    }
+
+    const confirmEditor = getEditorElement(richImageDeleteConfirm.scope);
+    if (!confirmEditor) {
+      setRichImageDeleteConfirm(null);
+      setRichImageDeleteConfirmRect(null);
+      return;
+    }
+
+    const confirmImageNode = getRichImageElementById(
+      confirmEditor,
+      richImageDeleteConfirm.imageId
+    );
+    if (!confirmImageNode) {
+      setRichImageDeleteConfirm(null);
+      setRichImageDeleteConfirmRect(null);
+      return;
+    }
+
+    confirmImageNode.classList.add(RICH_IMAGE_DELETE_CONFIRM_CLASS_NAME);
+  }, [
+    selectedRichImage,
+    activeRichImageDeleteLine,
+    richImageDeleteConfirm,
+    currentCategory?.id,
+    currentCategory?.format,
+    currentMessages,
+  ]);
+
+  useEffect(() => {
+    if (!richImageDeleteConfirm) {
+      return;
+    }
+
+    const isSameSelection = (() => {
+      if (!selectedRichImage || selectedRichImage.imageId !== richImageDeleteConfirm.imageId) {
+        return false;
+      }
+
+      if (selectedRichImage.scope.kind !== richImageDeleteConfirm.scope.kind) {
+        return false;
+      }
+
+      if (selectedRichImage.scope.kind === "continuous") {
+        return true;
+      }
+
+      if (richImageDeleteConfirm.scope.kind !== "block") {
+        return false;
+      }
+
+      return selectedRichImage.scope.messageId === richImageDeleteConfirm.scope.messageId;
+    })();
+
+    if (!isSameSelection) {
+      setRichImageDeleteConfirm(null);
+      setRichImageDeleteConfirmRect(null);
+      return;
+    }
+
+    let animationFrameId = 0;
+    const updateOverlayRect = () => {
+      const editor =
+        richImageDeleteConfirm.scope.kind === "continuous"
+          ? continuousEditorRef.current
+          : blockEditorRefsRef.current[richImageDeleteConfirm.scope.messageId] ?? null;
+      if (!editor) {
+        setRichImageDeleteConfirm(null);
+        setRichImageDeleteConfirmRect(null);
+        return;
+      }
+
+      const imageNode =
+        Array.from(editor.querySelectorAll<HTMLElement>(`.${RICH_IMAGE_CLASS_NAME}`)).find(
+          (node) =>
+            node.getAttribute("data-rich-image-id") === richImageDeleteConfirm.imageId
+        ) ?? null;
+      if (!imageNode) {
+        setRichImageDeleteConfirm(null);
+        setRichImageDeleteConfirmRect(null);
+        return;
+      }
+
+      const rect = imageNode.getBoundingClientRect();
+      if (rect.width < 1 || rect.height < 1) {
+        setRichImageDeleteConfirmRect(null);
+        return;
+      }
+
+      const nextRect: RichImageOverlayRect = {
+        top: rect.top,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height,
+      };
+
+      setRichImageDeleteConfirmRect((previousRect) => {
+        if (
+          previousRect &&
+          Math.abs(previousRect.top - nextRect.top) < 0.5 &&
+          Math.abs(previousRect.left - nextRect.left) < 0.5 &&
+          Math.abs(previousRect.width - nextRect.width) < 0.5 &&
+          Math.abs(previousRect.height - nextRect.height) < 0.5
+        ) {
+          return previousRect;
+        }
+
+        return nextRect;
+      });
+    };
+
+    updateOverlayRect();
+    animationFrameId = window.requestAnimationFrame(updateOverlayRect);
+    window.addEventListener("resize", updateOverlayRect);
+    window.addEventListener("scroll", updateOverlayRect, true);
+
+    return () => {
+      window.cancelAnimationFrame(animationFrameId);
+      window.removeEventListener("resize", updateOverlayRect);
+      window.removeEventListener("scroll", updateOverlayRect, true);
+    };
+  }, [richImageDeleteConfirm, selectedRichImage]);
+
+  useEffect(() => {
+    function handleImageDelete(event: KeyboardEvent) {
+      const target = event.target;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement
+      ) {
+        return;
+      }
+
+      if (richImageDeleteConfirm) {
+        if (event.key === "Enter") {
+          event.preventDefault();
+
+          deleteRichImageBySelectionRef.current(richImageDeleteConfirm);
+          return;
+        }
+
+        if (event.key === "Delete" || event.key === "Backspace") {
+          event.preventDefault();
+        }
+      }
+    }
+
+    window.addEventListener("keydown", handleImageDelete);
+    return () => {
+      window.removeEventListener("keydown", handleImageDelete);
+    };
+  }, [richImageDeleteConfirm]);
+
+  useEffect(() => {
+    function finalizeRichImageResize(pointerId?: number) {
+      const resizeState = richImageResizeStateRef.current;
+      if (!resizeState) {
+        return;
+      }
+
+      if (typeof pointerId === "number" && resizeState.pointerId !== pointerId) {
+        return;
+      }
+
+      try {
+        if (resizeState.figure.hasPointerCapture(resizeState.pointerId)) {
+          resizeState.figure.releasePointerCapture(resizeState.pointerId);
+        }
+      } catch {
+        // ignore capture errors
+      }
+
+      resizeState.figure.classList.remove(RICH_IMAGE_RESIZING_CLASS_NAME);
+      richImageResizeStateRef.current = null;
+      applyEditorDomValueRef.current(resizeState.scope, resizeState.editor);
+      rememberRichSelectionRef.current(resizeState.scope);
+      syncRichToolbarStateRef.current(resizeState.scope);
+    }
+
+    function handlePointerMove(event: PointerEvent) {
+      const resizeState = richImageResizeStateRef.current;
+      if (!resizeState || resizeState.pointerId !== event.pointerId) {
+        return;
+      }
+
+      event.preventDefault();
+
+      let delta = 0;
+      if (resizeState.edge === "left") {
+        delta = resizeState.startX - event.clientX;
+      } else if (resizeState.edge === "right") {
+        delta = event.clientX - resizeState.startX;
+      } else if (resizeState.edge === "top") {
+        delta = resizeState.startY - event.clientY;
+      } else {
+        delta = event.clientY - resizeState.startY;
+      }
+
+      applyRichImageWidth(
+        resizeState.figure,
+        clampRichImageWidth(resizeState.startWidth + delta)
+      );
+    }
+
+    function handlePointerUp(event: PointerEvent) {
+      finalizeRichImageResize(event.pointerId);
+    }
+
+    function handlePointerCancel(event: PointerEvent) {
+      finalizeRichImageResize(event.pointerId);
+    }
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerCancel);
+
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerCancel);
+    };
+  }, []);
+
+  useEffect(() => {
     if (currentCategory?.format !== "continuous") {
       return;
     }
@@ -1740,11 +2163,13 @@ export default function CategoryWorkspace() {
     }
 
     const nextValue = sanitizeRichTextHtml(continuousDraft);
-    if (sanitizeRichTextHtml(editor.innerHTML) === nextValue) {
-      return;
-    }
+      if (sanitizeRichTextHtml(editor.innerHTML) === nextValue) {
+        ensureRichImageDeleteLinesRef.current(editor);
+        return;
+      }
 
-    editor.innerHTML = nextValue;
+      editor.innerHTML = nextValue;
+      ensureRichImageDeleteLinesRef.current(editor);
   }, [continuousDraft, currentCategory?.format, currentCategory?.id]);
 
   useEffect(() => {
@@ -1764,16 +2189,24 @@ export default function CategoryWorkspace() {
 
       const nextValue = normalizePersistedMessageContent(message.content);
       if (sanitizeRichTextHtml(editor.innerHTML) === nextValue) {
+        ensureRichImageDeleteLinesRef.current(editor);
         continue;
       }
 
       editor.innerHTML = nextValue;
+      ensureRichImageDeleteLinesRef.current(editor);
     }
   }, [currentCategory?.format, currentMessages]);
 
   useEffect(() => {
     function handleEscape(event: KeyboardEvent) {
       if (event.key === "Escape") {
+        if (richImageDeleteConfirm) {
+          event.preventDefault();
+          cancelRichImageDeleteConfirmation();
+          return;
+        }
+
         if (confirmResolverRef.current) {
           confirmResolverRef.current(false);
           confirmResolverRef.current = null;
@@ -1787,6 +2220,7 @@ export default function CategoryWorkspace() {
         setShowTextColorPalette(false);
         setShowLinkPlaceholderModal(false);
         setLinkSelectionPreview("");
+        setSelectedRichImage(null);
         setChecklistEditor(null);
         setChecklistTagSearchQuery("");
         setMenuPanel("main");
@@ -1797,7 +2231,7 @@ export default function CategoryWorkspace() {
     return () => {
       window.removeEventListener("keydown", handleEscape);
     };
-  }, []);
+  }, [richImageDeleteConfirm]);
 
   useEffect(() => {
     return () => {
@@ -1817,6 +2251,12 @@ export default function CategoryWorkspace() {
       for (const timer of Object.values(messageSaveTimersRef.current)) {
         clearTimeout(timer);
       }
+
+      richImageResizeStateRef.current?.figure.classList.remove(
+        RICH_IMAGE_RESIZING_CLASS_NAME
+      );
+      richImageResizeStateRef.current = null;
+      draggedRichImageRef.current = null;
     };
   }, []);
 
@@ -1843,6 +2283,58 @@ export default function CategoryWorkspace() {
     return false;
   }
 
+  function deleteRichImageBySelection(selection: RichImageSelection): boolean {
+    const editor = getEditorElement(selection.scope);
+    if (!editor) {
+      setSelectedRichImage(null);
+      setActiveRichImageDeleteLine(null);
+      setRichImageDeleteConfirm(null);
+      setRichImageDeleteConfirmRect(null);
+      return false;
+    }
+
+    const imageNode = getRichImageElementById(editor, selection.imageId);
+    if (!imageNode) {
+      setSelectedRichImage(null);
+      setActiveRichImageDeleteLine(null);
+      setRichImageDeleteConfirm(null);
+      setRichImageDeleteConfirmRect(null);
+      return false;
+    }
+
+    const imageRow = getRichImageDeleteRowElementByChild(imageNode);
+    const rowTrailingBreak =
+      imageRow?.nextSibling instanceof HTMLBRElement ? imageRow.nextSibling : null;
+    const deleteLine = getRichImageDeleteLineElementById(editor, selection.imageId);
+    const deleteLineBreak =
+      !imageRow && deleteLine?.nextSibling instanceof HTMLBRElement
+        ? deleteLine.nextSibling
+        : null;
+    const legacyTrailingBreak =
+      imageRow || deleteLine || !(imageNode.nextSibling instanceof HTMLBRElement)
+        ? null
+        : imageNode.nextSibling;
+
+    clearActiveRichImageResize();
+    if (imageRow) {
+      imageRow.remove();
+      rowTrailingBreak?.remove();
+    } else {
+      imageNode.remove();
+      deleteLine?.remove();
+      deleteLineBreak?.remove();
+    }
+    legacyTrailingBreak?.remove();
+    setSelectedRichImage(null);
+    setActiveRichImageDeleteLine(null);
+    setRichImageDeleteConfirm(null);
+    setRichImageDeleteConfirmRect(null);
+    applyEditorDomValueRef.current(selection.scope, editor);
+    rememberRichSelectionRef.current(selection.scope);
+    syncRichToolbarStateRef.current(selection.scope);
+    return true;
+  }
+
   function getEditorElement(scope: RichEditorScope): HTMLDivElement | null {
     if (scope.kind === "continuous") {
       return continuousEditorRef.current;
@@ -1858,6 +2350,815 @@ export default function CategoryWorkspace() {
     }
 
     delete blockEditorRefsRef.current[messageId];
+  }
+
+  function getRichImageElementById(
+    editor: HTMLDivElement,
+    imageId: string
+  ): HTMLElement | null {
+    const normalizedId = imageId.trim();
+    if (!normalizedId) {
+      return null;
+    }
+
+    return (
+      Array.from(editor.querySelectorAll<HTMLElement>(`.${RICH_IMAGE_CLASS_NAME}`)).find(
+        (node) => node.getAttribute("data-rich-image-id") === normalizedId
+      ) ?? null
+    );
+  }
+
+  function createRichImageDeleteRowElement(ownerDocument: Document): HTMLElement {
+    const row = ownerDocument.createElement("span");
+    row.className = RICH_IMAGE_DELETE_ROW_CLASS_NAME;
+    row.setAttribute("data-rich-image-delete-row", "true");
+    row.setAttribute("draggable", "false");
+    return row;
+  }
+
+  function normalizeRichImageDeleteRowElement(row: HTMLElement) {
+    row.classList.add(RICH_IMAGE_DELETE_ROW_CLASS_NAME);
+    row.setAttribute("data-rich-image-delete-row", "true");
+    row.setAttribute("draggable", "false");
+  }
+
+  function getRichImageDeleteRowElementByChild(child: Node | null): HTMLElement | null {
+    if (!(child instanceof Node)) {
+      return null;
+    }
+
+    const parent = child.parentElement;
+    if (!parent || !parent.classList.contains(RICH_IMAGE_DELETE_ROW_CLASS_NAME)) {
+      return null;
+    }
+
+    return parent;
+  }
+
+  function createRichImageDeleteRowWithImage(
+    ownerDocument: Document,
+    imageNode: HTMLElement,
+    imageId: string
+  ): HTMLElement {
+    const row = createRichImageDeleteRowElement(ownerDocument);
+    const line = createRichImageDeleteLineElement(ownerDocument, imageId);
+    row.appendChild(imageNode);
+    row.appendChild(line);
+    return row;
+  }
+
+  function createRichImageDeleteLineElement(
+    ownerDocument: Document,
+    imageId: string
+  ): HTMLElement {
+    const line = ownerDocument.createElement("span");
+    line.className = RICH_IMAGE_DELETE_LINE_CLASS_NAME;
+    line.setAttribute("data-rich-image-id", imageId);
+    line.setAttribute("data-rich-image-delete-line", "true");
+    line.setAttribute("contenteditable", "false");
+    line.setAttribute("draggable", "false");
+    line.setAttribute("aria-hidden", "true");
+    return line;
+  }
+
+  function normalizeRichImageDeleteLineElement(line: HTMLElement, imageId: string) {
+    line.classList.add(RICH_IMAGE_DELETE_LINE_CLASS_NAME);
+    line.classList.remove(RICH_IMAGE_DELETE_LINE_ACTIVE_CLASS_NAME);
+    line.setAttribute("data-rich-image-id", imageId);
+    line.setAttribute("data-rich-image-delete-line", "true");
+    line.setAttribute("contenteditable", "false");
+    line.setAttribute("draggable", "false");
+    line.setAttribute("aria-hidden", "true");
+  }
+
+  function getRichImageDeleteLineElementById(
+    editor: HTMLDivElement,
+    imageId: string
+  ): HTMLElement | null {
+    const normalizedId = imageId.trim();
+    if (!normalizedId) {
+      return null;
+    }
+
+    return (
+      Array.from(editor.querySelectorAll<HTMLElement>(`.${RICH_IMAGE_DELETE_LINE_CLASS_NAME}`)).find(
+        (node) => node.getAttribute("data-rich-image-id") === normalizedId
+      ) ?? null
+    );
+  }
+
+  function getRichImageDeleteLineElementFromRow(row: HTMLElement): HTMLElement | null {
+    return row.querySelector<HTMLElement>(`.${RICH_IMAGE_DELETE_LINE_CLASS_NAME}`);
+  }
+
+  function getRichImageDeleteLineElementFromEventTarget(
+    target: EventTarget | null
+  ): HTMLElement | null {
+    if (!(target instanceof Element)) {
+      return null;
+    }
+
+    const line = target.closest<HTMLElement>(`.${RICH_IMAGE_DELETE_LINE_CLASS_NAME}`);
+    if (!line) {
+      return null;
+    }
+
+    return line;
+  }
+
+  function getRichImageElementFromNode(node: Node | null): HTMLElement | null {
+    if (!node) {
+      return null;
+    }
+
+    if (node instanceof HTMLElement && node.classList.contains(RICH_IMAGE_CLASS_NAME)) {
+      return node;
+    }
+
+    if (node instanceof Element) {
+      return node.closest<HTMLElement>(`.${RICH_IMAGE_CLASS_NAME}`);
+    }
+
+    return node.parentElement?.closest<HTMLElement>(`.${RICH_IMAGE_CLASS_NAME}`) ?? null;
+  }
+
+  function getRichImageDeleteLineElementFromNode(node: Node | null): HTMLElement | null {
+    if (!node) {
+      return null;
+    }
+
+    if (
+      node instanceof HTMLElement &&
+      node.classList.contains(RICH_IMAGE_DELETE_LINE_CLASS_NAME)
+    ) {
+      return node;
+    }
+
+    if (node instanceof Element) {
+      return node.closest<HTMLElement>(`.${RICH_IMAGE_DELETE_LINE_CLASS_NAME}`);
+    }
+
+    const parentElement = node.parentElement;
+    if (!parentElement) {
+      return null;
+    }
+
+    return parentElement.closest<HTMLElement>(`.${RICH_IMAGE_DELETE_LINE_CLASS_NAME}`);
+  }
+
+  function getAdjacentNodeForCollapsedRange(
+    editor: HTMLDivElement,
+    node: Node,
+    direction: "before" | "after"
+  ): Node | null {
+    let cursor: Node | null = node;
+    while (cursor && cursor !== editor) {
+      const sibling = direction === "before" ? cursor.previousSibling : cursor.nextSibling;
+      if (sibling) {
+        return sibling;
+      }
+
+      cursor = cursor.parentNode;
+    }
+
+    return null;
+  }
+
+  function getRichImageElementFromSelection(editor: HTMLDivElement): HTMLElement | null {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) {
+      return null;
+    }
+
+    const range = selection.getRangeAt(0);
+    if (!editor.contains(range.startContainer) || !editor.contains(range.endContainer)) {
+      return null;
+    }
+
+    const directMatch = getRichImageElementFromNode(range.startContainer);
+    if (directMatch && editor.contains(directMatch)) {
+      return directMatch;
+    }
+
+    if (!range.collapsed) {
+      return null;
+    }
+
+    let previousNode: Node | null = null;
+    let nextNode: Node | null = null;
+
+    if (range.startContainer instanceof Element) {
+      const container = range.startContainer;
+      previousNode =
+        range.startOffset > 0
+          ? container.childNodes[range.startOffset - 1] ?? null
+          : getAdjacentNodeForCollapsedRange(editor, container, "before");
+      nextNode =
+        container.childNodes[range.startOffset] ??
+        getAdjacentNodeForCollapsedRange(editor, container, "after");
+    } else {
+      const textNode = range.startContainer;
+      const textLength = textNode.textContent?.length ?? 0;
+      if (range.startOffset === 0) {
+        previousNode = getAdjacentNodeForCollapsedRange(editor, textNode, "before");
+      }
+      if (range.startOffset >= textLength) {
+        nextNode = getAdjacentNodeForCollapsedRange(editor, textNode, "after");
+      }
+    }
+
+    const adjacentMatch =
+      getRichImageElementFromNode(previousNode) ?? getRichImageElementFromNode(nextNode);
+    if (adjacentMatch && editor.contains(adjacentMatch)) {
+      return adjacentMatch;
+    }
+
+    return null;
+  }
+
+  function getRichImageDeleteLineElementFromSelection(
+    editor: HTMLDivElement
+  ): HTMLElement | null {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) {
+      return null;
+    }
+
+    const range = selection.getRangeAt(0);
+    if (!editor.contains(range.startContainer) || !editor.contains(range.endContainer)) {
+      return null;
+    }
+
+    const directMatch = getRichImageDeleteLineElementFromNode(range.startContainer);
+    if (directMatch && editor.contains(directMatch)) {
+      return directMatch;
+    }
+
+    if (
+      range.startContainer instanceof HTMLElement &&
+      range.startContainer.classList.contains(RICH_IMAGE_DELETE_ROW_CLASS_NAME)
+    ) {
+      const row = range.startContainer;
+      const lineFromRow = getRichImageDeleteLineElementFromRow(row);
+      if (lineFromRow && editor.contains(lineFromRow)) {
+        const lineIndex = Array.from(row.childNodes).indexOf(lineFromRow);
+        if (range.startOffset < lineIndex) {
+          return null;
+        }
+
+        return lineFromRow;
+      }
+    }
+
+    if (!range.collapsed) {
+      return null;
+    }
+
+    let previousNode: Node | null = null;
+    let nextNode: Node | null = null;
+
+    if (range.startContainer instanceof Element) {
+      const container = range.startContainer;
+      previousNode =
+        range.startOffset > 0
+          ? container.childNodes[range.startOffset - 1] ?? null
+          : getAdjacentNodeForCollapsedRange(editor, container, "before");
+      nextNode =
+        container.childNodes[range.startOffset] ??
+        getAdjacentNodeForCollapsedRange(editor, container, "after");
+    } else {
+      const textNode = range.startContainer;
+      const textLength = textNode.textContent?.length ?? 0;
+      if (range.startOffset === 0) {
+        previousNode = getAdjacentNodeForCollapsedRange(editor, textNode, "before");
+      }
+      if (range.startOffset >= textLength) {
+        nextNode = getAdjacentNodeForCollapsedRange(editor, textNode, "after");
+      }
+    }
+
+    const adjacentMatch =
+      getRichImageDeleteLineElementFromNode(previousNode) ??
+      getRichImageDeleteLineElementFromNode(nextNode);
+    if (adjacentMatch && editor.contains(adjacentMatch)) {
+      return adjacentMatch;
+    }
+
+    if (
+      previousNode instanceof HTMLElement &&
+      previousNode.classList.contains(RICH_IMAGE_DELETE_ROW_CLASS_NAME)
+    ) {
+      const lineFromPreviousRow = getRichImageDeleteLineElementFromRow(previousNode);
+      if (lineFromPreviousRow && editor.contains(lineFromPreviousRow)) {
+        return lineFromPreviousRow;
+      }
+    }
+
+    return null;
+  }
+
+  function getCollapsedSelectionRangeInEditor(editor: HTMLDivElement): Range | null {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) {
+      return null;
+    }
+
+    const range = selection.getRangeAt(0);
+    if (
+      !range.collapsed ||
+      !editor.contains(range.startContainer) ||
+      !editor.contains(range.endContainer)
+    ) {
+      return null;
+    }
+
+    return range;
+  }
+
+  function getRichImageDeleteLineTargetFromLineBelowCaret(
+    editor: HTMLDivElement
+  ): {
+    row: HTMLElement;
+    line: HTMLElement;
+    breakNode: HTMLBRElement;
+    imageId: string;
+  } | null {
+    const range = getCollapsedSelectionRangeInEditor(editor);
+    if (!range) {
+      return null;
+    }
+
+    let previousNode: Node | null = null;
+    let nextNode: Node | null = null;
+    if (range.startContainer instanceof Element) {
+      const container = range.startContainer;
+      previousNode =
+        range.startOffset > 0
+          ? container.childNodes[range.startOffset - 1] ?? null
+          : getAdjacentNodeForCollapsedRange(editor, container, "before");
+      nextNode =
+        container.childNodes[range.startOffset] ??
+        getAdjacentNodeForCollapsedRange(editor, container, "after");
+    } else {
+      if (range.startOffset !== 0) {
+        return null;
+      }
+
+      previousNode = getAdjacentNodeForCollapsedRange(editor, range.startContainer, "before");
+      nextNode = range.startContainer;
+    }
+
+    if (!(previousNode instanceof HTMLBRElement)) {
+      return null;
+    }
+
+    if (nextNode && !(nextNode instanceof HTMLBRElement)) {
+      return null;
+    }
+
+    const row =
+      previousNode.previousSibling instanceof HTMLElement &&
+      previousNode.previousSibling.classList.contains(RICH_IMAGE_DELETE_ROW_CLASS_NAME)
+        ? previousNode.previousSibling
+        : null;
+    if (!row) {
+      return null;
+    }
+
+    const line = getRichImageDeleteLineElementFromRow(row);
+    if (!line) {
+      return null;
+    }
+
+    const imageId = line.getAttribute("data-rich-image-id")?.trim() ?? "";
+    if (!imageId) {
+      return null;
+    }
+
+    return {
+      row,
+      line,
+      breakNode: previousNode,
+      imageId,
+    };
+  }
+
+  function placeCaretOnRichImageDeleteLine(line: HTMLElement) {
+    const selection = window.getSelection();
+    if (!selection) {
+      return;
+    }
+
+    const range = document.createRange();
+    range.setStartBefore(line);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  function placeCaretOnLineBelowRichImageRow(row: HTMLElement) {
+    const selection = window.getSelection();
+    if (!selection) {
+      return;
+    }
+
+    const range = document.createRange();
+    const rowTrailingBreak =
+      row.nextSibling instanceof HTMLBRElement ? row.nextSibling : null;
+    if (rowTrailingBreak) {
+      range.setStartAfter(rowTrailingBreak);
+    } else {
+      range.setStartAfter(row);
+    }
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  function focusRichImageDeleteLineInScope(
+    scope: RichEditorScope,
+    line: HTMLElement
+  ): RichImageSelection | null {
+    const imageId = line.getAttribute("data-rich-image-id")?.trim() ?? "";
+    if (!imageId) {
+      setSelectedRichImage(null);
+      setActiveRichImageDeleteLine(null);
+      return null;
+    }
+
+    const lineSelection: RichImageSelection = {
+      scope,
+      imageId,
+    };
+    placeCaretOnRichImageDeleteLine(line);
+    setSelectedRichImageInScope(scope, imageId);
+    setActiveRichImageDeleteLine(lineSelection);
+    return lineSelection;
+  }
+
+  function ensureRichImageDeleteLines(editor: HTMLDivElement) {
+    const figures = Array.from(editor.querySelectorAll<HTMLElement>(`.${RICH_IMAGE_CLASS_NAME}`));
+    const expectedLines = new Set<HTMLElement>();
+    const expectedRows = new Set<HTMLElement>();
+
+    for (const figure of figures) {
+      const imageId = figure.getAttribute("data-rich-image-id")?.trim() ?? "";
+      if (!imageId) {
+        continue;
+      }
+
+      let row = getRichImageDeleteRowElementByChild(figure);
+      if (!row) {
+        row = createRichImageDeleteRowElement(editor.ownerDocument);
+        figure.insertAdjacentElement("beforebegin", row);
+      } else {
+        normalizeRichImageDeleteRowElement(row);
+      }
+
+      if (!row.contains(figure)) {
+        row.appendChild(figure);
+      }
+
+      let line: HTMLElement | null =
+        Array.from(row.children).find(
+          (child): child is HTMLElement =>
+            child instanceof HTMLElement &&
+            child.classList.contains(RICH_IMAGE_DELETE_LINE_CLASS_NAME) &&
+            child.getAttribute("data-rich-image-id")?.trim() === imageId
+        ) ?? null;
+
+      if (!(line instanceof HTMLElement)) {
+        line =
+          Array.from(row.children).find(
+            (child): child is HTMLElement =>
+              child instanceof HTMLElement &&
+              child.classList.contains(RICH_IMAGE_DELETE_LINE_CLASS_NAME)
+          ) ?? null;
+      }
+
+      if (!line || !(line instanceof HTMLElement)) {
+        line = createRichImageDeleteLineElement(editor.ownerDocument, imageId);
+      }
+
+      normalizeRichImageDeleteLineElement(line, imageId);
+
+      if (row.firstElementChild !== figure) {
+        row.insertAdjacentElement("afterbegin", figure);
+      }
+
+      if (line.parentElement !== row || figure.nextElementSibling !== line) {
+        row.appendChild(line);
+      }
+
+      for (const child of Array.from(row.children)) {
+        if (child !== figure && child !== line) {
+          child.remove();
+        }
+      }
+
+      for (const childNode of Array.from(row.childNodes)) {
+        if (childNode !== figure && childNode !== line && childNode.nodeType === Node.TEXT_NODE) {
+          childNode.remove();
+        }
+      }
+
+      expectedRows.add(row);
+      expectedLines.add(line);
+
+      if (!(row.nextSibling instanceof HTMLBRElement)) {
+        row.insertAdjacentElement("afterend", editor.ownerDocument.createElement("br"));
+      }
+    }
+
+    for (const line of Array.from(
+      editor.querySelectorAll<HTMLElement>(`.${RICH_IMAGE_DELETE_LINE_CLASS_NAME}`)
+    )) {
+      if (expectedLines.has(line)) {
+        continue;
+      }
+
+      const previousSibling = line.previousSibling;
+      const nextBreak = line.nextSibling instanceof HTMLBRElement ? line.nextSibling : null;
+      line.remove();
+      if (
+        nextBreak &&
+        (previousSibling === null ||
+          previousSibling instanceof HTMLBRElement ||
+          (previousSibling instanceof HTMLElement &&
+            (previousSibling.classList.contains(RICH_IMAGE_CLASS_NAME) ||
+              previousSibling.classList.contains(RICH_IMAGE_DELETE_ROW_CLASS_NAME))))
+      ) {
+        nextBreak.remove();
+      }
+    }
+
+    for (const row of Array.from(
+      editor.querySelectorAll<HTMLElement>(`.${RICH_IMAGE_DELETE_ROW_CLASS_NAME}`)
+    )) {
+      if (expectedRows.has(row)) {
+        continue;
+      }
+
+      const hasImage = row.querySelector(`.${RICH_IMAGE_CLASS_NAME}`);
+      if (hasImage && row.parentNode) {
+        while (row.firstChild) {
+          row.parentNode.insertBefore(row.firstChild, row);
+        }
+        row.remove();
+        continue;
+      }
+
+      const nextBreak = row.nextSibling instanceof HTMLBRElement ? row.nextSibling : null;
+      row.remove();
+      nextBreak?.remove();
+    }
+  }
+
+  function getRichImageElementFromEventTarget(
+    target: EventTarget | null
+  ): HTMLElement | null {
+    if (!(target instanceof Element)) {
+      return null;
+    }
+
+    const figure = target.closest<HTMLElement>(`.${RICH_IMAGE_CLASS_NAME}`);
+    if (!figure) {
+      return null;
+    }
+
+    return figure;
+  }
+
+  function detectRichImageResizeEdge(
+    imageNode: HTMLElement,
+    clientX: number,
+    clientY: number
+  ): RichImageResizeEdge | null {
+    const rect = imageNode.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      return null;
+    }
+
+    const hit = Math.min(
+      RICH_IMAGE_EDGE_HIT_SIZE,
+      Math.floor(rect.width / 3),
+      Math.floor(rect.height / 3)
+    );
+
+    if (hit < 4) {
+      return null;
+    }
+
+    const leftDistance = Math.abs(clientX - rect.left);
+    const rightDistance = Math.abs(rect.right - clientX);
+    const topDistance = Math.abs(clientY - rect.top);
+    const bottomDistance = Math.abs(rect.bottom - clientY);
+
+    const candidates = [
+      { edge: "left" as RichImageResizeEdge, distance: leftDistance },
+      { edge: "right" as RichImageResizeEdge, distance: rightDistance },
+      { edge: "top" as RichImageResizeEdge, distance: topDistance },
+      { edge: "bottom" as RichImageResizeEdge, distance: bottomDistance },
+    ].filter((entry) => entry.distance <= hit);
+
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    candidates.sort((left, right) => left.distance - right.distance);
+    return candidates[0]?.edge ?? null;
+  }
+
+  function setSelectedRichImageInScope(scope: RichEditorScope, imageId: string) {
+    setActiveRichEditor(scope);
+    setSelectedRichImage({
+      scope,
+      imageId,
+    });
+  }
+
+  function getRangeFromPointInEditor(
+    editor: HTMLDivElement,
+    clientX: number,
+    clientY: number
+  ): Range | null {
+    const documentWithCaret = document as Document & {
+      caretRangeFromPoint?: (x: number, y: number) => Range | null;
+      caretPositionFromPoint?: (
+        x: number,
+        y: number
+      ) => { offsetNode: Node; offset: number } | null;
+    };
+
+    const directRange = documentWithCaret.caretRangeFromPoint?.(clientX, clientY);
+    if (directRange) {
+      if (
+        editor.contains(directRange.startContainer) &&
+        editor.contains(directRange.endContainer)
+      ) {
+        return directRange;
+      }
+
+      return null;
+    }
+
+    const position = documentWithCaret.caretPositionFromPoint?.(clientX, clientY);
+    if (!position || !editor.contains(position.offsetNode)) {
+      return null;
+    }
+
+    const range = document.createRange();
+    range.setStart(position.offsetNode, position.offset);
+    range.collapse(true);
+    return range;
+  }
+
+  function placeCaretAtEditorPoint(
+    editor: HTMLDivElement,
+    clientX: number,
+    clientY: number
+  ) {
+    const pointRange = getRangeFromPointInEditor(editor, clientX, clientY);
+    const selection = window.getSelection();
+
+    if (!selection) {
+      return;
+    }
+
+    if (!pointRange) {
+      placeCaretAtEditorEnd(editor);
+      return;
+    }
+
+    selection.removeAllRanges();
+    selection.addRange(pointRange);
+  }
+
+  function ensureSelectionRangeInEditor(editor: HTMLDivElement): Range | null {
+    const selection = window.getSelection();
+    if (selection && selection.rangeCount > 0) {
+      const range = selection.getRangeAt(0);
+      if (editor.contains(range.startContainer) && editor.contains(range.endContainer)) {
+        return range;
+      }
+    }
+
+    placeCaretAtEditorEnd(editor);
+    const nextSelection = window.getSelection();
+    if (!nextSelection || nextSelection.rangeCount === 0) {
+      return null;
+    }
+
+    return nextSelection.getRangeAt(0);
+  }
+
+  function insertRichImageAtCurrentSelection(
+    scope: RichEditorScope,
+    editor: HTMLDivElement,
+    src: string,
+    options?: {
+      width?: number;
+    }
+  ): string | null {
+    const safeSrc = normalizeRichImageSource(src);
+    if (!safeSrc) {
+      return null;
+    }
+
+    const range = ensureSelectionRangeInEditor(editor);
+    if (!range) {
+      return null;
+    }
+
+    const imageNode = createRichImageBlockElement(editor.ownerDocument, safeSrc, {
+      width: options?.width,
+    });
+    const imageId = imageNode.getAttribute("data-rich-image-id") ?? "";
+    const imageRowNode = createRichImageDeleteRowWithImage(
+      editor.ownerDocument,
+      imageNode,
+      imageId
+    );
+
+    range.deleteContents();
+    const trailingBreak = editor.ownerDocument.createElement("br");
+    range.insertNode(trailingBreak);
+    range.insertNode(imageRowNode);
+
+    const selection = window.getSelection();
+    if (selection) {
+      const nextRange = document.createRange();
+      nextRange.setStartAfter(trailingBreak);
+      nextRange.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(nextRange);
+    }
+
+    setSelectedRichImageInScope(scope, imageId);
+    setActiveRichImageDeleteLine(null);
+    return imageId;
+  }
+
+  async function insertRichImagesFromFiles(
+    scope: RichEditorScope,
+    editor: HTMLDivElement,
+    files: File[]
+  ): Promise<number> {
+    let insertedCount = 0;
+    let skippedCount = 0;
+
+    for (const file of files) {
+      const imageDataUrl = await fileToRichImageDataUrl(file);
+      if (!imageDataUrl) {
+        skippedCount += 1;
+        continue;
+      }
+
+      const insertedId = insertRichImageAtCurrentSelection(scope, editor, imageDataUrl);
+      if (!insertedId) {
+        skippedCount += 1;
+        continue;
+      }
+
+      insertedCount += 1;
+    }
+
+    if (insertedCount > 0) {
+      applyEditorDomValue(scope, editor);
+      rememberRichSelection(scope);
+      syncRichToolbarState(scope);
+    }
+
+    if (skippedCount > 0) {
+      pushNotice(
+        "Некоторые файлы пропущены: поддерживаются PNG, JPG, WEBP, GIF, BMP до 8MB.",
+        "warn"
+      );
+    }
+
+    return insertedCount;
+  }
+
+  function clearActiveRichImageResize(pointerId?: number) {
+    const resizeState = richImageResizeStateRef.current;
+    if (!resizeState) {
+      return;
+    }
+
+    if (typeof pointerId === "number" && resizeState.pointerId !== pointerId) {
+      return;
+    }
+
+    try {
+      if (resizeState.figure.hasPointerCapture(resizeState.pointerId)) {
+        resizeState.figure.releasePointerCapture(resizeState.pointerId);
+      }
+    } catch {
+      // ignore capture errors
+    }
+
+    resizeState.figure.classList.remove(RICH_IMAGE_RESIZING_CLASS_NAME);
+    richImageResizeStateRef.current = null;
   }
 
   function resolveRichEditorScope(): RichEditorScope | null {
@@ -2002,6 +3303,14 @@ export default function CategoryWorkspace() {
       return null;
     }
 
+    ensureRichImageDeleteLines(editor);
+
+    if (scope.kind === "block") {
+      setSelectedMessageId(scope.messageId);
+    } else {
+      setSelectedMessageId(null);
+    }
+
     setActiveRichEditor(scope);
     editor.focus();
 
@@ -2113,6 +3422,394 @@ export default function CategoryWorkspace() {
     setShowTextColorPalette((prev) => !prev);
   }
 
+  function handleToolbarImage() {
+    if (!canUseRichToolbar) {
+      return;
+    }
+
+    const scope = resolveRichEditorScope();
+    if (!scope) {
+      pushNotice("Выбери текстовый редактор для добавления фото.", "warn");
+      return;
+    }
+
+    const editor = focusRichEditorForToolbar(scope);
+    if (!editor) {
+      pushNotice("Не удалось открыть редактор текста.", "error");
+      return;
+    }
+
+    setShowTextColorPalette(false);
+    rememberRichSelection(scope);
+    richImageFileRef.current?.click();
+  }
+
+  async function handleToolbarImageInputChange(
+    event: ChangeEvent<HTMLInputElement>
+  ) {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+
+    if (files.length === 0) {
+      return;
+    }
+
+    const scope = resolveRichEditorScope();
+    if (!scope) {
+      pushNotice("Выбери текстовый редактор для добавления фото.", "warn");
+      return;
+    }
+
+    const editor = focusRichEditorForToolbar(scope);
+    if (!editor) {
+      pushNotice("Не удалось открыть редактор текста.", "error");
+      return;
+    }
+
+    if (!restoreRichSelection(scope)) {
+      placeCaretAtEditorEnd(editor);
+    }
+
+    const inserted = await insertRichImagesFromFiles(scope, editor, files);
+    if (inserted > 0) {
+      pushNotice(`Добавлено фото: ${inserted}.`);
+    }
+  }
+
+  function collectImageFilesFromTransfer(dataTransfer: DataTransfer): File[] {
+    return Array.from(dataTransfer.files).filter((file) => isSupportedRichImageFile(file));
+  }
+
+  function moveDraggedRichImageToDropTarget(
+    targetScope: RichEditorScope,
+    targetEditor: HTMLDivElement
+  ): boolean {
+    const draggedImage = draggedRichImageRef.current;
+    if (!draggedImage) {
+      return false;
+    }
+
+    const sourceEditor = getEditorElement(draggedImage.scope);
+    if (!sourceEditor) {
+      draggedRichImageRef.current = null;
+      return false;
+    }
+
+    const sourceImageNode = getRichImageElementById(sourceEditor, draggedImage.imageId);
+    if (!sourceImageNode) {
+      draggedRichImageRef.current = null;
+      return false;
+    }
+
+    const selectionRange = ensureSelectionRangeInEditor(targetEditor);
+    if (!selectionRange) {
+      draggedRichImageRef.current = null;
+      return false;
+    }
+
+    const sourceRow = getRichImageDeleteRowElementByChild(sourceImageNode);
+    if (
+      sourceImageNode.contains(selectionRange.startContainer) ||
+      sourceRow?.contains(selectionRange.startContainer)
+    ) {
+      draggedRichImageRef.current = null;
+      sourceImageNode.classList.remove(RICH_IMAGE_DRAGGING_CLASS_NAME);
+      return false;
+    }
+
+    const sourceDeleteLine = getRichImageDeleteLineElementById(
+      sourceEditor,
+      draggedImage.imageId
+    );
+    const sourceTrailingBreak =
+      sourceRow?.nextSibling instanceof HTMLBRElement
+        ? sourceRow.nextSibling
+        : sourceDeleteLine?.nextSibling instanceof HTMLBRElement
+          ? sourceDeleteLine.nextSibling
+          : sourceImageNode.nextSibling instanceof HTMLBRElement
+            ? sourceImageNode.nextSibling
+            : null;
+
+    if (sourceRow) {
+      sourceRow.remove();
+    } else {
+      sourceImageNode.remove();
+      sourceDeleteLine?.remove();
+    }
+    sourceTrailingBreak?.remove();
+    sourceImageNode.classList.remove(RICH_IMAGE_DRAGGING_CLASS_NAME);
+
+    const imageRowNode = createRichImageDeleteRowWithImage(
+      targetEditor.ownerDocument,
+      sourceImageNode,
+      draggedImage.imageId
+    );
+    const trailingBreak = targetEditor.ownerDocument.createElement("br");
+    selectionRange.insertNode(trailingBreak);
+    selectionRange.insertNode(imageRowNode);
+
+    const selection = window.getSelection();
+    if (selection) {
+      const nextRange = document.createRange();
+      nextRange.setStartAfter(trailingBreak);
+      nextRange.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(nextRange);
+    }
+
+    if (isSameRichEditorScope(draggedImage.scope, targetScope)) {
+      applyEditorDomValue(targetScope, targetEditor);
+    } else {
+      applyEditorDomValue(draggedImage.scope, sourceEditor);
+      applyEditorDomValue(targetScope, targetEditor);
+    }
+
+    setSelectedRichImageInScope(targetScope, draggedImage.imageId);
+    setActiveRichImageDeleteLine(null);
+    rememberRichSelection(targetScope);
+    syncRichToolbarState(targetScope);
+    draggedRichImageRef.current = null;
+    return true;
+  }
+
+  function handleRichEditorPointerDown(
+    scope: RichEditorScope,
+    event: React.PointerEvent<HTMLDivElement>
+  ) {
+    if (event.button !== 0) {
+      return;
+    }
+
+    const editor = getEditorElement(scope);
+    if (!editor) {
+      return;
+    }
+
+    ensureRichImageDeleteLines(editor);
+
+    const deleteLineNode = getRichImageDeleteLineElementFromEventTarget(event.target);
+    if (deleteLineNode && editor.contains(deleteLineNode)) {
+      if (!focusRichImageDeleteLineInScope(scope, deleteLineNode)) {
+        setSelectedRichImage(null);
+        setActiveRichImageDeleteLine(null);
+        clearActiveRichImageResize(event.pointerId);
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      clearActiveRichImageResize(event.pointerId);
+      return;
+    }
+
+    const imageNode = getRichImageElementFromEventTarget(event.target);
+    if (!imageNode || !editor.contains(imageNode)) {
+      setSelectedRichImage(null);
+      setActiveRichImageDeleteLine(null);
+      clearActiveRichImageResize(event.pointerId);
+      return;
+    }
+
+    const imageId = imageNode.getAttribute("data-rich-image-id")?.trim();
+    if (!imageId) {
+      setSelectedRichImage(null);
+      setActiveRichImageDeleteLine(null);
+      clearActiveRichImageResize(event.pointerId);
+      return;
+    }
+
+    const isDeleteConfirmTarget = Boolean(
+      richImageDeleteConfirm &&
+        richImageDeleteConfirm.imageId === imageId &&
+        isSameRichEditorScope(richImageDeleteConfirm.scope, scope)
+    );
+    if (isDeleteConfirmTarget) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
+    setSelectedRichImageInScope(scope, imageId);
+    setActiveRichImageDeleteLine(null);
+
+    const resizeEdge = detectRichImageResizeEdge(imageNode, event.clientX, event.clientY);
+    if (!resizeEdge) {
+      clearActiveRichImageResize(event.pointerId);
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    clearActiveRichImageResize();
+    const currentWidth = imageNode.getBoundingClientRect().width;
+    applyRichImageWidth(imageNode, currentWidth);
+    imageNode.classList.add(RICH_IMAGE_RESIZING_CLASS_NAME);
+    try {
+      imageNode.setPointerCapture(event.pointerId);
+    } catch {
+      // ignore capture errors
+    }
+    richImageResizeStateRef.current = {
+      pointerId: event.pointerId,
+      scope,
+      imageId,
+      edge: resizeEdge,
+      startX: event.clientX,
+      startY: event.clientY,
+      startWidth: currentWidth,
+      editor,
+      figure: imageNode,
+    };
+  }
+
+  function handleRichEditorDragStart(
+    scope: RichEditorScope,
+    event: DragEvent<HTMLElement>
+  ) {
+    const editor = getEditorElement(scope);
+    if (!editor) {
+      return;
+    }
+
+    const imageNode = getRichImageElementFromEventTarget(event.target);
+    if (!imageNode || !editor.contains(imageNode)) {
+      return;
+    }
+
+    const imageId = imageNode.getAttribute("data-rich-image-id")?.trim();
+    const isDeleteConfirmTarget = Boolean(
+      richImageDeleteConfirm &&
+        richImageDeleteConfirm.imageId === imageId &&
+        isSameRichEditorScope(richImageDeleteConfirm.scope, scope)
+    );
+    if (!imageId || richImageResizeStateRef.current || isDeleteConfirmTarget) {
+      event.preventDefault();
+      return;
+    }
+
+    draggedRichImageRef.current = {
+      scope,
+      imageId,
+    };
+
+    imageNode.classList.add(RICH_IMAGE_DRAGGING_CLASS_NAME);
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", `rich-image:${imageId}`);
+    }
+
+    setSelectedRichImageInScope(scope, imageId);
+  }
+
+  function handleRichEditorDragEnd(event: DragEvent<HTMLElement>) {
+    draggedRichImageRef.current = null;
+
+    for (const node of Array.from(
+      event.currentTarget.querySelectorAll<HTMLElement>(`.${RICH_IMAGE_DRAGGING_CLASS_NAME}`)
+    )) {
+      node.classList.remove(RICH_IMAGE_DRAGGING_CLASS_NAME);
+    }
+  }
+
+  function handleRichEditorDragOver(event: DragEvent<HTMLElement>) {
+    const transfer = event.dataTransfer;
+    if (!transfer) {
+      return;
+    }
+
+    const hasDraggedRichImage = Boolean(draggedRichImageRef.current);
+    const hasFilePayload = Array.from(transfer.types ?? []).includes("Files");
+    const hasImageFile =
+      hasFilePayload &&
+      (Array.from(transfer.items ?? []).some(
+        (item) =>
+          item.kind === "file" &&
+          (isSupportedRichImageMimeType(item.type) || item.type.trim().length === 0)
+      ) || transfer.items.length === 0);
+
+    if (!hasDraggedRichImage && !hasImageFile) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    transfer.dropEffect = hasImageFile ? "copy" : "move";
+  }
+
+  async function handleRichEditorDrop(
+    scope: RichEditorScope,
+    event: DragEvent<HTMLElement>
+  ) {
+    const transfer = event.dataTransfer;
+    if (!transfer) {
+      return;
+    }
+
+    const droppedImageFiles = collectImageFilesFromTransfer(transfer);
+    const hasDraggedRichImage = Boolean(draggedRichImageRef.current);
+    const hasFilePayload = Array.from(transfer.types ?? []).includes("Files");
+    if (!hasDraggedRichImage && !hasFilePayload) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (!hasDraggedRichImage && droppedImageFiles.length === 0) {
+      pushNotice(
+        "Поддерживаются только изображения PNG, JPG, WEBP, GIF и BMP до 8MB.",
+        "warn"
+      );
+      return;
+    }
+
+    const editor = getEditorElement(scope);
+    if (!editor) {
+      draggedRichImageRef.current = null;
+      return;
+    }
+
+    ensureRichImageDeleteLines(editor);
+
+    if (scope.kind === "block") {
+      setSelectedMessageId(scope.messageId);
+    } else {
+      setSelectedMessageId(null);
+    }
+
+    setActiveRichEditor(scope);
+    editor.focus();
+    placeCaretAtEditorPoint(editor, event.clientX, event.clientY);
+
+    if (hasDraggedRichImage) {
+      moveDraggedRichImageToDropTarget(scope, editor);
+    }
+
+    if (droppedImageFiles.length > 0) {
+      const inserted = await insertRichImagesFromFiles(scope, editor, droppedImageFiles);
+      if (inserted > 0) {
+        pushNotice(`Добавлено фото: ${inserted}.`);
+      }
+    }
+
+    ensureRichImageDeleteLines(editor);
+  }
+
+  function cancelRichImageDeleteConfirmation() {
+    setRichImageDeleteConfirm(null);
+    setRichImageDeleteConfirmRect(null);
+  }
+
+  function confirmRichImageDeleteConfirmation() {
+    if (!richImageDeleteConfirm) {
+      return;
+    }
+
+    deleteRichImageBySelection(richImageDeleteConfirm);
+  }
+
   function closeLinkPlaceholderModal() {
     setShowLinkPlaceholderModal(false);
     setLinkSelectionPreview("");
@@ -2187,14 +3884,149 @@ export default function CategoryWorkspace() {
     rememberRichSelection(scope);
   }
 
+  function isPlainCharacterKey(event: React.KeyboardEvent<HTMLElement>): boolean {
+    return event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
+  }
+
+  function syncRichImageSelectionFromEditorSelection(scope: RichEditorScope) {
+    const editor = getEditorElement(scope);
+    if (!editor) {
+      setSelectedRichImage(null);
+      setActiveRichImageDeleteLine(null);
+      return;
+    }
+
+    ensureRichImageDeleteLines(editor);
+
+    const activeDeleteLine = getRichImageDeleteLineElementFromSelection(editor);
+    if (activeDeleteLine) {
+      const imageId = activeDeleteLine.getAttribute("data-rich-image-id")?.trim() ?? "";
+      if (!imageId) {
+        setSelectedRichImage(null);
+        setActiveRichImageDeleteLine(null);
+        return;
+      }
+
+      setSelectedRichImageInScope(scope, imageId);
+      setActiveRichImageDeleteLine({
+        scope,
+        imageId,
+      });
+      return;
+    }
+
+    const activeImage = getRichImageElementFromSelection(editor);
+    if (activeImage) {
+      const imageId = activeImage.getAttribute("data-rich-image-id")?.trim() ?? "";
+      if (!imageId) {
+        setSelectedRichImage(null);
+        setActiveRichImageDeleteLine(null);
+        return;
+      }
+
+      setSelectedRichImageInScope(scope, imageId);
+      setActiveRichImageDeleteLine(null);
+      return;
+    }
+
+    setSelectedRichImage(null);
+    setActiveRichImageDeleteLine(null);
+  }
+
+  function handleRichEditorKeyDown(
+    scope: RichEditorScope,
+    event: React.KeyboardEvent<HTMLDivElement>
+  ) {
+    const editor = getEditorElement(scope);
+    if (!editor) {
+      return;
+    }
+
+    ensureRichImageDeleteLines(editor);
+
+    const fromLineBelow =
+      !event.shiftKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.altKey &&
+      (event.key === "Backspace" || event.key === "ArrowUp")
+        ? getRichImageDeleteLineTargetFromLineBelowCaret(editor)
+        : null;
+    if (fromLineBelow) {
+      event.preventDefault();
+
+      if (event.key === "Backspace") {
+        fromLineBelow.breakNode.remove();
+      }
+
+      const lineSelection = focusRichImageDeleteLineInScope(scope, fromLineBelow.line);
+      if (!lineSelection) {
+        return;
+      }
+
+      if (event.key === "Backspace") {
+        applyEditorDomValue(scope, editor);
+        rememberRichSelection(scope);
+        syncRichToolbarState(scope);
+      }
+
+      return;
+    }
+
+    const activeDeleteLine = getRichImageDeleteLineElementFromSelection(editor);
+    if (!activeDeleteLine) {
+      return;
+    }
+
+    const lineSelection = focusRichImageDeleteLineInScope(scope, activeDeleteLine);
+    if (!lineSelection) {
+      return;
+    }
+
+    if (
+      event.key === "ArrowDown" &&
+      !event.shiftKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.altKey
+    ) {
+      const deleteRow = getRichImageDeleteRowElementByChild(activeDeleteLine);
+      if (deleteRow) {
+        event.preventDefault();
+        placeCaretOnLineBelowRichImageRow(deleteRow);
+        setActiveRichImageDeleteLine(null);
+        setSelectedRichImage(null);
+      }
+      return;
+    }
+
+    if (event.key === "Backspace" || event.key === "Delete") {
+      event.preventDefault();
+      setRichImageDeleteConfirmRect(null);
+      setRichImageDeleteConfirm(lineSelection);
+      return;
+    }
+
+    if (event.key === "Enter" || isPlainCharacterKey(event)) {
+      event.preventDefault();
+    }
+  }
+
   function handleRichEditorFocus(scope: RichEditorScope) {
+    const editor = getEditorElement(scope);
+    if (editor) {
+      ensureRichImageDeleteLines(editor);
+    }
+
     setActiveRichEditor(scope);
+    syncRichImageSelectionFromEditorSelection(scope);
     rememberRichSelection(scope);
     syncRichToolbarState(scope);
   }
 
   function handleRichEditorSelectionActivity(scope: RichEditorScope) {
     setActiveRichEditor(scope);
+    syncRichImageSelectionFromEditorSelection(scope);
     rememberRichSelection(scope);
     syncRichToolbarState(scope);
   }
@@ -2208,10 +4040,13 @@ export default function CategoryWorkspace() {
       messageId,
     };
 
+    ensureRichImageDeleteLines(event.currentTarget);
+
     handleMessageContentChange(
       messageId,
       sanitizeRichTextHtml(event.currentTarget.innerHTML)
     );
+    setSelectedRichImage(null);
     handleRichEditorSelectionActivity(scope);
   }
 
@@ -2224,7 +4059,10 @@ export default function CategoryWorkspace() {
       kind: "continuous",
     };
 
+    ensureRichImageDeleteLines(event.currentTarget);
+
     handleContinuousContentChange(sanitizeRichTextHtml(event.currentTarget.innerHTML));
+    setSelectedRichImage(null);
     handleRichEditorSelectionActivity(scope);
   }
 
@@ -2232,7 +4070,11 @@ export default function CategoryWorkspace() {
     setCurrentCategoryId(categoryId);
     setInsertionTargetId(categoryId);
     setActiveRichEditor(null);
+    setSelectedRichImage(null);
+    setDragChecklistItem(null);
     savedRichSelectionRef.current = null;
+    draggedRichImageRef.current = null;
+    richImageResizeStateRef.current = null;
     setShowTextColorPalette(false);
     setShowLinkPlaceholderModal(false);
     setLinkSelectionPreview("");
@@ -2293,8 +4135,12 @@ export default function CategoryWorkspace() {
     setCurrentCategoryId(null);
     setInsertionTargetId(null);
     setSelectedMessageId(null);
+    setDragChecklistItem(null);
     setActiveRichEditor(null);
+    setSelectedRichImage(null);
     savedRichSelectionRef.current = null;
+    draggedRichImageRef.current = null;
+    richImageResizeStateRef.current = null;
     setShowTextColorPalette(false);
     setShowLinkPlaceholderModal(false);
     setLinkSelectionPreview("");
@@ -3378,6 +5224,8 @@ export default function CategoryWorkspace() {
       checklistId: null,
       titleDraft: "#Checklist",
       tagSelection: [],
+      orderMode: "auto",
+      customOrderCategoryIds: [],
     });
   }
 
@@ -3401,6 +5249,8 @@ export default function CategoryWorkspace() {
       checklistId,
       titleDraft: existingChecklist.title,
       tagSelection: existingChecklist.tags,
+      orderMode: existingChecklist.orderMode,
+      customOrderCategoryIds: existingChecklist.customOrderCategoryIds,
     });
   }
 
@@ -3420,6 +5270,8 @@ export default function CategoryWorkspace() {
       checklistId: null,
       titleDraft: message.title,
       tagSelection: checklistPayload.tags,
+      orderMode: checklistPayload.orderMode,
+      customOrderCategoryIds: checklistPayload.customOrderCategoryIds,
     });
   }
 
@@ -3437,6 +5289,33 @@ export default function CategoryWorkspace() {
       return {
         ...prev,
         titleDraft: value,
+      };
+    });
+  }
+
+  function updateChecklistEditorOrderMode(mode: ChecklistItemOrderMode) {
+    setChecklistEditor((prev) => {
+      if (!prev) {
+        return prev;
+      }
+
+      return {
+        ...prev,
+        orderMode: mode,
+      };
+    });
+  }
+
+  function resetChecklistEditorCustomOrder() {
+    setChecklistEditor((prev) => {
+      if (!prev) {
+        return prev;
+      }
+
+      return {
+        ...prev,
+        orderMode: "auto",
+        customOrderCategoryIds: [],
       };
     });
   }
@@ -3478,6 +5357,7 @@ export default function CategoryWorkspace() {
     }
 
     const nextTitle = normalizeChecklistTitle(checklistEditor.titleDraft);
+    const nextOrderMode = normalizeChecklistItemOrderMode(checklistEditor.orderMode);
 
     if (checklistEditor.source === "block-message") {
       const sourceCategoryId = checklistEditor.sourceCategoryId;
@@ -3510,6 +5390,13 @@ export default function CategoryWorkspace() {
           checkedCategoryIds: currentPayload.checkedCategoryIds.filter((id) =>
             eligibleCategoryIdKeySet.has(id.toLocaleLowerCase())
           ),
+          orderMode: nextOrderMode,
+          customOrderCategoryIds:
+            nextOrderMode === "custom"
+              ? dedupePlainList(checklistEditor.customOrderCategoryIds).filter((id) =>
+                  eligibleCategoryIdKeySet.has(id.toLocaleLowerCase())
+                )
+              : [],
         };
         const serializedContent = serializeMessageChecklistContent(nextPayload);
 
@@ -3565,6 +5452,8 @@ export default function CategoryWorkspace() {
           serializeMessageChecklistContent({
             tags: nextTags,
             checkedCategoryIds: [],
+            orderMode: nextOrderMode,
+            customOrderCategoryIds: [],
           }),
           "info"
         );
@@ -3621,6 +5510,13 @@ export default function CategoryWorkspace() {
           checkedCategoryIds: checklist.checkedCategoryIds.filter((id) =>
             eligibleCategoryIdKeySet.has(id.toLocaleLowerCase())
           ),
+          orderMode: nextOrderMode,
+          customOrderCategoryIds:
+            nextOrderMode === "custom"
+              ? dedupePlainList(checklistEditor.customOrderCategoryIds).filter((id) =>
+                  eligibleCategoryIdKeySet.has(id.toLocaleLowerCase())
+                )
+              : [],
         };
       });
 
@@ -3644,6 +5540,8 @@ export default function CategoryWorkspace() {
       title: nextTitle,
       tags: nextTags,
       checkedCategoryIds: [],
+      orderMode: nextOrderMode,
+      customOrderCategoryIds: [],
     };
 
     commitContinuousDocumentForCategory(checklistEditor.sourceCategoryId, {
@@ -3754,6 +5652,8 @@ export default function CategoryWorkspace() {
         targetCategoryId,
         checked
       ),
+      orderMode: sourcePayload.orderMode,
+      customOrderCategoryIds: sourcePayload.customOrderCategoryIds,
     };
 
     const serializedContent = serializeMessageChecklistContent(nextPayload);
@@ -3842,6 +5742,227 @@ export default function CategoryWorkspace() {
       text: sourceDocument.text,
       checklists: nextChecklists,
     });
+  }
+
+  function handleChecklistItemDragStart(
+    event: DragEvent<HTMLButtonElement>,
+    item: ChecklistDragItem
+  ) {
+    event.stopPropagation();
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", item.categoryId);
+    }
+
+    setDragChecklistItem(item);
+  }
+
+  function handleViewChecklistItem(categoryId: string) {
+    const exists = categories.some((category) => category.id === categoryId);
+    if (!exists) {
+      pushNotice("Категория пункта не найдена.", "warn");
+      return;
+    }
+
+    setActiveProjectId(null);
+    openCategory(categoryId);
+  }
+
+  function handleDropOnContinuousChecklistItem(
+    checklistId: string,
+    targetCategoryId: string,
+    targetChecked: boolean
+  ) {
+    const dragged = dragChecklistItem;
+    if (!dragged || dragged.source !== "continuous") {
+      return;
+    }
+
+    if (!currentCategory || currentCategory.format !== "continuous") {
+      setDragChecklistItem(null);
+      return;
+    }
+
+    if (
+      dragged.sourceCategoryId !== currentCategory.id ||
+      dragged.checklistId !== checklistId ||
+      dragged.checked !== targetChecked
+    ) {
+      setDragChecklistItem(null);
+      return;
+    }
+
+    const sourceDocument = getContinuousDocumentForCategory(currentCategory.id);
+    if (!sourceDocument) {
+      setDragChecklistItem(null);
+      return;
+    }
+
+    const sourceChecklist = sourceDocument.checklists.find((checklist) => checklist.id === checklistId);
+    if (!sourceChecklist) {
+      setDragChecklistItem(null);
+      return;
+    }
+
+    const checkedKeySet = new Set(
+      sourceChecklist.checkedCategoryIds.map((id) => id.toLocaleLowerCase())
+    );
+    const orderedItems = buildChecklistDisplayItems(
+      collectChecklistCategoryOptions(categories, sourceChecklist.tags),
+      checkedKeySet,
+      sourceChecklist.orderMode,
+      sourceChecklist.customOrderCategoryIds
+    );
+
+    const uncheckedIds = orderedItems
+      .filter((item) => !item.checked)
+      .map((item) => item.categoryId);
+    const checkedIds = orderedItems
+      .filter((item) => item.checked)
+      .map((item) => item.categoryId);
+
+    const sourceGroupIds = targetChecked ? checkedIds : uncheckedIds;
+    const reorderedGroupIds = reorderIdListByTarget(
+      sourceGroupIds,
+      dragged.categoryId,
+      targetCategoryId
+    );
+
+    if (isStringListEqual(sourceGroupIds, reorderedGroupIds)) {
+      setDragChecklistItem(null);
+      return;
+    }
+
+    const nextCustomOrderCategoryIds = targetChecked
+      ? [...uncheckedIds, ...reorderedGroupIds]
+      : [...reorderedGroupIds, ...checkedIds];
+
+    const nextChecklists: ChecklistBlock[] = sourceDocument.checklists.map((checklist) => {
+      if (checklist.id !== checklistId) {
+        return checklist;
+      }
+
+      return {
+        ...checklist,
+        orderMode: "custom" as ChecklistItemOrderMode,
+        customOrderCategoryIds: dedupePlainList(nextCustomOrderCategoryIds),
+      };
+    });
+
+    commitContinuousDocumentForCategory(currentCategory.id, {
+      text: sourceDocument.text,
+      checklists: nextChecklists,
+    });
+    setDragChecklistItem(null);
+  }
+
+  function handleDropOnBlockChecklistItem(
+    sourceMessageId: string,
+    targetCategoryId: string,
+    targetChecked: boolean
+  ) {
+    const dragged = dragChecklistItem;
+    if (!dragged || dragged.source !== "block-message") {
+      return;
+    }
+
+    if (!currentCategoryId) {
+      setDragChecklistItem(null);
+      return;
+    }
+
+    if (
+      dragged.sourceCategoryId !== currentCategoryId ||
+      dragged.sourceMessageId !== sourceMessageId ||
+      dragged.checklistId !== sourceMessageId ||
+      dragged.checked !== targetChecked
+    ) {
+      setDragChecklistItem(null);
+      return;
+    }
+
+    const sourceMessage = (messagesByCategory[currentCategoryId] ?? []).find(
+      (message) => message.id === sourceMessageId
+    );
+    if (!sourceMessage) {
+      setDragChecklistItem(null);
+      return;
+    }
+
+    const sourcePayload = parseMessageChecklistContent(sourceMessage.content);
+    if (!sourcePayload) {
+      setDragChecklistItem(null);
+      return;
+    }
+
+    const checkedKeySet = new Set(
+      sourcePayload.checkedCategoryIds.map((id) => id.toLocaleLowerCase())
+    );
+    const orderedItems = buildChecklistDisplayItems(
+      collectChecklistCategoryOptions(categories, sourcePayload.tags),
+      checkedKeySet,
+      sourcePayload.orderMode,
+      sourcePayload.customOrderCategoryIds
+    );
+
+    const uncheckedIds = orderedItems
+      .filter((item) => !item.checked)
+      .map((item) => item.categoryId);
+    const checkedIds = orderedItems
+      .filter((item) => item.checked)
+      .map((item) => item.categoryId);
+
+    const sourceGroupIds = targetChecked ? checkedIds : uncheckedIds;
+    const reorderedGroupIds = reorderIdListByTarget(
+      sourceGroupIds,
+      dragged.categoryId,
+      targetCategoryId
+    );
+
+    if (isStringListEqual(sourceGroupIds, reorderedGroupIds)) {
+      setDragChecklistItem(null);
+      return;
+    }
+
+    const nextCustomOrderCategoryIds = targetChecked
+      ? [...uncheckedIds, ...reorderedGroupIds]
+      : [...reorderedGroupIds, ...checkedIds];
+
+    const nextPayload: MessageChecklistPayload = {
+      ...sourcePayload,
+      orderMode: "custom",
+      customOrderCategoryIds: dedupePlainList(nextCustomOrderCategoryIds),
+    };
+
+    const serializedContent = serializeMessageChecklistContent(nextPayload);
+    if (serializedContent === sourceMessage.content) {
+      setDragChecklistItem(null);
+      return;
+    }
+
+    const nextVersion = (messageDraftVersionRef.current[sourceMessageId] ?? 0) + 1;
+    messageDraftVersionRef.current[sourceMessageId] = nextVersion;
+
+    setMessagesByCategory((prev) => ({
+      ...prev,
+      [currentCategoryId]: (prev[currentCategoryId] ?? []).map((message) =>
+        message.id === sourceMessageId
+          ? {
+              ...message,
+              content: serializedContent,
+              updated_at: new Date().toISOString(),
+            }
+          : message
+      ),
+    }));
+
+    scheduleMessageContentSave(
+      currentCategoryId,
+      sourceMessageId,
+      serializedContent,
+      nextVersion
+    );
+    setDragChecklistItem(null);
   }
 
   function handleOpenChecklistSourceCategory(
@@ -4817,6 +6938,60 @@ export default function CategoryWorkspace() {
     }
   }
 
+  applyEditorDomValueRef.current = applyEditorDomValue;
+  ensureRichImageDeleteLinesRef.current = ensureRichImageDeleteLines;
+  deleteRichImageBySelectionRef.current = deleteRichImageBySelection;
+  rememberRichSelectionRef.current = rememberRichSelection;
+  syncRichToolbarStateRef.current = syncRichToolbarState;
+
+  function handleDecreaseEditorTextScale() {
+    setEditorTextScalePercent((prev) =>
+      clampEditorTextScalePercent(prev - EDITOR_TEXT_SCALE_STEP_PERCENT)
+    );
+  }
+
+  function handleIncreaseEditorTextScale() {
+    setEditorTextScalePercent((prev) =>
+      clampEditorTextScalePercent(prev + EDITOR_TEXT_SCALE_STEP_PERCENT)
+    );
+  }
+
+  function renderEditorTextScaleControls() {
+    return (
+      <div
+        className="toolbar-zoom-controls"
+        role="group"
+        aria-label="Масштаб текстового редактора"
+      >
+        <button
+          type="button"
+          className="mini-action toolbar-zoom-button"
+          onMouseDown={handleToolbarControlMouseDown}
+          onClick={handleDecreaseEditorTextScale}
+          disabled={!canDecreaseEditorTextScale}
+          aria-label="Уменьшить масштаб текста"
+        >
+          -
+        </button>
+
+        <span className="toolbar-zoom-value" aria-live="polite">
+          {editorTextScalePercent}%
+        </span>
+
+        <button
+          type="button"
+          className="mini-action toolbar-zoom-button"
+          onMouseDown={handleToolbarControlMouseDown}
+          onClick={handleIncreaseEditorTextScale}
+          disabled={!canIncreaseEditorTextScale}
+          aria-label="Увеличить масштаб текста"
+        >
+          +
+        </button>
+      </div>
+    );
+  }
+
   function renderRichTextTools(scopePrefix: "block" | "continuous") {
     return (
       <>
@@ -4851,6 +7026,16 @@ export default function CategoryWorkspace() {
             disabled={!canUseRichToolbar}
           >
             link
+          </button>
+
+          <button
+            type="button"
+            className="mini-action text-tool-button"
+            onMouseDown={handleToolbarControlMouseDown}
+            onClick={handleToolbarImage}
+            disabled={!canUseRichToolbar}
+          >
+            image
           </button>
 
           <div className="text-color-wrap">
@@ -5212,7 +7397,10 @@ export default function CategoryWorkspace() {
                   >
                     + сообщение
                   </button>
-                  <span className="toolbar-meta">формат: блочный</span>
+                  <div className="toolbar-right">
+                    <span className="toolbar-meta">формат: блочный</span>
+                    {renderEditorTextScaleControls()}
+                  </div>
                 </div>
 
                 <div className="message-toolbar message-toolbar-tools">
@@ -5232,6 +7420,7 @@ export default function CategoryWorkspace() {
                   onClick={() => {
                     setSelectedMessageId(null);
                     setActiveRichEditor(null);
+                    setSelectedRichImage(null);
                     savedRichSelectionRef.current = null;
                     setShowTextColorPalette(false);
                   }}
@@ -5251,18 +7440,51 @@ export default function CategoryWorkspace() {
                           onDragOver={(event) => {
                             if (dragMessageId && dragMessageId !== message.id) {
                               event.preventDefault();
+                              return;
+                            }
+
+                            const hasRichImagePayload =
+                              Boolean(draggedRichImageRef.current) ||
+                              Array.from(event.dataTransfer?.types ?? []).includes("Files");
+                            if (hasRichImagePayload && !dragMessageId) {
+                              event.preventDefault();
                             }
                           }}
                           onDrop={(event) => {
-                            if (!dragMessageId) {
+                            if (dragMessageId) {
+                              event.preventDefault();
+                              handleDropOnMessage(message.id);
                               return;
                             }
-                            event.preventDefault();
-                            handleDropOnMessage(message.id);
+
+                            const hasRichImagePayload =
+                              Boolean(draggedRichImageRef.current) ||
+                              Array.from(event.dataTransfer?.types ?? []).includes("Files");
+                            if (!hasRichImagePayload) {
+                              return;
+                            }
+
+                            void handleRichEditorDrop(
+                              {
+                                kind: "block",
+                                messageId: message.id,
+                              },
+                              event
+                            );
                           }}
                           onClick={(event) => {
                             event.stopPropagation();
                             setSelectedMessageId(message.id);
+
+                            const target = event.target;
+                            if (
+                              !(target instanceof Element) ||
+                              (!target.closest(`.${RICH_IMAGE_CLASS_NAME}`) &&
+                                !target.closest(`.${RICH_IMAGE_DELETE_LINE_CLASS_NAME}`) &&
+                                !target.closest(`.${RICH_IMAGE_DELETE_ROW_CLASS_NAME}`))
+                            ) {
+                              setSelectedRichImage(null);
+                            }
                           }}
                         >
                           <div className="message-head">
@@ -5314,32 +7536,131 @@ export default function CategoryWorkspace() {
 
                           {checklistCard ? (
                             <div className="message-editor">
+                              {(() => {
+                                const uncheckedItemCount = checklistCard.items.filter(
+                                  (item) => !item.checked
+                                ).length;
+                                const checkedItemCount = checklistCard.items.filter(
+                                  (item) => item.checked
+                                ).length;
+
+                                return (
                               <div className="continuous-checklist-items">
                                 {checklistCard.items.map((item) => (
-                                  <label
+                                  <div
                                     key={`block-checklist-item-${message.id}-${item.categoryId}`}
                                     className="continuous-checklist-item"
-                                  >
-                                    <input
-                                      type="checkbox"
-                                      checked={item.checked}
-                                      onChange={(event) => {
-                                        if (!currentCategoryId) {
-                                          return;
-                                        }
+                                    onDragOver={(event) => {
+                                      const dragged = dragChecklistItem;
+                                      if (
+                                        !dragged ||
+                                        dragged.source !== "block-message" ||
+                                        dragged.sourceCategoryId !== currentCategoryId ||
+                                        dragged.sourceMessageId !== message.id ||
+                                        dragged.checklistId !== message.id ||
+                                        dragged.checked !== item.checked ||
+                                        dragged.categoryId === item.categoryId
+                                      ) {
+                                        return;
+                                      }
 
-                                        toggleChecklistMessageCategoryCheckState(
-                                          currentCategoryId,
-                                          message.id,
-                                          item.categoryId,
-                                          event.target.checked
-                                        );
-                                      }}
-                                    />
-                                    <span>{item.label}</span>
-                                  </label>
+                                      event.preventDefault();
+                                      event.stopPropagation();
+                                    }}
+                                    onDrop={(event) => {
+                                      const dragged = dragChecklistItem;
+                                      if (
+                                        !dragged ||
+                                        dragged.source !== "block-message" ||
+                                        dragged.sourceCategoryId !== currentCategoryId ||
+                                        dragged.sourceMessageId !== message.id ||
+                                        dragged.checklistId !== message.id ||
+                                        dragged.checked !== item.checked
+                                      ) {
+                                        return;
+                                      }
+
+                                      event.preventDefault();
+                                      event.stopPropagation();
+                                      handleDropOnBlockChecklistItem(
+                                        message.id,
+                                        item.categoryId,
+                                        item.checked
+                                      );
+                                    }}
+                                  >
+                                    <label className="checklist-item-toggle">
+                                      <input
+                                        type="checkbox"
+                                        checked={item.checked}
+                                        onChange={(event) => {
+                                          if (!currentCategoryId) {
+                                            return;
+                                          }
+
+                                          toggleChecklistMessageCategoryCheckState(
+                                            currentCategoryId,
+                                            message.id,
+                                            item.categoryId,
+                                            event.target.checked
+                                          );
+                                        }}
+                                      />
+                                      <span className="checklist-item-label">{item.label}</span>
+                                    </label>
+
+                                    <div className="checklist-item-actions">
+                                      <button
+                                        type="button"
+                                        className="mini-action checklist-item-view"
+                                        onClick={(event) => {
+                                          event.stopPropagation();
+                                          handleViewChecklistItem(item.categoryId);
+                                        }}
+                                      >
+                                        view
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className={`checklist-item-drag ${
+                                          dragChecklistItem?.source === "block-message" &&
+                                          dragChecklistItem.sourceMessageId === message.id &&
+                                          dragChecklistItem.categoryId === item.categoryId
+                                            ? "checklist-item-drag-active"
+                                            : ""
+                                        }`}
+                                        draggable={
+                                          (item.checked ? checkedItemCount : uncheckedItemCount) > 1 &&
+                                          !isMutating &&
+                                          !isLoading
+                                        }
+                                        onMouseDown={(event) => event.stopPropagation()}
+                                        onDragStart={(event) =>
+                                          handleChecklistItemDragStart(event, {
+                                            source: "block-message",
+                                            sourceCategoryId: currentCategoryId ?? "",
+                                            sourceMessageId: message.id,
+                                            checklistId: message.id,
+                                            categoryId: item.categoryId,
+                                            checked: item.checked,
+                                          })
+                                        }
+                                        onDragEnd={() => setDragChecklistItem(null)}
+                                        disabled={
+                                          (item.checked ? checkedItemCount : uncheckedItemCount) <= 1 ||
+                                          isMutating ||
+                                          isLoading
+                                        }
+                                        aria-label={`Перетащить пункт ${item.label}`}
+                                      >
+                                        ::
+                                      </button>
+                                    </div>
+                                  </div>
                                 ))}
                               </div>
+                                );
+                              })()}
                             </div>
                           ) : (
                             <div
@@ -5347,6 +7668,35 @@ export default function CategoryWorkspace() {
                               contentEditable={!isMutating && !isLoading}
                               suppressContentEditableWarning
                               onInput={(event) => handleBlockEditorInput(message.id, event)}
+                              onPointerDown={(event) =>
+                                handleRichEditorPointerDown(
+                                  {
+                                    kind: "block",
+                                    messageId: message.id,
+                                  },
+                                  event
+                                )
+                              }
+                              onDragStart={(event) =>
+                                handleRichEditorDragStart(
+                                  {
+                                    kind: "block",
+                                    messageId: message.id,
+                                  },
+                                  event
+                                )
+                              }
+                              onDragEnd={handleRichEditorDragEnd}
+                              onDragOver={handleRichEditorDragOver}
+                              onDrop={(event) =>
+                                void handleRichEditorDrop(
+                                  {
+                                    kind: "block",
+                                    messageId: message.id,
+                                  },
+                                  event
+                                )
+                              }
                               onFocus={() => {
                                 setSelectedMessageId(message.id);
                                 handleRichEditorFocus({
@@ -5360,6 +7710,15 @@ export default function CategoryWorkspace() {
                                   messageId: message.id,
                                 })
                               }
+                              onKeyDown={(event) =>
+                                handleRichEditorKeyDown(
+                                  {
+                                    kind: "block",
+                                    messageId: message.id,
+                                  },
+                                  event
+                                )
+                              }
                               onKeyUp={() =>
                                 handleRichEditorSelectionActivity({
                                   kind: "block",
@@ -5367,6 +7726,7 @@ export default function CategoryWorkspace() {
                                 })
                               }
                               className="message-editor message-editor-rich"
+                              style={editorTextScaleStyle}
                               data-placeholder="Текст сообщения..."
                               role="textbox"
                               aria-multiline="true"
@@ -5382,6 +7742,7 @@ export default function CategoryWorkspace() {
               <>
                 <div className="message-toolbar">
                   <span className="toolbar-meta">формат: сплошной</span>
+                  {renderEditorTextScaleControls()}
                 </div>
                 <div className="message-toolbar message-toolbar-tools">
                   <button
@@ -5397,56 +7758,149 @@ export default function CategoryWorkspace() {
                 <div className="continuous-wrap">
                   {continuousChecklistCards.length > 0 && (
                     <div className="continuous-checklist-board">
-                      {continuousChecklistCards.map(({ checklist, items }) => (
-                        <article
-                          key={`continuous-checklist-${checklist.id}`}
-                          className="continuous-checklist-card"
-                        >
-                          <div className="continuous-checklist-head">
-                            <div className="min-w-0">
-                              <p className="continuous-checklist-title">{checklist.title}</p>
-                              <p className="continuous-checklist-tags">
-                                {checklist.tags.join(" ")}
-                              </p>
-                            </div>
-                            <button
-                              type="button"
-                              className="continuous-checklist-gear"
-                              onClick={() => openChecklistEditorForChecklist(checklist.id)}
-                              aria-label={`Открыть настройки списка ${checklist.title}`}
-                            >
-                              gear
-                            </button>
-                          </div>
+                      {continuousChecklistCards.map(({ checklist, items }) => {
+                        const uncheckedItemCount = items.filter((item) => !item.checked).length;
+                        const checkedItemCount = items.filter((item) => item.checked).length;
 
-                          <div className="continuous-checklist-items">
-                            {items.map((item) => (
-                              <label
-                                key={`checklist-item-${checklist.id}-${item.categoryId}`}
-                                className="continuous-checklist-item"
+                        return (
+                          <article
+                            key={`continuous-checklist-${checklist.id}`}
+                            className="continuous-checklist-card"
+                          >
+                            <div className="continuous-checklist-head">
+                              <div className="min-w-0">
+                                <p className="continuous-checklist-title">{checklist.title}</p>
+                                <p className="continuous-checklist-tags">
+                                  {checklist.tags.join(" ")}
+                                </p>
+                              </div>
+                              <button
+                                type="button"
+                                className="continuous-checklist-gear"
+                                onClick={() => openChecklistEditorForChecklist(checklist.id)}
+                                aria-label={`Открыть настройки списка ${checklist.title}`}
                               >
-                                <input
-                                  type="checkbox"
-                                  checked={item.checked}
-                                  onChange={(event) => {
-                                    if (!currentCategoryId) {
+                                gear
+                              </button>
+                            </div>
+
+                            <div className="continuous-checklist-items">
+                              {items.map((item) => (
+                                <div
+                                  key={`checklist-item-${checklist.id}-${item.categoryId}`}
+                                  className="continuous-checklist-item"
+                                  onDragOver={(event) => {
+                                    const dragged = dragChecklistItem;
+                                    if (
+                                      !dragged ||
+                                      dragged.source !== "continuous" ||
+                                      dragged.sourceCategoryId !== (currentCategoryId ?? "") ||
+                                      dragged.checklistId !== checklist.id ||
+                                      dragged.checked !== item.checked ||
+                                      dragged.categoryId === item.categoryId
+                                    ) {
                                       return;
                                     }
 
-                                    toggleChecklistCategoryCheckState(
-                                      currentCategoryId,
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                  }}
+                                  onDrop={(event) => {
+                                    const dragged = dragChecklistItem;
+                                    if (
+                                      !dragged ||
+                                      dragged.source !== "continuous" ||
+                                      dragged.sourceCategoryId !== (currentCategoryId ?? "") ||
+                                      dragged.checklistId !== checklist.id ||
+                                      dragged.checked !== item.checked
+                                    ) {
+                                      return;
+                                    }
+
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    handleDropOnContinuousChecklistItem(
                                       checklist.id,
                                       item.categoryId,
-                                      event.target.checked
+                                      item.checked
                                     );
                                   }}
-                                />
-                                <span>{item.label}</span>
-                              </label>
-                            ))}
-                          </div>
-                        </article>
-                      ))}
+                                >
+                                  <label className="checklist-item-toggle">
+                                    <input
+                                      type="checkbox"
+                                      checked={item.checked}
+                                      onChange={(event) => {
+                                        if (!currentCategoryId) {
+                                          return;
+                                        }
+
+                                        toggleChecklistCategoryCheckState(
+                                          currentCategoryId,
+                                          checklist.id,
+                                          item.categoryId,
+                                          event.target.checked
+                                        );
+                                      }}
+                                    />
+                                    <span className="checklist-item-label">{item.label}</span>
+                                  </label>
+
+                                  <div className="checklist-item-actions">
+                                    <button
+                                      type="button"
+                                      className="mini-action checklist-item-view"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        handleViewChecklistItem(item.categoryId);
+                                      }}
+                                    >
+                                      view
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className={`checklist-item-drag ${
+                                        dragChecklistItem?.source === "continuous" &&
+                                        dragChecklistItem.sourceCategoryId ===
+                                          (currentCategoryId ?? "") &&
+                                        dragChecklistItem.checklistId === checklist.id &&
+                                        dragChecklistItem.categoryId === item.categoryId
+                                          ? "checklist-item-drag-active"
+                                          : ""
+                                      }`}
+                                      draggable={
+                                        (item.checked ? checkedItemCount : uncheckedItemCount) > 1 &&
+                                        !isMutating &&
+                                        !isLoading
+                                      }
+                                      onMouseDown={(event) => event.stopPropagation()}
+                                      onDragStart={(event) =>
+                                        handleChecklistItemDragStart(event, {
+                                          source: "continuous",
+                                          sourceCategoryId: currentCategoryId ?? "",
+                                          sourceMessageId: null,
+                                          checklistId: checklist.id,
+                                          categoryId: item.categoryId,
+                                          checked: item.checked,
+                                        })
+                                      }
+                                      onDragEnd={() => setDragChecklistItem(null)}
+                                      disabled={
+                                        (item.checked ? checkedItemCount : uncheckedItemCount) <= 1 ||
+                                        isMutating ||
+                                        isLoading
+                                      }
+                                      aria-label={`Перетащить пункт ${item.label}`}
+                                    >
+                                      ::
+                                    </button>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </article>
+                        );
+                      })}
                     </div>
                   )}
 
@@ -5455,6 +7909,32 @@ export default function CategoryWorkspace() {
                     contentEditable={!(!currentCategoryId || isLoading || Boolean(loadError))}
                     suppressContentEditableWarning
                     onInput={handleContinuousEditorInput}
+                    onPointerDown={(event) =>
+                      handleRichEditorPointerDown(
+                        {
+                          kind: "continuous",
+                        },
+                        event
+                      )
+                    }
+                    onDragStart={(event) =>
+                      handleRichEditorDragStart(
+                        {
+                          kind: "continuous",
+                        },
+                        event
+                      )
+                    }
+                    onDragEnd={handleRichEditorDragEnd}
+                    onDragOver={handleRichEditorDragOver}
+                    onDrop={(event) =>
+                      void handleRichEditorDrop(
+                        {
+                          kind: "continuous",
+                        },
+                        event
+                      )
+                    }
                     onFocus={() => {
                       setSelectedMessageId(null);
                       handleRichEditorFocus({
@@ -5466,12 +7946,21 @@ export default function CategoryWorkspace() {
                         kind: "continuous",
                       })
                     }
+                    onKeyDown={(event) =>
+                      handleRichEditorKeyDown(
+                        {
+                          kind: "continuous",
+                        },
+                        event
+                      )
+                    }
                     onKeyUp={() =>
                       handleRichEditorSelectionActivity({
                         kind: "continuous",
                       })
                     }
                     className="continuous-editor continuous-editor-main continuous-editor-rich"
+                    style={editorTextScaleStyle}
                     data-placeholder="Пиши сплошной текст как в Word..."
                     role="textbox"
                     aria-multiline="true"
@@ -5947,6 +8436,55 @@ export default function CategoryWorkspace() {
           </div>
         </footer>
 
+        <input
+          ref={richImageFileRef}
+          type="file"
+          accept="image/png,image/jpeg,image/webp,image/gif,image/bmp"
+          multiple
+          className="hidden"
+          onChange={(event) => void handleToolbarImageInputChange(event)}
+        />
+
+        {richImageDeleteConfirm && richImageDeleteConfirmRect && (
+          <div
+            className="rich-image-delete-confirm-overlay"
+            style={{
+              top: `${richImageDeleteConfirmRect.top}px`,
+              left: `${richImageDeleteConfirmRect.left}px`,
+              width: `${richImageDeleteConfirmRect.width}px`,
+              height: `${richImageDeleteConfirmRect.height}px`,
+            }}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Подтверждение удаления фото"
+          >
+            <div className="rich-image-delete-confirm-content">
+              <p className="rich-image-delete-confirm-title">Подтвердить удаления</p>
+
+              <div className="rich-image-delete-confirm-actions">
+                <button
+                  type="button"
+                  className="danger-action"
+                  onClick={confirmRichImageDeleteConfirmation}
+                >
+                  удалить
+                </button>
+                <button
+                  type="button"
+                  className="mini-action"
+                  onClick={cancelRichImageDeleteConfirmation}
+                >
+                  отменить
+                </button>
+              </div>
+
+              <p className="rich-image-delete-confirm-hint">
+                нажать enter - чтобы удалить, либо у esc - чтобы отменить
+              </p>
+            </div>
+          </div>
+        )}
+
         {showLinkPlaceholderModal && (
           <div className="absolute inset-0 z-[68] flex items-center justify-center p-3">
             <button
@@ -6257,6 +8795,36 @@ export default function CategoryWorkspace() {
               <p className="settings-hint mt-2">
                 Выбрано хэштегов: {checklistEditor.tagSelection.length}
               </p>
+
+              <div className="checklist-order-settings mt-3">
+                <label className="settings-label">порядок пунктов</label>
+                <select
+                  value={checklistEditor.orderMode}
+                  className="settings-input"
+                  onChange={(event) =>
+                    updateChecklistEditorOrderMode(
+                      normalizeChecklistItemOrderMode(event.target.value)
+                    )
+                  }
+                >
+                  <option value="auto">история + галочки</option>
+                  <option value="custom">пользовательский</option>
+                </select>
+
+                <button
+                  type="button"
+                  className="mini-action checklist-order-reset"
+                  onClick={resetChecklistEditorCustomOrder}
+                  disabled={checklistEditor.customOrderCategoryIds.length === 0}
+                >
+                  сбросить пользовательский порядок
+                </button>
+
+                <p className="settings-hint">
+                  Если перетащишь пункт в списке, режим автоматически станет
+                  пользовательским.
+                </p>
+              </div>
 
               <div className="checklist-editor-actions">
                 {(checklistEditor.source === "continuous" &&
@@ -6866,6 +9434,8 @@ const RICH_ALLOWED_TAGS = new Set([
   "BR",
   "DIV",
   "EM",
+  "FIGURE",
+  "IMG",
   "LI",
   "OL",
   "P",
@@ -6873,6 +9443,206 @@ const RICH_ALLOWED_TAGS = new Set([
   "STRONG",
   "UL",
 ]);
+
+const RICH_IMAGE_ALLOWED_MIME_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+  "image/bmp",
+]);
+
+function clampRichImageWidth(value: number): number {
+  if (!Number.isFinite(value)) {
+    return DEFAULT_RICH_IMAGE_WIDTH;
+  }
+
+  return Math.min(MAX_RICH_IMAGE_WIDTH, Math.max(MIN_RICH_IMAGE_WIDTH, Math.round(value)));
+}
+
+function clampEditorTextScalePercent(value: number): number {
+  if (!Number.isFinite(value)) {
+    return DEFAULT_EDITOR_TEXT_SCALE_PERCENT;
+  }
+
+  return Math.min(
+    MAX_EDITOR_TEXT_SCALE_PERCENT,
+    Math.max(MIN_EDITOR_TEXT_SCALE_PERCENT, Math.round(value))
+  );
+}
+
+function normalizeRichImageMimeType(value: string | null | undefined): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  const resolved = normalized === "image/jpg" ? "image/jpeg" : normalized;
+
+  return RICH_IMAGE_ALLOWED_MIME_TYPES.has(resolved) ? resolved : null;
+}
+
+function inferRichImageMimeTypeByFileName(fileName: string): string | null {
+  const lower = fileName.trim().toLowerCase();
+  if (!lower) {
+    return null;
+  }
+
+  if (lower.endsWith(".png")) {
+    return "image/png";
+  }
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) {
+    return "image/jpeg";
+  }
+  if (lower.endsWith(".webp")) {
+    return "image/webp";
+  }
+  if (lower.endsWith(".gif")) {
+    return "image/gif";
+  }
+  if (lower.endsWith(".bmp")) {
+    return "image/bmp";
+  }
+
+  return null;
+}
+
+function isSupportedRichImageMimeType(value: string | null | undefined): boolean {
+  return Boolean(normalizeRichImageMimeType(value));
+}
+
+function isSupportedRichImageFile(file: File): boolean {
+  return Boolean(
+    normalizeRichImageMimeType(file.type) ?? inferRichImageMimeTypeByFileName(file.name)
+  );
+}
+
+function normalizeRichImageSource(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (/^data:/i.test(trimmed)) {
+    const match = trimmed.match(/^data:([^;,]+);base64,([a-z0-9+/=\s]+)$/i);
+    if (!match) {
+      return null;
+    }
+
+    const mimeType = normalizeRichImageMimeType(match[1]);
+    if (!mimeType) {
+      return null;
+    }
+
+    const base64Body = match[2]?.replace(/\s+/g, "") ?? "";
+    if (!base64Body || !/^[a-z0-9+/]+=*$/i.test(base64Body)) {
+      return null;
+    }
+
+    return `data:${mimeType};base64,${base64Body}`;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      return parsed.toString();
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function normalizeRichImageId(value: string | null | undefined): string {
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  if (/^[a-z0-9_-]{3,100}$/i.test(trimmed)) {
+    return trimmed;
+  }
+
+  return crypto.randomUUID();
+}
+
+function parseRichImageWidth(value: string | null | undefined): number | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim().replace(/px$/i, "");
+  if (!normalized) {
+    return null;
+  }
+
+  const parsed = Number(normalized);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+
+  return clampRichImageWidth(parsed);
+}
+
+function applyRichImageWidth(imageNode: HTMLElement, width: number): number {
+  const clamped = clampRichImageWidth(width);
+  imageNode.style.width = `${clamped}px`;
+  imageNode.setAttribute("data-rich-image-width", String(clamped));
+  return clamped;
+}
+
+function createRichImageBlockElement(
+  ownerDocument: Document,
+  src: string,
+  options?: {
+    imageId?: string;
+    width?: number;
+  }
+): HTMLElement {
+  const imageId = normalizeRichImageId(options?.imageId);
+  const width = clampRichImageWidth(options?.width ?? DEFAULT_RICH_IMAGE_WIDTH);
+
+  const figure = ownerDocument.createElement("figure");
+  figure.className = RICH_IMAGE_CLASS_NAME;
+  figure.setAttribute("data-rich-image-id", imageId);
+  figure.setAttribute("draggable", "true");
+  figure.setAttribute("contenteditable", "false");
+  applyRichImageWidth(figure, width);
+
+  const image = ownerDocument.createElement("img");
+  image.setAttribute("src", src);
+  image.setAttribute("alt", "photo");
+  image.setAttribute("draggable", "false");
+  image.setAttribute("loading", "lazy");
+  figure.appendChild(image);
+
+  return figure;
+}
+
+async function fileToRichImageDataUrl(file: File): Promise<string | null> {
+  const mimeType = normalizeRichImageMimeType(file.type) ?? inferRichImageMimeTypeByFileName(file.name);
+  if (!mimeType || file.size > MAX_RICH_IMAGE_FILE_BYTES) {
+    return null;
+  }
+
+  if (typeof FileReader === "undefined") {
+    return null;
+  }
+
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onerror = () => resolve(null);
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      const commaIndex = result.indexOf(",");
+      if (commaIndex < 0) {
+        resolve(null);
+        return;
+      }
+
+      const base64Body = result.slice(commaIndex + 1).replace(/\s+/g, "");
+      resolve(normalizeRichImageSource(`data:${mimeType};base64,${base64Body}`));
+    };
+    reader.readAsDataURL(file);
+  });
+}
 
 function looksLikeHtml(value: string): boolean {
   return /<\/?[a-z][^>]*>/i.test(value);
@@ -7040,6 +9810,58 @@ function sanitizeRichNode(sourceNode: Node, ownerDocument: Document): Node | nul
     return ownerDocument.createElement("br");
   }
 
+  if (normalizedTag === "IMG") {
+    const safeSrc = normalizeRichImageSource(sourceElement.getAttribute("src") ?? "");
+    if (!safeSrc) {
+      return null;
+    }
+
+    const width =
+      parseRichImageWidth(sourceElement.getAttribute("data-rich-image-width")) ??
+      parseRichImageWidth(sourceElement.style.width) ??
+      parseRichImageWidth(sourceElement.getAttribute("width")) ??
+      DEFAULT_RICH_IMAGE_WIDTH;
+
+    return createRichImageBlockElement(ownerDocument, safeSrc, {
+      imageId: sourceElement.getAttribute("data-rich-image-id") ?? "",
+      width,
+    });
+  }
+
+  if (normalizedTag === "FIGURE") {
+    const sourceImage = sourceElement.querySelector("img");
+    if (!sourceImage) {
+      const fragment = ownerDocument.createDocumentFragment();
+      appendChildren(fragment);
+      return fragment;
+    }
+
+    const safeSrc = normalizeRichImageSource(sourceImage.getAttribute("src") ?? "");
+    if (!safeSrc) {
+      const fragment = ownerDocument.createDocumentFragment();
+      appendChildren(fragment);
+      return fragment;
+    }
+
+    const width =
+      parseRichImageWidth(sourceElement.getAttribute("data-rich-image-width")) ??
+      parseRichImageWidth(sourceElement.style.width) ??
+      parseRichImageWidth(sourceImage.getAttribute("data-rich-image-width")) ??
+      parseRichImageWidth(sourceImage.style.width) ??
+      parseRichImageWidth(sourceImage.getAttribute("width")) ??
+      DEFAULT_RICH_IMAGE_WIDTH;
+
+    const imageId =
+      sourceElement.getAttribute("data-rich-image-id") ??
+      sourceImage.getAttribute("data-rich-image-id") ??
+      "";
+
+    return createRichImageBlockElement(ownerDocument, safeSrc, {
+      imageId,
+      width,
+    });
+  }
+
   if (!RICH_ALLOWED_TAGS.has(normalizedTag)) {
     const fragment = ownerDocument.createDocumentFragment();
     appendChildren(fragment);
@@ -7128,7 +9950,7 @@ function richTextToPlainText(value: string | null | undefined): string {
 
   const htmlWithBreaks = sanitizeRichTextHtml(raw)
     .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/(div|p|li)>/gi, "\n");
+    .replace(/<\/(div|p|li|figure)>/gi, "\n");
 
   if (typeof document === "undefined") {
     return htmlWithBreaks
@@ -7162,12 +9984,21 @@ function normalizeChecklistTitle(value: string | null | undefined): string {
   return normalized.slice(0, 80);
 }
 
+function normalizeChecklistItemOrderMode(value: unknown): ChecklistItemOrderMode {
+  return value === "custom" ? "custom" : "auto";
+}
+
 function normalizeMessageChecklistPayload(
   payload: MessageChecklistPayload
 ): MessageChecklistPayload {
+  const orderMode = normalizeChecklistItemOrderMode(payload.orderMode);
+
   return {
     tags: dedupeCategoryTags(payload.tags),
     checkedCategoryIds: dedupePlainList(payload.checkedCategoryIds),
+    orderMode,
+    customOrderCategoryIds:
+      orderMode === "custom" ? dedupePlainList(payload.customOrderCategoryIds) : [],
   };
 }
 
@@ -7192,8 +10023,17 @@ function parseMessageChecklistContent(
     const checkedCategoryIds = Array.isArray(parsed.checkedCategoryIds)
       ? parsed.checkedCategoryIds.filter((id): id is string => typeof id === "string")
       : [];
+    const customOrderCategoryIds = Array.isArray(parsed.customOrderCategoryIds)
+      ? parsed.customOrderCategoryIds.filter((id): id is string => typeof id === "string")
+      : [];
+    const orderMode = normalizeChecklistItemOrderMode(parsed.orderMode);
 
-    const normalized = normalizeMessageChecklistPayload({ tags, checkedCategoryIds });
+    const normalized = normalizeMessageChecklistPayload({
+      tags,
+      checkedCategoryIds,
+      orderMode,
+      customOrderCategoryIds,
+    });
     if (normalized.tags.length === 0) {
       return null;
     }
@@ -7210,6 +10050,8 @@ function serializeMessageChecklistContent(payload: MessageChecklistPayload): str
     kind: MESSAGE_CHECKLIST_KIND,
     tags: normalized.tags,
     checkedCategoryIds: normalized.checkedCategoryIds,
+    orderMode: normalized.orderMode,
+    customOrderCategoryIds: normalized.customOrderCategoryIds,
   });
 }
 
@@ -7239,11 +10081,16 @@ function normalizeChecklistBlocks(checklists: ChecklistBlock[]): ChecklistBlock[
     }
     seen.add(resolvedId.toLocaleLowerCase());
 
+    const orderMode = normalizeChecklistItemOrderMode(checklist.orderMode);
+
     result.push({
       id: resolvedId,
       title: normalizeChecklistTitle(checklist.title),
       tags: dedupeCategoryTags(checklist.tags),
       checkedCategoryIds: dedupePlainList(checklist.checkedCategoryIds),
+      orderMode,
+      customOrderCategoryIds:
+        orderMode === "custom" ? dedupePlainList(checklist.customOrderCategoryIds) : [],
     });
   }
 
@@ -7296,12 +10143,20 @@ function parseContinuousContent(value: string | null | undefined): ContinuousCon
             (id): id is string => typeof id === "string"
           )
         : [];
+      const customOrderCategoryIds = Array.isArray(rawChecklist.customOrderCategoryIds)
+        ? rawChecklist.customOrderCategoryIds.filter(
+            (id): id is string => typeof id === "string"
+          )
+        : [];
+      const orderMode = normalizeChecklistItemOrderMode(rawChecklist.orderMode);
 
       parsedChecklists.push({
         id: typeof rawChecklist.id === "string" ? rawChecklist.id : "",
         title: typeof rawChecklist.title === "string" ? rawChecklist.title : "",
         tags,
         checkedCategoryIds,
+        orderMode,
+        customOrderCategoryIds,
       });
     }
 
@@ -7365,14 +10220,111 @@ function collectChecklistCategoryOptions(
       label: buildCategoryPath(categories, category.id)
         .map((part) => part.title)
         .join(" / "),
-    }))
-    .sort((left, right) => {
-      if (left.label !== right.label) {
-        return left.label.localeCompare(right.label, "ru-RU");
+      createdAt: category.created_at,
+      position: category.position,
+    }));
+}
+
+function compareChecklistOptionByHistory(
+  left: ChecklistCategoryOption,
+  right: ChecklistCategoryOption
+): number {
+  if (left.createdAt !== right.createdAt) {
+    return right.createdAt.localeCompare(left.createdAt);
+  }
+
+  if (left.position !== right.position) {
+    return left.position - right.position;
+  }
+
+  if (left.label !== right.label) {
+    return left.label.localeCompare(right.label, "ru-RU");
+  }
+
+  return left.categoryId.localeCompare(right.categoryId);
+}
+
+function buildChecklistDisplayItems(
+  options: ChecklistCategoryOption[],
+  checkedCategoryKeySet: Set<string>,
+  orderMode: ChecklistItemOrderMode,
+  customOrderCategoryIds: string[]
+): Array<ChecklistCategoryOption & { checked: boolean }> {
+  const items = options.map((option) => ({
+    ...option,
+    checked: checkedCategoryKeySet.has(option.categoryId.toLocaleLowerCase()),
+  }));
+
+  const uncheckedItems = items
+    .filter((item) => !item.checked)
+    .sort(compareChecklistOptionByHistory);
+  const checkedItems = items
+    .filter((item) => item.checked)
+    .sort(compareChecklistOptionByHistory);
+
+  if (orderMode !== "custom") {
+    return [...uncheckedItems, ...checkedItems];
+  }
+
+  const customOrderById = new Map(
+    dedupePlainList(customOrderCategoryIds).map((id, index) => [id.toLocaleLowerCase(), index])
+  );
+
+  const sortGroupByCustom = (group: Array<ChecklistCategoryOption & { checked: boolean }>) => {
+    return [...group].sort((left, right) => {
+      const leftCustomIndex = customOrderById.get(left.categoryId.toLocaleLowerCase());
+      const rightCustomIndex = customOrderById.get(right.categoryId.toLocaleLowerCase());
+
+      if (typeof leftCustomIndex === "number" || typeof rightCustomIndex === "number") {
+        if (typeof leftCustomIndex !== "number") {
+          return 1;
+        }
+        if (typeof rightCustomIndex !== "number") {
+          return -1;
+        }
+        if (leftCustomIndex !== rightCustomIndex) {
+          return leftCustomIndex - rightCustomIndex;
+        }
       }
 
-      return left.categoryId.localeCompare(right.categoryId);
+      return compareChecklistOptionByHistory(left, right);
     });
+  };
+
+  return [...sortGroupByCustom(uncheckedItems), ...sortGroupByCustom(checkedItems)];
+}
+
+function reorderIdListByTarget(source: string[], dragId: string, targetId: string): string[] {
+  const dragKey = dragId.trim().toLocaleLowerCase();
+  const targetKey = targetId.trim().toLocaleLowerCase();
+  if (!dragKey || !targetKey || dragKey === targetKey) {
+    return source;
+  }
+
+  const fromIndex = source.findIndex((id) => id.toLocaleLowerCase() === dragKey);
+  const toIndex = source.findIndex((id) => id.toLocaleLowerCase() === targetKey);
+  if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) {
+    return source;
+  }
+
+  const reordered = [...source];
+  const [dragged] = reordered.splice(fromIndex, 1);
+  reordered.splice(toIndex, 0, dragged);
+  return reordered;
+}
+
+function isStringListEqual(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function togglePlainIdSelection(

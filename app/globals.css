@@ -284,6 +284,35 @@ body {
   color: #2d2d2d;
 }
 
+.toolbar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+}
+
+.toolbar-zoom-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.22rem;
+}
+
+.toolbar-zoom-button {
+  min-width: 1.9rem;
+  line-height: 1;
+  padding: 0.24rem 0.44rem;
+}
+
+.toolbar-zoom-value {
+  min-width: 3.1rem;
+  text-align: center;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #2c2c2c;
+  font-variant-numeric: tabular-nums;
+}
+
 .text-tools-inline {
   display: flex;
   align-items: center;
@@ -499,6 +528,150 @@ body {
   text-decoration: underline;
 }
 
+.message-editor-rich .rich-image-block,
+.continuous-editor-rich .rich-image-block {
+  margin: 0.55rem 0;
+  max-width: 100%;
+  position: relative;
+  border: 0;
+  padding: 0;
+  display: block;
+  user-select: none;
+  cursor: grab;
+  touch-action: none;
+}
+
+.message-editor-rich .rich-image-block img,
+.continuous-editor-rich .rich-image-block img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 0;
+  pointer-events: none;
+}
+
+.message-editor-rich .rich-image-block.rich-image-selected,
+.continuous-editor-rich .rich-image-block.rich-image-selected {
+  outline: 2px solid #426cb5;
+  outline-offset: 2px;
+}
+
+.message-editor-rich .rich-image-block.rich-image-dragging,
+.continuous-editor-rich .rich-image-block.rich-image-dragging {
+  opacity: 0.72;
+  cursor: grabbing;
+}
+
+.message-editor-rich .rich-image-block.rich-image-resizing,
+.continuous-editor-rich .rich-image-block.rich-image-resizing {
+  cursor: ew-resize;
+}
+
+.message-editor-rich .rich-image-block.rich-image-delete-confirm,
+.continuous-editor-rich .rich-image-block.rich-image-delete-confirm {
+  cursor: default;
+}
+
+.message-editor-rich .rich-image-block.rich-image-delete-confirm img,
+.continuous-editor-rich .rich-image-block.rich-image-delete-confirm img {
+  filter: brightness(0.58) saturate(0.68);
+}
+
+.rich-image-delete-confirm-overlay {
+  position: fixed;
+  z-index: 69;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 0.3rem;
+  border: 1px solid rgba(45, 45, 45, 0.74);
+  background: rgba(255, 255, 255, 0.8);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.9),
+    0 4px 14px rgba(0, 0, 0, 0.28);
+}
+
+.rich-image-delete-confirm-content {
+  max-width: 100%;
+  max-height: 100%;
+  overflow: auto;
+  padding: 0.2rem 0.28rem;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.9);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.32rem;
+}
+
+.rich-image-delete-confirm-title {
+  margin: 0;
+  font-size: clamp(0.72rem, 1.65vw, 0.96rem);
+  font-weight: 700;
+  color: #131313;
+}
+
+.rich-image-delete-confirm-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.34rem;
+}
+
+.rich-image-delete-confirm-actions .mini-action,
+.rich-image-delete-confirm-actions .danger-action {
+  min-width: 5.35rem;
+}
+
+.rich-image-delete-confirm-hint {
+  margin: 0;
+  font-size: clamp(0.62rem, 1.35vw, 0.73rem);
+  font-weight: 700;
+  color: #141414;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.66);
+}
+
+.message-editor-rich .rich-image-delete-row,
+.continuous-editor-rich .rich-image-delete-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.38rem;
+  margin: 0.55rem 0;
+  width: fit-content;
+  max-width: 100%;
+  line-height: 1;
+}
+
+.message-editor-rich .rich-image-delete-row .rich-image-block,
+.continuous-editor-rich .rich-image-delete-row .rich-image-block {
+  margin: 0;
+}
+
+.message-editor-rich .rich-image-delete-row .rich-image-delete-line,
+.continuous-editor-rich .rich-image-delete-row .rich-image-delete-line {
+  display: inline-block;
+  align-self: stretch;
+  width: 0.33rem;
+  min-width: 0.33rem;
+  min-height: 2.6rem;
+  border-radius: 999px;
+  background: rgba(86, 86, 86, 0.52);
+  box-shadow: inset 0 0 0 1px rgba(48, 48, 48, 0.52);
+  user-select: none;
+  cursor: default;
+  pointer-events: auto;
+}
+
+.message-editor-rich .rich-image-delete-row .rich-image-delete-line.rich-image-delete-line-active,
+.continuous-editor-rich .rich-image-delete-row .rich-image-delete-line.rich-image-delete-line-active {
+  background: #d55532;
+  box-shadow:
+    inset 0 0 0 1px rgba(120, 28, 10, 0.82),
+    0 0 0 1px rgba(248, 170, 150, 0.72);
+}
+
 .message-editor:focus {
   outline: 1px solid #4a72be;
   outline-offset: -1px;
@@ -592,7 +765,7 @@ body {
 
 .continuous-checklist-item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 0.42rem;
   border: 1px solid #7f7f7f;
   background: #f1f1f1;
@@ -601,9 +774,62 @@ body {
   color: #202020;
 }
 
-.continuous-checklist-item input {
+.checklist-item-toggle {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: flex-start;
+  gap: 0.42rem;
+}
+
+.checklist-item-toggle input {
   width: 0.9rem;
   height: 0.9rem;
+  margin-top: 0.08rem;
+}
+
+.checklist-item-label {
+  min-width: 0;
+  word-break: break-word;
+}
+
+.checklist-item-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.22rem;
+}
+
+.checklist-item-view {
+  min-width: 2.45rem;
+  padding: 0.14rem 0.42rem;
+  font-size: 0.67rem;
+}
+
+.checklist-item-drag {
+  border: 1px solid #666666;
+  background: #d4d4d4;
+  color: #202020;
+  font-size: 0.86rem;
+  font-weight: 700;
+  line-height: 1;
+  min-width: 2rem;
+  padding: 0.08rem 0.3rem;
+  cursor: grab;
+}
+
+.checklist-item-drag:active {
+  cursor: grabbing;
+}
+
+.checklist-item-drag:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.checklist-item-drag-active {
+  background: #bfc8d8;
+  border-color: #4f6587;
 }
 
 .continuous-editor:focus {
@@ -1048,6 +1274,17 @@ body {
 
 .settings-checklist-open {
   padding: 0.18rem 0.45rem;
+  font-size: 0.72rem;
+}
+
+.checklist-order-settings {
+  border: 1px solid #6e6e6e;
+  background: #d2d2d2;
+  padding: 0.35rem;
+}
+
+.checklist-order-reset {
+  margin-top: 0.32rem;
   font-size: 0.72rem;
 }
 
