@@ -6,10 +6,12 @@ import {
   type FormEvent,
   type FocusEvent,
   useCallback,
+  useDeferredValue,
   useEffect,
   useMemo,
   useRef,
   useState,
+  useTransition,
 } from "react";
 
 import {
@@ -277,6 +279,11 @@ type RichImageSelection = {
   imageId: string;
 };
 
+type RichFileSelection = {
+  scope: RichEditorScope;
+  fileId: string;
+};
+
 type DraggedRichImage = {
   scope: RichEditorScope;
   imageId: string;
@@ -292,6 +299,7 @@ type RichImageResizeState = {
   startX: number;
   startY: number;
   startWidth: number;
+  displayScale: number;
   editor: HTMLDivElement;
   figure: HTMLElement;
 };
@@ -348,11 +356,15 @@ const RICH_IMAGE_DELETE_LINE_CLASS_NAME = "rich-image-delete-line";
 const RICH_IMAGE_DELETE_LINE_ACTIVE_CLASS_NAME = "rich-image-delete-line-active";
 const RICH_IMAGE_DRAGGING_CLASS_NAME = "rich-image-dragging";
 const RICH_IMAGE_RESIZING_CLASS_NAME = "rich-image-resizing";
+const RICH_FILE_DELETE_CONFIRM_CLASS_NAME = "rich-file-delete-confirm";
 const DEFAULT_RICH_IMAGE_WIDTH = 320;
 const MIN_RICH_IMAGE_WIDTH = 92;
 const MAX_RICH_IMAGE_WIDTH = 1400;
 const MAX_RICH_IMAGE_FILE_BYTES = 8 * 1024 * 1024;
 const RICH_IMAGE_EDGE_HIT_SIZE = 12;
+const RICH_FILE_CLASS_NAME = "rich-file-link";
+const MAX_RICH_FILE_BYTES = 16 * 1024 * 1024;
+const EDITOR_INPUT_SYNC_DELAY_MS = 180;
 
 export default function CategoryWorkspace() {
   const [categories, setCategories] = useState<CategoryRow[]>([]);
@@ -395,6 +407,7 @@ export default function CategoryWorkspace() {
     useState<ChecklistEditorState | null>(null);
   const [checklistTagSearchQuery, setChecklistTagSearchQuery] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
+  const normalizedSearchQuery = searchQuery.trim().toLowerCase();
   const [projectTagSearchQuery, setProjectTagSearchQuery] = useState("");
   const [projectTagSelection, setProjectTagSelection] = useState<string[]>([]);
   const [projectTitleDraft, setProjectTitleDraft] = useState("");
@@ -420,6 +433,10 @@ export default function CategoryWorkspace() {
   const [richImageDeleteConfirm, setRichImageDeleteConfirm] =
     useState<RichImageSelection | null>(null);
   const [richImageDeleteConfirmRect, setRichImageDeleteConfirmRect] =
+    useState<RichImageOverlayRect | null>(null);
+  const [richFileDeleteConfirm, setRichFileDeleteConfirm] =
+    useState<RichFileSelection | null>(null);
+  const [richFileDeleteConfirmRect, setRichFileDeleteConfirmRect] =
     useState<RichImageOverlayRect | null>(null);
   const [projectSettingsTagDraft, setProjectSettingsTagDraft] = useState("");
   const [categoryMoveParentDraft, setCategoryMoveParentDraft] = useState("");
@@ -476,6 +493,7 @@ export default function CategoryWorkspace() {
 
   const importFileRef = useRef<HTMLInputElement | null>(null);
   const richImageFileRef = useRef<HTMLInputElement | null>(null);
+  const richFileRef = useRef<HTMLInputElement | null>(null);
   const categoryTagInputRef = useRef<HTMLInputElement | null>(null);
   const continuousEditorRef = useRef<HTMLDivElement | null>(null);
   const blockEditorRefsRef = useRef<Record<string, HTMLDivElement | null>>({});
@@ -487,6 +505,11 @@ export default function CategoryWorkspace() {
   });
   const deleteRichImageBySelectionRef = useRef<
     (selection: RichImageSelection) => boolean
+  >(() => {
+    return false;
+  });
+  const deleteRichFileBySelectionRef = useRef<
+    (selection: RichFileSelection) => boolean
   >(() => {
     return false;
   });
@@ -512,6 +535,9 @@ export default function CategoryWorkspace() {
   const categorySaveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>(
     {}
   );
+  const categoryInputSyncTimersRef = useRef<
+    Record<string, ReturnType<typeof setTimeout>>
+  >({});
   const categorySaveInFlightRef = useRef<Record<string, boolean>>({});
   const pendingCategorySaveRef = useRef<
     Record<
@@ -529,6 +555,9 @@ export default function CategoryWorkspace() {
   const messageSaveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>(
     {}
   );
+  const messageInputSyncTimersRef = useRef<
+    Record<string, ReturnType<typeof setTimeout>>
+  >({});
   const messageSaveInFlightRef = useRef<Record<string, boolean>>({});
   const pendingMessageSaveRef = useRef<
     Record<
@@ -547,6 +576,7 @@ export default function CategoryWorkspace() {
   const messageAckVersionRef = useRef<Record<string, number>>({});
   const pendingMessageSelectionRef = useRef<string | null>(null);
   const syncedContinuousCategoryIdRef = useRef<string | null>(null);
+  const [, startEditorTransition] = useTransition();
 
   const sortedProjects = useMemo(() => [...projects].sort(sortProjects), [projects]);
 
@@ -614,7 +644,7 @@ export default function CategoryWorkspace() {
       return [];
     }
 
-    return [...(messagesByCategory[currentCategoryId] ?? [])].sort(sortMessages);
+    return messagesByCategory[currentCategoryId] ?? [];
   }, [messagesByCategory, currentCategoryId]);
 
   const selectedMessage = useMemo(
@@ -649,11 +679,39 @@ export default function CategoryWorkspace() {
     canAdjustEditorTextScale && editorTextScalePercent > MIN_EDITOR_TEXT_SCALE_PERCENT;
   const canIncreaseEditorTextScale =
     canAdjustEditorTextScale && editorTextScalePercent < MAX_EDITOR_TEXT_SCALE_PERCENT;
+  const editorDisplayScale = useMemo(
+    () => getEditorDisplayScale(editorTextScalePercent),
+    [editorTextScalePercent]
+  );
   const editorTextScaleStyle = useMemo(
     () => ({
       fontSize: `${editorTextScalePercent}%`,
     }),
     [editorTextScalePercent]
+  );
+  const applyRichImageDisplayScaleToEditor = useCallback(
+    (editor: HTMLDivElement | null, displayScale: number) => {
+      if (!editor) {
+        return;
+      }
+
+      for (const imageNode of Array.from(
+        editor.querySelectorAll<HTMLElement>(`.${RICH_IMAGE_CLASS_NAME}`)
+      )) {
+        applyRichImageWidth(imageNode, getRichImageBaseWidth(imageNode), displayScale);
+      }
+    },
+    []
+  );
+  const applyRichImageDisplayScaleToMountedEditors = useCallback(
+    (displayScale: number) => {
+      applyRichImageDisplayScaleToEditor(continuousEditorRef.current, displayScale);
+
+      for (const editor of Object.values(blockEditorRefsRef.current)) {
+        applyRichImageDisplayScaleToEditor(editor, displayScale);
+      }
+    },
+    [applyRichImageDisplayScaleToEditor]
   );
 
   const sidebarFillerCount = Math.max(0, 8 - childCategories.length);
@@ -900,6 +958,10 @@ export default function CategoryWorkspace() {
   }, [accountAvatarUrl, accountAvatarUrlDraft]);
 
   const categoryPlainContentById = useMemo(() => {
+    if (!normalizedSearchQuery) {
+      return new Map<string, string>();
+    }
+
     const map = new Map<string, string>();
 
     for (const category of categories) {
@@ -915,7 +977,11 @@ export default function CategoryWorkspace() {
     }
 
     return map;
-  }, [categories]);
+  }, [categories, normalizedSearchQuery]);
+
+  const deferredContinuousChecklists = useDeferredValue(continuousChecklists);
+  const deferredChecklistCategories = useDeferredValue(categories);
+  const deferredChecklistMessagesByCategory = useDeferredValue(messagesByCategory);
 
   const continuousChecklistCards = useMemo(() => {
     if (!currentCategory || currentCategory.format !== "continuous") {
@@ -989,39 +1055,34 @@ export default function CategoryWorkspace() {
     const currentCategoryKey = currentCategory.id.toLocaleLowerCase();
     const entries: ChecklistParticipationEntry[] = [];
 
-    for (const sourceCategory of categories) {
-      if (sourceCategory.format !== "continuous") {
-        continue;
-      }
+    for (const sourceCategory of deferredChecklistCategories) {
+      if (sourceCategory.format === "continuous") {
+        const sourceChecklists =
+          currentCategory.id === sourceCategory.id && currentCategory.format === "continuous"
+            ? deferredContinuousChecklists
+            : parseContinuousChecklists(sourceCategory.content);
 
-      const sourceDocument =
-        currentCategory.id === sourceCategory.id && currentCategory.format === "continuous"
-          ? {
-              text: continuousDraft,
-              checklists: continuousChecklists,
-            }
-          : parseContinuousContent(sourceCategory.content);
+        for (const checklist of sourceChecklists) {
+          if (!categoryMatchesChecklistTags(currentCategory, checklist.tags)) {
+            continue;
+          }
 
-      for (const checklist of sourceDocument.checklists) {
-        if (!categoryMatchesChecklistTags(currentCategory, checklist.tags)) {
-          continue;
+          entries.push({
+            source: "continuous",
+            sourceCategoryId: sourceCategory.id,
+            sourceCategoryTitle: sourceCategory.title,
+            sourceMessageId: null,
+            checklistId: checklist.id,
+            checklistTitle: checklist.title,
+            tags: checklist.tags,
+            checked: checklist.checkedCategoryIds.some(
+              (id) => id.toLocaleLowerCase() === currentCategoryKey
+            ),
+          });
         }
-
-        entries.push({
-          source: "continuous",
-          sourceCategoryId: sourceCategory.id,
-          sourceCategoryTitle: sourceCategory.title,
-          sourceMessageId: null,
-          checklistId: checklist.id,
-          checklistTitle: checklist.title,
-          tags: checklist.tags,
-          checked: checklist.checkedCategoryIds.some(
-            (id) => id.toLocaleLowerCase() === currentCategoryKey
-          ),
-        });
       }
 
-      const sourceMessages = messagesByCategory[sourceCategory.id] ?? [];
+      const sourceMessages = deferredChecklistMessagesByCategory[sourceCategory.id] ?? [];
       for (const message of sourceMessages) {
         const checklistPayload = parseMessageChecklistContent(message.content);
         if (!checklistPayload) {
@@ -1059,21 +1120,22 @@ export default function CategoryWorkspace() {
       return left.sourceCategoryId.localeCompare(right.sourceCategoryId);
     });
   }, [
-    categories,
-    continuousChecklists,
-    continuousDraft,
+    deferredChecklistCategories,
+    deferredContinuousChecklists,
+    deferredChecklistMessagesByCategory,
     currentCategory,
-    messagesByCategory,
   ]);
 
-  const allLoadedMessages = useMemo(
-    () => Object.values(messagesByCategory).flat(),
-    [messagesByCategory]
-  );
+  const allLoadedMessages = useMemo(() => {
+    if (!normalizedSearchQuery) {
+      return [];
+    }
+
+    return Object.values(messagesByCategory).flat();
+  }, [messagesByCategory, normalizedSearchQuery]);
 
   const searchResults = useMemo(() => {
-    const normalized = searchQuery.trim().toLowerCase();
-    if (!normalized) {
+    if (!normalizedSearchQuery) {
       return [];
     }
 
@@ -1081,7 +1143,7 @@ export default function CategoryWorkspace() {
       .filter((category) => {
         const plainContent = categoryPlainContentById.get(category.id) ?? "";
         const text = `${category.title} ${category.description} ${category.tag} ${plainContent}`.toLowerCase();
-        return text.includes(normalized);
+        return text.includes(normalizedSearchQuery);
       })
       .map((category) => ({
         id: `category-${category.id}`,
@@ -1093,7 +1155,7 @@ export default function CategoryWorkspace() {
           .join(" / "),
         preview: makePreview(
           `${category.description || (categoryPlainContentById.get(category.id) ?? "") || category.tag}`,
-          normalized
+          normalizedSearchQuery
         ),
       }));
 
@@ -1103,7 +1165,7 @@ export default function CategoryWorkspace() {
         ? ""
         : richTextToPlainText(message.content);
       const messageText = `${message.title} ${plainContent}`.toLowerCase();
-      if (!messageText.includes(normalized)) {
+      if (!messageText.includes(normalizedSearchQuery)) {
         continue;
       }
 
@@ -1122,7 +1184,7 @@ export default function CategoryWorkspace() {
         path: `${buildCategoryPath(visibleCategories, message.category_id)
           .map((part) => part.title)
           .join(" / ")} / сообщение`,
-        preview: makePreview(message.content, normalized),
+        preview: makePreview(message.content, normalizedSearchQuery),
       });
     }
 
@@ -1130,7 +1192,7 @@ export default function CategoryWorkspace() {
   }, [
     allLoadedMessages,
     categoryPlainContentById,
-    searchQuery,
+    normalizedSearchQuery,
     visibleCategories,
     visibleCategoriesById,
   ]);
@@ -1274,6 +1336,10 @@ export default function CategoryWorkspace() {
     setShowLinkPlaceholderModal(false);
     setLinkSelectionPreview("");
     setSelectedRichImage(null);
+    setRichImageDeleteConfirm(null);
+    setRichImageDeleteConfirmRect(null);
+    setRichFileDeleteConfirm(null);
+    setRichFileDeleteConfirmRect(null);
     setChecklistEditor(null);
     setChecklistTagSearchQuery("");
     setSource("unknown");
@@ -1493,6 +1559,10 @@ export default function CategoryWorkspace() {
       setInsertionTargetId(initialId);
       setSelectedMessageId(null);
       setSelectedRichImage(null);
+      setRichImageDeleteConfirm(null);
+      setRichImageDeleteConfirmRect(null);
+      setRichFileDeleteConfirm(null);
+      setRichFileDeleteConfirmRect(null);
       setSource(payload.source ?? "unknown");
       setMessagesByCategory({});
 
@@ -1882,12 +1952,14 @@ export default function CategoryWorkspace() {
             `.${RICH_IMAGE_CLASS_NAME}.${RICH_IMAGE_SELECTED_CLASS_NAME}`,
             `.${RICH_IMAGE_CLASS_NAME}.${RICH_IMAGE_DELETE_CONFIRM_CLASS_NAME}`,
             `.${RICH_IMAGE_DELETE_LINE_CLASS_NAME}.${RICH_IMAGE_DELETE_LINE_ACTIVE_CLASS_NAME}`,
+            `.${RICH_FILE_CLASS_NAME}.${RICH_FILE_DELETE_CONFIRM_CLASS_NAME}`,
           ].join(",")
         )
       )) {
         node.classList.remove(RICH_IMAGE_SELECTED_CLASS_NAME);
         node.classList.remove(RICH_IMAGE_DELETE_CONFIRM_CLASS_NAME);
         node.classList.remove(RICH_IMAGE_DELETE_LINE_ACTIVE_CLASS_NAME);
+        node.classList.remove(RICH_FILE_DELETE_CONFIRM_CLASS_NAME);
       }
     }
 
@@ -1922,35 +1994,45 @@ export default function CategoryWorkspace() {
       }
     }
 
-    if (!richImageDeleteConfirm) {
-      return;
+    if (richImageDeleteConfirm) {
+      const confirmEditor = getEditorElement(richImageDeleteConfirm.scope);
+      if (!confirmEditor) {
+        setRichImageDeleteConfirm(null);
+        setRichImageDeleteConfirmRect(null);
+      } else {
+        const confirmImageNode = getRichImageElementById(
+          confirmEditor,
+          richImageDeleteConfirm.imageId
+        );
+        if (!confirmImageNode) {
+          setRichImageDeleteConfirm(null);
+          setRichImageDeleteConfirmRect(null);
+        } else {
+          confirmImageNode.classList.add(RICH_IMAGE_DELETE_CONFIRM_CLASS_NAME);
+        }
+      }
     }
 
-    const confirmEditor = getEditorElement(richImageDeleteConfirm.scope);
-    if (!confirmEditor) {
-      setRichImageDeleteConfirm(null);
-      setRichImageDeleteConfirmRect(null);
-      return;
+    if (richFileDeleteConfirm) {
+      const fileConfirmEditor = getEditorElement(richFileDeleteConfirm.scope);
+      if (!fileConfirmEditor) {
+        setRichFileDeleteConfirm(null);
+        setRichFileDeleteConfirmRect(null);
+      } else {
+        const fileNode = getRichFileElementById(fileConfirmEditor, richFileDeleteConfirm.fileId);
+        if (!fileNode) {
+          setRichFileDeleteConfirm(null);
+          setRichFileDeleteConfirmRect(null);
+        } else {
+          fileNode.classList.add(RICH_FILE_DELETE_CONFIRM_CLASS_NAME);
+        }
+      }
     }
-
-    const confirmImageNode = getRichImageElementById(
-      confirmEditor,
-      richImageDeleteConfirm.imageId
-    );
-    if (!confirmImageNode) {
-      setRichImageDeleteConfirm(null);
-      setRichImageDeleteConfirmRect(null);
-      return;
-    }
-
-    confirmImageNode.classList.add(RICH_IMAGE_DELETE_CONFIRM_CLASS_NAME);
   }, [
     selectedRichImage,
     activeRichImageDeleteLine,
     richImageDeleteConfirm,
-    currentCategory?.id,
-    currentCategory?.format,
-    currentMessages,
+    richFileDeleteConfirm,
   ]);
 
   useEffect(() => {
@@ -2048,6 +2130,70 @@ export default function CategoryWorkspace() {
   }, [richImageDeleteConfirm, selectedRichImage]);
 
   useEffect(() => {
+    if (!richFileDeleteConfirm) {
+      return;
+    }
+
+    let animationFrameId = 0;
+    const updateOverlayRect = () => {
+      const editor =
+        richFileDeleteConfirm.scope.kind === "continuous"
+          ? continuousEditorRef.current
+          : blockEditorRefsRef.current[richFileDeleteConfirm.scope.messageId] ?? null;
+      if (!editor) {
+        setRichFileDeleteConfirm(null);
+        setRichFileDeleteConfirmRect(null);
+        return;
+      }
+
+      const fileNode = getRichFileElementById(editor, richFileDeleteConfirm.fileId);
+      if (!fileNode) {
+        setRichFileDeleteConfirm(null);
+        setRichFileDeleteConfirmRect(null);
+        return;
+      }
+
+      const rect = fileNode.getBoundingClientRect();
+      if (rect.width < 1 || rect.height < 1) {
+        setRichFileDeleteConfirmRect(null);
+        return;
+      }
+
+      const nextRect: RichImageOverlayRect = {
+        top: rect.top,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height,
+      };
+
+      setRichFileDeleteConfirmRect((previousRect) => {
+        if (
+          previousRect &&
+          Math.abs(previousRect.top - nextRect.top) < 0.5 &&
+          Math.abs(previousRect.left - nextRect.left) < 0.5 &&
+          Math.abs(previousRect.width - nextRect.width) < 0.5 &&
+          Math.abs(previousRect.height - nextRect.height) < 0.5
+        ) {
+          return previousRect;
+        }
+
+        return nextRect;
+      });
+    };
+
+    updateOverlayRect();
+    animationFrameId = window.requestAnimationFrame(updateOverlayRect);
+    window.addEventListener("resize", updateOverlayRect);
+    window.addEventListener("scroll", updateOverlayRect, true);
+
+    return () => {
+      window.cancelAnimationFrame(animationFrameId);
+      window.removeEventListener("resize", updateOverlayRect);
+      window.removeEventListener("scroll", updateOverlayRect, true);
+    };
+  }, [richFileDeleteConfirm]);
+
+  useEffect(() => {
     function handleImageDelete(event: KeyboardEvent) {
       const target = event.target;
       if (
@@ -2069,6 +2215,20 @@ export default function CategoryWorkspace() {
         if (event.key === "Delete" || event.key === "Backspace") {
           event.preventDefault();
         }
+
+        return;
+      }
+
+      if (richFileDeleteConfirm) {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          deleteRichFileBySelectionRef.current(richFileDeleteConfirm);
+          return;
+        }
+
+        if (event.key === "Delete" || event.key === "Backspace") {
+          event.preventDefault();
+        }
       }
     }
 
@@ -2076,7 +2236,7 @@ export default function CategoryWorkspace() {
     return () => {
       window.removeEventListener("keydown", handleImageDelete);
     };
-  }, [richImageDeleteConfirm]);
+  }, [richImageDeleteConfirm, richFileDeleteConfirm]);
 
   useEffect(() => {
     function finalizeRichImageResize(pointerId?: number) {
@@ -2125,7 +2285,8 @@ export default function CategoryWorkspace() {
 
       applyRichImageWidth(
         resizeState.figure,
-        clampRichImageWidth(resizeState.startWidth + delta)
+        resizeState.startWidth + delta / resizeState.displayScale,
+        resizeState.displayScale
       );
     }
 
@@ -2163,14 +2324,22 @@ export default function CategoryWorkspace() {
     }
 
     const nextValue = sanitizeRichTextHtml(continuousDraft);
-      if (sanitizeRichTextHtml(editor.innerHTML) === nextValue) {
-        ensureRichImageDeleteLinesRef.current(editor);
-        return;
-      }
-
-      editor.innerHTML = nextValue;
+    if (sanitizeRichTextHtml(editor.innerHTML) === nextValue) {
       ensureRichImageDeleteLinesRef.current(editor);
-  }, [continuousDraft, currentCategory?.format, currentCategory?.id]);
+      applyRichImageDisplayScaleToEditor(editor, editorDisplayScale);
+      return;
+    }
+
+    editor.innerHTML = nextValue;
+    ensureRichImageDeleteLinesRef.current(editor);
+    applyRichImageDisplayScaleToEditor(editor, editorDisplayScale);
+  }, [
+    applyRichImageDisplayScaleToEditor,
+    continuousDraft,
+    currentCategory?.format,
+    currentCategory?.id,
+    editorDisplayScale,
+  ]);
 
   useEffect(() => {
     if (currentCategory?.format !== "block") {
@@ -2190,13 +2359,24 @@ export default function CategoryWorkspace() {
       const nextValue = normalizePersistedMessageContent(message.content);
       if (sanitizeRichTextHtml(editor.innerHTML) === nextValue) {
         ensureRichImageDeleteLinesRef.current(editor);
+        applyRichImageDisplayScaleToEditor(editor, editorDisplayScale);
         continue;
       }
 
       editor.innerHTML = nextValue;
       ensureRichImageDeleteLinesRef.current(editor);
+      applyRichImageDisplayScaleToEditor(editor, editorDisplayScale);
     }
-  }, [currentCategory?.format, currentMessages]);
+  }, [
+    applyRichImageDisplayScaleToEditor,
+    currentCategory?.format,
+    currentMessages,
+    editorDisplayScale,
+  ]);
+
+  useEffect(() => {
+    applyRichImageDisplayScaleToMountedEditors(editorDisplayScale);
+  }, [applyRichImageDisplayScaleToMountedEditors, editorDisplayScale]);
 
   useEffect(() => {
     function handleEscape(event: KeyboardEvent) {
@@ -2204,6 +2384,12 @@ export default function CategoryWorkspace() {
         if (richImageDeleteConfirm) {
           event.preventDefault();
           cancelRichImageDeleteConfirmation();
+          return;
+        }
+
+        if (richFileDeleteConfirm) {
+          event.preventDefault();
+          cancelRichFileDeleteConfirmation();
           return;
         }
 
@@ -2231,9 +2417,14 @@ export default function CategoryWorkspace() {
     return () => {
       window.removeEventListener("keydown", handleEscape);
     };
-  }, [richImageDeleteConfirm]);
+  }, [richImageDeleteConfirm, richFileDeleteConfirm]);
 
   useEffect(() => {
+    const categorySaveTimers = categorySaveTimersRef.current;
+    const categoryInputSyncTimers = categoryInputSyncTimersRef.current;
+    const messageSaveTimers = messageSaveTimersRef.current;
+    const messageInputSyncTimers = messageInputSyncTimersRef.current;
+
     return () => {
       if (confirmResolverRef.current) {
         confirmResolverRef.current(false);
@@ -2244,11 +2435,19 @@ export default function CategoryWorkspace() {
         clearTimeout(noticeTimerRef.current);
       }
 
-      for (const timer of Object.values(categorySaveTimersRef.current)) {
+      for (const timer of Object.values(categorySaveTimers)) {
         clearTimeout(timer);
       }
 
-      for (const timer of Object.values(messageSaveTimersRef.current)) {
+      for (const timer of Object.values(categoryInputSyncTimers)) {
+        clearTimeout(timer);
+      }
+
+      for (const timer of Object.values(messageSaveTimers)) {
+        clearTimeout(timer);
+      }
+
+      for (const timer of Object.values(messageInputSyncTimers)) {
         clearTimeout(timer);
       }
 
@@ -2264,6 +2463,10 @@ export default function CategoryWorkspace() {
     left: RichEditorScope | null,
     right: RichEditorScope | null
   ): boolean {
+    if (!left && !right) {
+      return true;
+    }
+
     if (!left || !right) {
       return false;
     }
@@ -2281,6 +2484,16 @@ export default function CategoryWorkspace() {
     }
 
     return false;
+  }
+
+  function setActiveRichEditorIfChanged(scope: RichEditorScope | null) {
+    setActiveRichEditor((prev) => {
+      if (isSameRichEditorScope(prev, scope)) {
+        return prev;
+      }
+
+      return scope;
+    });
   }
 
   function deleteRichImageBySelection(selection: RichImageSelection): boolean {
@@ -2372,6 +2585,7 @@ export default function CategoryWorkspace() {
     const row = ownerDocument.createElement("span");
     row.className = RICH_IMAGE_DELETE_ROW_CLASS_NAME;
     row.setAttribute("data-rich-image-delete-row", "true");
+    row.setAttribute("contenteditable", "false");
     row.setAttribute("draggable", "false");
     return row;
   }
@@ -2379,6 +2593,7 @@ export default function CategoryWorkspace() {
   function normalizeRichImageDeleteRowElement(row: HTMLElement) {
     row.classList.add(RICH_IMAGE_DELETE_ROW_CLASS_NAME);
     row.setAttribute("data-rich-image-delete-row", "true");
+    row.setAttribute("contenteditable", "false");
     row.setAttribute("draggable", "false");
   }
 
@@ -2395,40 +2610,34 @@ export default function CategoryWorkspace() {
     return parent;
   }
 
+  function getRichImageDeleteRowElementFromNode(node: Node | null): HTMLElement | null {
+    if (!node) {
+      return null;
+    }
+
+    if (
+      node instanceof HTMLElement &&
+      node.classList.contains(RICH_IMAGE_DELETE_ROW_CLASS_NAME)
+    ) {
+      return node;
+    }
+
+    if (node instanceof Element) {
+      return node.closest<HTMLElement>(`.${RICH_IMAGE_DELETE_ROW_CLASS_NAME}`);
+    }
+
+    return node.parentElement?.closest<HTMLElement>(`.${RICH_IMAGE_DELETE_ROW_CLASS_NAME}`) ?? null;
+  }
+
   function createRichImageDeleteRowWithImage(
     ownerDocument: Document,
     imageNode: HTMLElement,
     imageId: string
   ): HTMLElement {
     const row = createRichImageDeleteRowElement(ownerDocument);
-    const line = createRichImageDeleteLineElement(ownerDocument, imageId);
     row.appendChild(imageNode);
-    row.appendChild(line);
+    row.setAttribute("data-rich-image-id", imageId);
     return row;
-  }
-
-  function createRichImageDeleteLineElement(
-    ownerDocument: Document,
-    imageId: string
-  ): HTMLElement {
-    const line = ownerDocument.createElement("span");
-    line.className = RICH_IMAGE_DELETE_LINE_CLASS_NAME;
-    line.setAttribute("data-rich-image-id", imageId);
-    line.setAttribute("data-rich-image-delete-line", "true");
-    line.setAttribute("contenteditable", "false");
-    line.setAttribute("draggable", "false");
-    line.setAttribute("aria-hidden", "true");
-    return line;
-  }
-
-  function normalizeRichImageDeleteLineElement(line: HTMLElement, imageId: string) {
-    line.classList.add(RICH_IMAGE_DELETE_LINE_CLASS_NAME);
-    line.classList.remove(RICH_IMAGE_DELETE_LINE_ACTIVE_CLASS_NAME);
-    line.setAttribute("data-rich-image-id", imageId);
-    line.setAttribute("data-rich-image-delete-line", "true");
-    line.setAttribute("contenteditable", "false");
-    line.setAttribute("draggable", "false");
-    line.setAttribute("aria-hidden", "true");
   }
 
   function getRichImageDeleteLineElementById(
@@ -2675,6 +2884,181 @@ export default function CategoryWorkspace() {
     return range;
   }
 
+  function getAdjacentNodesFromCollapsedRange(
+    editor: HTMLDivElement,
+    range: Range
+  ): {
+    previousNode: Node | null;
+    nextNode: Node | null;
+  } {
+    let previousNode: Node | null = null;
+    let nextNode: Node | null = null;
+
+    if (range.startContainer instanceof Element) {
+      const container = range.startContainer;
+      previousNode =
+        range.startOffset > 0
+          ? container.childNodes[range.startOffset - 1] ?? null
+          : getAdjacentNodeForCollapsedRange(editor, container, "before");
+      nextNode =
+        container.childNodes[range.startOffset] ??
+        getAdjacentNodeForCollapsedRange(editor, container, "after");
+
+      return {
+        previousNode,
+        nextNode,
+      };
+    }
+
+    const textNode = range.startContainer;
+    const textLength = textNode.textContent?.length ?? 0;
+    if (range.startOffset === 0) {
+      previousNode = getAdjacentNodeForCollapsedRange(editor, textNode, "before");
+    }
+    if (range.startOffset >= textLength) {
+      nextNode = getAdjacentNodeForCollapsedRange(editor, textNode, "after");
+    }
+
+    return {
+      previousNode,
+      nextNode,
+    };
+  }
+
+  function getRichImageElementFromRowNode(node: Node | null): HTMLElement | null {
+    const row = getRichImageDeleteRowElementFromNode(node);
+    if (!row) {
+      return null;
+    }
+
+    return row.querySelector<HTMLElement>(`.${RICH_IMAGE_CLASS_NAME}`);
+  }
+
+  function getRichImageElementFromNodeOrRow(node: Node | null): HTMLElement | null {
+    const fromNode = getRichImageElementFromNode(node);
+    if (fromNode) {
+      return fromNode;
+    }
+
+    const fromRow = getRichImageElementFromRowNode(node);
+    if (fromRow) {
+      return fromRow;
+    }
+
+    return null;
+  }
+
+  function getAdjacentRichImageElementFromCollapsedSelection(
+    editor: HTMLDivElement,
+    direction: "before" | "after"
+  ): HTMLElement | null {
+    const range = getCollapsedSelectionRangeInEditor(editor);
+    if (!range) {
+      return null;
+    }
+
+    const { previousNode, nextNode } = getAdjacentNodesFromCollapsedRange(editor, range);
+    const adjacentNode = direction === "before" ? previousNode : nextNode;
+
+    const adjacentImage = getRichImageElementFromNodeOrRow(adjacentNode);
+    if (!adjacentImage || !editor.contains(adjacentImage)) {
+      return null;
+    }
+
+    return adjacentImage;
+  }
+
+  function getInterImageBreakTargetFromCollapsedSelection(
+    editor: HTMLDivElement,
+    direction: "before" | "after"
+  ): {
+    breakNode: HTMLBRElement;
+    nextImage: HTMLElement;
+  } | null {
+    const range = getCollapsedSelectionRangeInEditor(editor);
+    if (!range) {
+      return null;
+    }
+
+    const { previousNode, nextNode } = getAdjacentNodesFromCollapsedRange(editor, range);
+    const breakNode =
+      direction === "before"
+        ? previousNode instanceof HTMLBRElement
+          ? previousNode
+          : null
+        : nextNode instanceof HTMLBRElement
+          ? nextNode
+          : null;
+    if (!breakNode) {
+      return null;
+    }
+
+    const previousRow = getRichImageDeleteRowElementFromNode(breakNode.previousSibling);
+    const nextRow = getRichImageDeleteRowElementFromNode(breakNode.nextSibling);
+    if (!previousRow || !nextRow) {
+      return null;
+    }
+
+    const nextImage = nextRow.querySelector<HTMLElement>(`.${RICH_IMAGE_CLASS_NAME}`);
+    if (!nextImage || !editor.contains(nextImage)) {
+      return null;
+    }
+
+    return {
+      breakNode,
+      nextImage,
+    };
+  }
+
+  function placeCaretBeforeRichImage(imageNode: HTMLElement) {
+    const selection = window.getSelection();
+    if (!selection) {
+      return;
+    }
+
+    const row = getRichImageDeleteRowElementByChild(imageNode);
+    const anchorNode = row ?? imageNode;
+    const leadingBreak =
+      row?.previousSibling instanceof HTMLBRElement
+        ? row.previousSibling
+        : imageNode.previousSibling instanceof HTMLBRElement
+          ? imageNode.previousSibling
+          : null;
+    const caretTarget = leadingBreak ?? anchorNode;
+
+    const range = document.createRange();
+    range.setStartBefore(caretTarget);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  function placeCaretAfterRichImage(imageNode: HTMLElement) {
+    const selection = window.getSelection();
+    if (!selection) {
+      return;
+    }
+
+    const row = getRichImageDeleteRowElementByChild(imageNode);
+    const anchorNode = row ?? imageNode;
+    const trailingBreak =
+      row?.nextSibling instanceof HTMLBRElement
+        ? row.nextSibling
+        : imageNode.nextSibling instanceof HTMLBRElement
+          ? imageNode.nextSibling
+          : null;
+
+    const range = document.createRange();
+    if (trailingBreak) {
+      range.setStartAfter(trailingBreak);
+    } else {
+      range.setStartAfter(anchorNode);
+    }
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
   function getRichImageDeleteLineTargetFromLineBelowCaret(
     editor: HTMLDivElement
   ): {
@@ -2798,7 +3182,6 @@ export default function CategoryWorkspace() {
 
   function ensureRichImageDeleteLines(editor: HTMLDivElement) {
     const figures = Array.from(editor.querySelectorAll<HTMLElement>(`.${RICH_IMAGE_CLASS_NAME}`));
-    const expectedLines = new Set<HTMLElement>();
     const expectedRows = new Set<HTMLElement>();
 
     for (const figure of figures) {
@@ -2815,57 +3198,35 @@ export default function CategoryWorkspace() {
         normalizeRichImageDeleteRowElement(row);
       }
 
+      row.setAttribute("data-rich-image-id", imageId);
+
       if (!row.contains(figure)) {
         row.appendChild(figure);
       }
-
-      let line: HTMLElement | null =
-        Array.from(row.children).find(
-          (child): child is HTMLElement =>
-            child instanceof HTMLElement &&
-            child.classList.contains(RICH_IMAGE_DELETE_LINE_CLASS_NAME) &&
-            child.getAttribute("data-rich-image-id")?.trim() === imageId
-        ) ?? null;
-
-      if (!(line instanceof HTMLElement)) {
-        line =
-          Array.from(row.children).find(
-            (child): child is HTMLElement =>
-              child instanceof HTMLElement &&
-              child.classList.contains(RICH_IMAGE_DELETE_LINE_CLASS_NAME)
-          ) ?? null;
-      }
-
-      if (!line || !(line instanceof HTMLElement)) {
-        line = createRichImageDeleteLineElement(editor.ownerDocument, imageId);
-      }
-
-      normalizeRichImageDeleteLineElement(line, imageId);
 
       if (row.firstElementChild !== figure) {
         row.insertAdjacentElement("afterbegin", figure);
       }
 
-      if (line.parentElement !== row || figure.nextElementSibling !== line) {
-        row.appendChild(line);
-      }
-
       for (const child of Array.from(row.children)) {
-        if (child !== figure && child !== line) {
+        if (child !== figure) {
           child.remove();
         }
       }
 
       for (const childNode of Array.from(row.childNodes)) {
-        if (childNode !== figure && childNode !== line && childNode.nodeType === Node.TEXT_NODE) {
+        if (childNode !== figure && childNode.nodeType === Node.TEXT_NODE) {
           childNode.remove();
         }
       }
 
       expectedRows.add(row);
-      expectedLines.add(line);
 
-      if (!(row.nextSibling instanceof HTMLBRElement)) {
+      const nextSibling = row.nextSibling;
+      const hasAdjacentImageRow =
+        nextSibling instanceof HTMLElement &&
+        nextSibling.classList.contains(RICH_IMAGE_DELETE_ROW_CLASS_NAME);
+      if (!hasAdjacentImageRow && !(nextSibling instanceof HTMLBRElement)) {
         row.insertAdjacentElement("afterend", editor.ownerDocument.createElement("br"));
       }
     }
@@ -2873,21 +3234,14 @@ export default function CategoryWorkspace() {
     for (const line of Array.from(
       editor.querySelectorAll<HTMLElement>(`.${RICH_IMAGE_DELETE_LINE_CLASS_NAME}`)
     )) {
-      if (expectedLines.has(line)) {
-        continue;
-      }
-
-      const previousSibling = line.previousSibling;
-      const nextBreak = line.nextSibling instanceof HTMLBRElement ? line.nextSibling : null;
+      const nextBreak =
+        line.nextSibling instanceof HTMLBRElement &&
+        (!line.parentElement ||
+          !line.parentElement.classList.contains(RICH_IMAGE_DELETE_ROW_CLASS_NAME))
+          ? line.nextSibling
+          : null;
       line.remove();
-      if (
-        nextBreak &&
-        (previousSibling === null ||
-          previousSibling instanceof HTMLBRElement ||
-          (previousSibling instanceof HTMLElement &&
-            (previousSibling.classList.contains(RICH_IMAGE_CLASS_NAME) ||
-              previousSibling.classList.contains(RICH_IMAGE_DELETE_ROW_CLASS_NAME))))
-      ) {
+      if (nextBreak) {
         nextBreak.remove();
       }
     }
@@ -2914,6 +3268,27 @@ export default function CategoryWorkspace() {
     }
   }
 
+  function hasRichImageArtifacts(editor: HTMLDivElement): boolean {
+    return Boolean(
+      editor.querySelector(
+        [
+          `.${RICH_IMAGE_CLASS_NAME}`,
+          `.${RICH_IMAGE_DELETE_ROW_CLASS_NAME}`,
+          `.${RICH_IMAGE_DELETE_LINE_CLASS_NAME}`,
+        ].join(",")
+      )
+    );
+  }
+
+  function ensureRichImageDeleteLinesIfNeeded(editor: HTMLDivElement): boolean {
+    if (!hasRichImageArtifacts(editor)) {
+      return false;
+    }
+
+    ensureRichImageDeleteLines(editor);
+    return true;
+  }
+
   function getRichImageElementFromEventTarget(
     target: EventTarget | null
   ): HTMLElement | null {
@@ -2927,6 +3302,167 @@ export default function CategoryWorkspace() {
     }
 
     return figure;
+  }
+
+  function getRichFileElementFromEventTarget(
+    target: EventTarget | null
+  ): HTMLAnchorElement | null {
+    if (!(target instanceof Element)) {
+      return null;
+    }
+
+    return target.closest<HTMLAnchorElement>(`a.${RICH_FILE_CLASS_NAME}`);
+  }
+
+  function getRichFileElementById(
+    editor: HTMLDivElement,
+    fileId: string
+  ): HTMLAnchorElement | null {
+    const normalizedId = fileId.trim();
+    if (!normalizedId) {
+      return null;
+    }
+
+    return (
+      Array.from(editor.querySelectorAll<HTMLAnchorElement>(`a.${RICH_FILE_CLASS_NAME}`)).find(
+        (node) => node.getAttribute("data-rich-file-id") === normalizedId
+      ) ?? null
+    );
+  }
+
+  function getRichFileElementFromNode(node: Node | null): HTMLAnchorElement | null {
+    if (!node) {
+      return null;
+    }
+
+    if (node instanceof HTMLAnchorElement && node.classList.contains(RICH_FILE_CLASS_NAME)) {
+      return node;
+    }
+
+    if (node instanceof Element) {
+      return node.closest<HTMLAnchorElement>(`a.${RICH_FILE_CLASS_NAME}`);
+    }
+
+    return (
+      node.parentElement?.closest<HTMLAnchorElement>(`a.${RICH_FILE_CLASS_NAME}`) ?? null
+    );
+  }
+
+  function getRichFileElementFromNodeOrBreakNeighbor(
+    node: Node | null,
+    direction: "before" | "after"
+  ): HTMLAnchorElement | null {
+    const directMatch = getRichFileElementFromNode(node);
+    if (directMatch) {
+      return directMatch;
+    }
+
+    if (!(node instanceof HTMLBRElement)) {
+      return null;
+    }
+
+    const neighbor = direction === "before" ? node.previousSibling : node.nextSibling;
+    return getRichFileElementFromNode(neighbor);
+  }
+
+  function resolveRichFileDeleteSelectionFromEditorSelection(
+    scope: RichEditorScope,
+    editor: HTMLDivElement,
+    key: "Backspace" | "Delete"
+  ): RichFileSelection | null {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) {
+      return null;
+    }
+
+    const range = selection.getRangeAt(0);
+    if (!editor.contains(range.startContainer) || !editor.contains(range.endContainer)) {
+      return null;
+    }
+
+    const toSelection = (fileNode: HTMLAnchorElement | null): RichFileSelection | null => {
+      const fileId = fileNode?.getAttribute("data-rich-file-id")?.trim() ?? "";
+      if (!fileId) {
+        return null;
+      }
+
+      return {
+        scope,
+        fileId,
+      };
+    };
+
+    const directMatch =
+      getRichFileElementFromNode(range.startContainer) ??
+      getRichFileElementFromNode(range.endContainer);
+    if (directMatch && editor.contains(directMatch)) {
+      return toSelection(directMatch);
+    }
+
+    if (!range.collapsed) {
+      const fileInsideSelection = Array.from(
+        editor.querySelectorAll<HTMLAnchorElement>(`a.${RICH_FILE_CLASS_NAME}`)
+      ).find((fileNode) => {
+        try {
+          return range.intersectsNode(fileNode);
+        } catch {
+          return false;
+        }
+      });
+
+      return toSelection(fileInsideSelection ?? null);
+    }
+
+    const { previousNode, nextNode } = getAdjacentNodesFromCollapsedRange(editor, range);
+    const candidate =
+      key === "Backspace"
+        ? getRichFileElementFromNodeOrBreakNeighbor(previousNode, "before")
+        : getRichFileElementFromNodeOrBreakNeighbor(nextNode, "after");
+
+    return toSelection(candidate);
+  }
+
+  function deleteRichFileBySelection(selection: RichFileSelection): boolean {
+    const editor = getEditorElement(selection.scope);
+    if (!editor) {
+      setRichFileDeleteConfirm(null);
+      setRichFileDeleteConfirmRect(null);
+      return false;
+    }
+
+    const fileNode = getRichFileElementById(editor, selection.fileId);
+    if (!fileNode) {
+      setRichFileDeleteConfirm(null);
+      setRichFileDeleteConfirmRect(null);
+      return false;
+    }
+
+    const trailingBreak =
+      fileNode.nextSibling instanceof HTMLBRElement ? fileNode.nextSibling : null;
+    const previousSibling = fileNode.previousSibling;
+    const selectionApi = window.getSelection();
+
+    fileNode.remove();
+    trailingBreak?.remove();
+
+    if (selectionApi) {
+      const nextRange = document.createRange();
+      if (previousSibling && previousSibling.parentNode === editor) {
+        nextRange.setStartAfter(previousSibling);
+      } else {
+        nextRange.setStart(editor, 0);
+      }
+      nextRange.collapse(true);
+      selectionApi.removeAllRanges();
+      selectionApi.addRange(nextRange);
+    }
+
+    setRichFileDeleteConfirm(null);
+    setRichFileDeleteConfirmRect(null);
+    applyEditorDomValueRef.current(selection.scope, editor);
+    rememberRichSelectionRef.current(selection.scope);
+    syncRichToolbarStateRef.current(selection.scope);
+    return true;
   }
 
   function detectRichImageResizeEdge(
@@ -2970,7 +3506,7 @@ export default function CategoryWorkspace() {
   }
 
   function setSelectedRichImageInScope(scope: RichEditorScope, imageId: string) {
-    setActiveRichEditor(scope);
+    setActiveRichEditorIfChanged(scope);
     setSelectedRichImage({
       scope,
       imageId,
@@ -3052,6 +3588,41 @@ export default function CategoryWorkspace() {
     return nextSelection.getRangeAt(0);
   }
 
+  function normalizeRichImageInsertionRange(
+    editor: HTMLDivElement,
+    sourceRange: Range
+  ): Range {
+    const range = sourceRange.cloneRange();
+    if (!range.collapsed) {
+      range.collapse(false);
+    }
+
+    if (range.startContainer instanceof Text) {
+      const textNode = range.startContainer;
+      const textLength = textNode.textContent?.length ?? 0;
+      if (range.startOffset > 0 && range.startOffset < textLength) {
+        range.setStartAfter(textNode);
+        range.collapse(true);
+      }
+    }
+
+    let containerNode: Node | null =
+      range.startContainer instanceof Text
+        ? range.startContainer.parentNode
+        : range.startContainer;
+
+    while (containerNode && containerNode !== editor && containerNode.parentNode !== editor) {
+      containerNode = containerNode.parentNode;
+    }
+
+    if (containerNode && containerNode !== editor && containerNode.parentNode === editor) {
+      range.setStartAfter(containerNode);
+      range.collapse(true);
+    }
+
+    return range;
+  }
+
   function insertRichImageAtCurrentSelection(
     scope: RichEditorScope,
     editor: HTMLDivElement,
@@ -3065,13 +3636,16 @@ export default function CategoryWorkspace() {
       return null;
     }
 
-    const range = ensureSelectionRangeInEditor(editor);
-    if (!range) {
+    const selectionRange = ensureSelectionRangeInEditor(editor);
+    if (!selectionRange) {
       return null;
     }
 
+    const range = normalizeRichImageInsertionRange(editor, selectionRange);
+
     const imageNode = createRichImageBlockElement(editor.ownerDocument, safeSrc, {
       width: options?.width,
+      displayScale: editorDisplayScale,
     });
     const imageId = imageNode.getAttribute("data-rich-image-id") ?? "";
     const imageRowNode = createRichImageDeleteRowWithImage(
@@ -3080,12 +3654,25 @@ export default function CategoryWorkspace() {
       imageId
     );
 
-    range.deleteContents();
-    const trailingBreak = editor.ownerDocument.createElement("br");
-    range.insertNode(trailingBreak);
-    range.insertNode(imageRowNode);
-
     const selection = window.getSelection();
+    if (selection) {
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+
+    range.insertNode(imageRowNode);
+    if (imageRowNode.previousSibling && !(imageRowNode.previousSibling instanceof HTMLBRElement)) {
+      imageRowNode.insertAdjacentElement("beforebegin", editor.ownerDocument.createElement("br"));
+    }
+
+    const trailingBreak =
+      imageRowNode.nextSibling instanceof HTMLBRElement
+        ? imageRowNode.nextSibling
+        : editor.ownerDocument.createElement("br");
+    if (!(imageRowNode.nextSibling instanceof HTMLBRElement)) {
+      imageRowNode.insertAdjacentElement("afterend", trailingBreak);
+    }
+
     if (selection) {
       const nextRange = document.createRange();
       nextRange.setStartAfter(trailingBreak);
@@ -3097,6 +3684,68 @@ export default function CategoryWorkspace() {
     setSelectedRichImageInScope(scope, imageId);
     setActiveRichImageDeleteLine(null);
     return imageId;
+  }
+
+  function insertRichFileAtCurrentSelection(
+    scope: RichEditorScope,
+    editor: HTMLDivElement,
+    fileMeta: {
+      src: string;
+      fileName: string;
+      mimeType: string;
+      sizeBytes: number;
+    }
+  ): string | null {
+    const safeSrc = normalizeRichFileSource(fileMeta.src);
+    if (!safeSrc) {
+      return null;
+    }
+
+    const selectionRange = ensureSelectionRangeInEditor(editor);
+    if (!selectionRange) {
+      return null;
+    }
+
+    const range = normalizeRichImageInsertionRange(editor, selectionRange);
+
+    const fileNode = createRichFileAttachmentElement(editor.ownerDocument, {
+      src: safeSrc,
+      fileName: fileMeta.fileName,
+      mimeType: fileMeta.mimeType,
+      sizeBytes: fileMeta.sizeBytes,
+    });
+
+    const selection = window.getSelection();
+    if (selection) {
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+
+    range.insertNode(fileNode);
+    if (fileNode.previousSibling && !(fileNode.previousSibling instanceof HTMLBRElement)) {
+      fileNode.insertAdjacentElement("beforebegin", editor.ownerDocument.createElement("br"));
+    }
+
+    const trailingBreak =
+      fileNode.nextSibling instanceof HTMLBRElement
+        ? fileNode.nextSibling
+        : editor.ownerDocument.createElement("br");
+    if (!(fileNode.nextSibling instanceof HTMLBRElement)) {
+      fileNode.insertAdjacentElement("afterend", trailingBreak);
+    }
+
+    if (selection) {
+      const nextRange = document.createRange();
+      nextRange.setStartAfter(trailingBreak);
+      nextRange.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(nextRange);
+    }
+
+    setSelectedRichImage(null);
+    setActiveRichImageDeleteLine(null);
+    setActiveRichEditor(scope);
+    return fileNode.getAttribute("data-rich-file-id") ?? null;
   }
 
   async function insertRichImagesFromFiles(
@@ -3132,6 +3781,46 @@ export default function CategoryWorkspace() {
     if (skippedCount > 0) {
       pushNotice(
         "Некоторые файлы пропущены: поддерживаются PNG, JPG, WEBP, GIF, BMP до 8MB.",
+        "warn"
+      );
+    }
+
+    return insertedCount;
+  }
+
+  async function insertRichFilesFromFiles(
+    scope: RichEditorScope,
+    editor: HTMLDivElement,
+    files: File[]
+  ): Promise<number> {
+    let insertedCount = 0;
+    let skippedCount = 0;
+
+    for (const file of files) {
+      const fileData = await fileToRichFileData(file);
+      if (!fileData) {
+        skippedCount += 1;
+        continue;
+      }
+
+      const insertedId = insertRichFileAtCurrentSelection(scope, editor, fileData);
+      if (!insertedId) {
+        skippedCount += 1;
+        continue;
+      }
+
+      insertedCount += 1;
+    }
+
+    if (insertedCount > 0) {
+      applyEditorDomValue(scope, editor);
+      rememberRichSelection(scope);
+      syncRichToolbarState(scope);
+    }
+
+    if (skippedCount > 0) {
+      pushNotice(
+        "Некоторые файлы пропущены: максимальный размер файла 16MB.",
         "warn"
       );
     }
@@ -3249,22 +3938,44 @@ export default function CategoryWorkspace() {
       return false;
     }
 
+    const savedRange = savedSelection.range;
+    if (!savedRange.startContainer.isConnected || !savedRange.endContainer.isConnected) {
+      savedRichSelectionRef.current = null;
+      return false;
+    }
+
+    if (
+      !editor.contains(savedRange.startContainer) ||
+      !editor.contains(savedRange.endContainer)
+    ) {
+      savedRichSelectionRef.current = null;
+      return false;
+    }
+
     try {
+      const rangeToRestore = savedRange.cloneRange();
       selection.removeAllRanges();
-      selection.addRange(savedSelection.range);
+      selection.addRange(rangeToRestore);
       return true;
     } catch {
+      savedRichSelectionRef.current = null;
       return false;
     }
   }
 
   function syncRichToolbarState(scope: RichEditorScope | null = activeRichEditor) {
     if (!scope) {
-      setRichToolbarState((prev) => ({
-        ...prev,
-        bold: false,
-        italic: false,
-      }));
+      setRichToolbarState((prev) => {
+        if (!prev.bold && !prev.italic) {
+          return prev;
+        }
+
+        return {
+          ...prev,
+          bold: false,
+          italic: false,
+        };
+      });
       return;
     }
 
@@ -3286,11 +3997,22 @@ export default function CategoryWorkspace() {
     const nextItalic = document.queryCommandState("italic");
     const nextColor = normalizeCssColorToHex(document.queryCommandValue("foreColor"));
 
-    setRichToolbarState((prev) => ({
-      bold: nextBold,
-      italic: nextItalic,
-      color: nextColor ?? prev.color,
-    }));
+    setRichToolbarState((prev) => {
+      const resolvedColor = nextColor ?? prev.color;
+      if (
+        prev.bold === nextBold &&
+        prev.italic === nextItalic &&
+        prev.color === resolvedColor
+      ) {
+        return prev;
+      }
+
+      return {
+        bold: nextBold,
+        italic: nextItalic,
+        color: resolvedColor,
+      };
+    });
 
     if (nextColor) {
       setCustomTextColor(nextColor);
@@ -3311,7 +4033,7 @@ export default function CategoryWorkspace() {
       setSelectedMessageId(null);
     }
 
-    setActiveRichEditor(scope);
+    setActiveRichEditorIfChanged(scope);
     editor.focus();
 
     const restored = restoreRichSelection(scope);
@@ -3336,7 +4058,7 @@ export default function CategoryWorkspace() {
         return;
       }
 
-      handleContinuousContentChange(normalizedHtml);
+      syncContinuousContentChange(currentCategory?.id ?? null, normalizedHtml);
       return;
     }
 
@@ -3346,12 +4068,19 @@ export default function CategoryWorkspace() {
       return;
     }
 
-    handleMessageContentChange(scope.messageId, normalizedHtml);
+    syncMessageContentChange(currentCategoryId, scope.messageId, normalizedHtml);
   }
 
   function normalizeEditorLinks(editor: HTMLDivElement) {
     const anchors = Array.from(editor.querySelectorAll("a"));
     for (const anchor of anchors) {
+      const isRichFileLink =
+        anchor.classList.contains(RICH_FILE_CLASS_NAME) ||
+        anchor.getAttribute("data-rich-file") === "true";
+      if (isRichFileLink) {
+        continue;
+      }
+
       const safeHref = normalizeRichLinkUrl(anchor.getAttribute("href") ?? "");
       if (!safeHref) {
         const parent = anchor.parentNode;
@@ -3444,6 +4173,28 @@ export default function CategoryWorkspace() {
     richImageFileRef.current?.click();
   }
 
+  function handleToolbarFile() {
+    if (!canUseRichToolbar) {
+      return;
+    }
+
+    const scope = resolveRichEditorScope();
+    if (!scope) {
+      pushNotice("Выбери текстовый редактор для добавления файла.", "warn");
+      return;
+    }
+
+    const editor = focusRichEditorForToolbar(scope);
+    if (!editor) {
+      pushNotice("Не удалось открыть редактор текста.", "error");
+      return;
+    }
+
+    setShowTextColorPalette(false);
+    rememberRichSelection(scope);
+    richFileRef.current?.click();
+  }
+
   async function handleToolbarImageInputChange(
     event: ChangeEvent<HTMLInputElement>
   ) {
@@ -3476,8 +4227,44 @@ export default function CategoryWorkspace() {
     }
   }
 
+  async function handleToolbarFileInputChange(
+    event: ChangeEvent<HTMLInputElement>
+  ) {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+
+    if (files.length === 0) {
+      return;
+    }
+
+    const scope = resolveRichEditorScope();
+    if (!scope) {
+      pushNotice("Выбери текстовый редактор для добавления файла.", "warn");
+      return;
+    }
+
+    const editor = focusRichEditorForToolbar(scope);
+    if (!editor) {
+      pushNotice("Не удалось открыть редактор текста.", "error");
+      return;
+    }
+
+    if (!restoreRichSelection(scope)) {
+      placeCaretAtEditorEnd(editor);
+    }
+
+    const inserted = await insertRichFilesFromFiles(scope, editor, files);
+    if (inserted > 0) {
+      pushNotice(`Добавлено файлов: ${inserted}.`);
+    }
+  }
+
   function collectImageFilesFromTransfer(dataTransfer: DataTransfer): File[] {
     return Array.from(dataTransfer.files).filter((file) => isSupportedRichImageFile(file));
+  }
+
+  function collectAttachmentFilesFromTransfer(dataTransfer: DataTransfer): File[] {
+    return Array.from(dataTransfer.files).filter((file) => !isSupportedRichImageFile(file));
   }
 
   function moveDraggedRichImageToDropTarget(
@@ -3539,16 +4326,39 @@ export default function CategoryWorkspace() {
     sourceTrailingBreak?.remove();
     sourceImageNode.classList.remove(RICH_IMAGE_DRAGGING_CLASS_NAME);
 
+    const targetRange = ensureSelectionRangeInEditor(targetEditor);
+    if (!targetRange) {
+      draggedRichImageRef.current = null;
+      return false;
+    }
+
+    const insertionRange = normalizeRichImageInsertionRange(targetEditor, targetRange);
+
     const imageRowNode = createRichImageDeleteRowWithImage(
       targetEditor.ownerDocument,
       sourceImageNode,
       draggedImage.imageId
     );
-    const trailingBreak = targetEditor.ownerDocument.createElement("br");
-    selectionRange.insertNode(trailingBreak);
-    selectionRange.insertNode(imageRowNode);
 
     const selection = window.getSelection();
+    if (selection) {
+      selection.removeAllRanges();
+      selection.addRange(insertionRange);
+    }
+
+    insertionRange.insertNode(imageRowNode);
+    if (imageRowNode.previousSibling && !(imageRowNode.previousSibling instanceof HTMLBRElement)) {
+      imageRowNode.insertAdjacentElement("beforebegin", targetEditor.ownerDocument.createElement("br"));
+    }
+
+    const trailingBreak =
+      imageRowNode.nextSibling instanceof HTMLBRElement
+        ? imageRowNode.nextSibling
+        : targetEditor.ownerDocument.createElement("br");
+    if (!(imageRowNode.nextSibling instanceof HTMLBRElement)) {
+      imageRowNode.insertAdjacentElement("afterend", trailingBreak);
+    }
+
     if (selection) {
       const nextRange = document.createRange();
       nextRange.setStartAfter(trailingBreak);
@@ -3585,9 +4395,12 @@ export default function CategoryWorkspace() {
       return;
     }
 
-    ensureRichImageDeleteLines(editor);
-
     const deleteLineNode = getRichImageDeleteLineElementFromEventTarget(event.target);
+    const imageNode = getRichImageElementFromEventTarget(event.target);
+    if (deleteLineNode || imageNode) {
+      ensureRichImageDeleteLinesIfNeeded(editor);
+    }
+
     if (deleteLineNode && editor.contains(deleteLineNode)) {
       if (!focusRichImageDeleteLineInScope(scope, deleteLineNode)) {
         setSelectedRichImage(null);
@@ -3603,7 +4416,6 @@ export default function CategoryWorkspace() {
       return;
     }
 
-    const imageNode = getRichImageElementFromEventTarget(event.target);
     if (!imageNode || !editor.contains(imageNode)) {
       setSelectedRichImage(null);
       setActiveRichImageDeleteLine(null);
@@ -3643,8 +4455,11 @@ export default function CategoryWorkspace() {
     event.stopPropagation();
 
     clearActiveRichImageResize();
-    const currentWidth = imageNode.getBoundingClientRect().width;
-    applyRichImageWidth(imageNode, currentWidth);
+    const displayScale = editorDisplayScale;
+    const currentWidth = clampRichImageWidth(
+      imageNode.getBoundingClientRect().width / displayScale
+    );
+    applyRichImageWidth(imageNode, currentWidth, displayScale);
     imageNode.classList.add(RICH_IMAGE_RESIZING_CLASS_NAME);
     try {
       imageNode.setPointerCapture(event.pointerId);
@@ -3659,6 +4474,7 @@ export default function CategoryWorkspace() {
       startX: event.clientX,
       startY: event.clientY,
       startWidth: currentWidth,
+      displayScale,
       editor,
       figure: imageNode,
     };
@@ -3713,6 +4529,42 @@ export default function CategoryWorkspace() {
     }
   }
 
+  function handleRichEditorClick(
+    scope: RichEditorScope,
+    event: React.MouseEvent<HTMLDivElement>
+  ) {
+    const editor = getEditorElement(scope);
+    if (!editor) {
+      return;
+    }
+
+    const fileLink = getRichFileElementFromEventTarget(event.target);
+    if (!fileLink || !editor.contains(fileLink)) {
+      return;
+    }
+
+    const rect = fileLink.getBoundingClientRect();
+    const clickOffsetX = event.clientX - rect.left;
+    const openButtonZoneWidth = Math.max(42, Math.min(rect.width, 56));
+    if (clickOffsetX > openButtonZoneWidth) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const safeHref = normalizeRichFileSource(fileLink.getAttribute("href") ?? "");
+    if (!safeHref) {
+      pushNotice("Не удалось открыть файл: ссылка повреждена.", "warn");
+      return;
+    }
+
+    const opened = window.open(safeHref, "_blank", "noopener,noreferrer");
+    if (!opened) {
+      pushNotice("Браузер заблокировал открытие файла в новой вкладке.", "warn");
+    }
+  }
+
   function handleRichEditorDragOver(event: DragEvent<HTMLElement>) {
     const transfer = event.dataTransfer;
     if (!transfer) {
@@ -3721,21 +4573,18 @@ export default function CategoryWorkspace() {
 
     const hasDraggedRichImage = Boolean(draggedRichImageRef.current);
     const hasFilePayload = Array.from(transfer.types ?? []).includes("Files");
-    const hasImageFile =
+    const hasSupportedFile =
       hasFilePayload &&
-      (Array.from(transfer.items ?? []).some(
-        (item) =>
-          item.kind === "file" &&
-          (isSupportedRichImageMimeType(item.type) || item.type.trim().length === 0)
-      ) || transfer.items.length === 0);
+      (Array.from(transfer.items ?? []).some((item) => item.kind === "file") ||
+        transfer.items.length === 0);
 
-    if (!hasDraggedRichImage && !hasImageFile) {
+    if (!hasDraggedRichImage && !hasSupportedFile) {
       return;
     }
 
     event.preventDefault();
     event.stopPropagation();
-    transfer.dropEffect = hasImageFile ? "copy" : "move";
+    transfer.dropEffect = hasSupportedFile ? "copy" : "move";
   }
 
   async function handleRichEditorDrop(
@@ -3748,6 +4597,7 @@ export default function CategoryWorkspace() {
     }
 
     const droppedImageFiles = collectImageFilesFromTransfer(transfer);
+    const droppedAttachmentFiles = collectAttachmentFilesFromTransfer(transfer);
     const hasDraggedRichImage = Boolean(draggedRichImageRef.current);
     const hasFilePayload = Array.from(transfer.types ?? []).includes("Files");
     if (!hasDraggedRichImage && !hasFilePayload) {
@@ -3757,9 +4607,13 @@ export default function CategoryWorkspace() {
     event.preventDefault();
     event.stopPropagation();
 
-    if (!hasDraggedRichImage && droppedImageFiles.length === 0) {
+    if (
+      !hasDraggedRichImage &&
+      droppedImageFiles.length === 0 &&
+      droppedAttachmentFiles.length === 0
+    ) {
       pushNotice(
-        "Поддерживаются только изображения PNG, JPG, WEBP, GIF и BMP до 8MB.",
+        "Не удалось распознать файлы для загрузки.",
         "warn"
       );
       return;
@@ -3779,7 +4633,7 @@ export default function CategoryWorkspace() {
       setSelectedMessageId(null);
     }
 
-    setActiveRichEditor(scope);
+    setActiveRichEditorIfChanged(scope);
     editor.focus();
     placeCaretAtEditorPoint(editor, event.clientX, event.clientY);
 
@@ -3787,11 +4641,23 @@ export default function CategoryWorkspace() {
       moveDraggedRichImageToDropTarget(scope, editor);
     }
 
+    let insertedImages = 0;
+    let insertedFiles = 0;
+
     if (droppedImageFiles.length > 0) {
-      const inserted = await insertRichImagesFromFiles(scope, editor, droppedImageFiles);
-      if (inserted > 0) {
-        pushNotice(`Добавлено фото: ${inserted}.`);
-      }
+      insertedImages = await insertRichImagesFromFiles(scope, editor, droppedImageFiles);
+    }
+
+    if (droppedAttachmentFiles.length > 0) {
+      insertedFiles = await insertRichFilesFromFiles(scope, editor, droppedAttachmentFiles);
+    }
+
+    if (insertedImages > 0 && insertedFiles > 0) {
+      pushNotice(`Добавлено: фото ${insertedImages}, файлов ${insertedFiles}.`);
+    } else if (insertedImages > 0) {
+      pushNotice(`Добавлено фото: ${insertedImages}.`);
+    } else if (insertedFiles > 0) {
+      pushNotice(`Добавлено файлов: ${insertedFiles}.`);
     }
 
     ensureRichImageDeleteLines(editor);
@@ -3802,12 +4668,25 @@ export default function CategoryWorkspace() {
     setRichImageDeleteConfirmRect(null);
   }
 
+  function cancelRichFileDeleteConfirmation() {
+    setRichFileDeleteConfirm(null);
+    setRichFileDeleteConfirmRect(null);
+  }
+
   function confirmRichImageDeleteConfirmation() {
     if (!richImageDeleteConfirm) {
       return;
     }
 
     deleteRichImageBySelection(richImageDeleteConfirm);
+  }
+
+  function confirmRichFileDeleteConfirmation() {
+    if (!richFileDeleteConfirm) {
+      return;
+    }
+
+    deleteRichFileBySelection(richFileDeleteConfirm);
   }
 
   function closeLinkPlaceholderModal() {
@@ -3896,7 +4775,11 @@ export default function CategoryWorkspace() {
       return;
     }
 
-    ensureRichImageDeleteLines(editor);
+    if (!ensureRichImageDeleteLinesIfNeeded(editor)) {
+      setSelectedRichImage(null);
+      setActiveRichImageDeleteLine(null);
+      return;
+    }
 
     const activeDeleteLine = getRichImageDeleteLineElementFromSelection(editor);
     if (activeDeleteLine) {
@@ -3942,7 +4825,156 @@ export default function CategoryWorkspace() {
       return;
     }
 
-    ensureRichImageDeleteLines(editor);
+    const hasModifierKey =
+      event.shiftKey || event.ctrlKey || event.metaKey || event.altKey;
+    if (
+      !hasModifierKey &&
+      (event.key === "Backspace" ||
+        event.key === "Delete" ||
+        event.key === "ArrowUp" ||
+        event.key === "ArrowDown")
+    ) {
+      ensureRichImageDeleteLinesIfNeeded(editor);
+    }
+
+    const fileDeleteSelection =
+      !hasModifierKey && (event.key === "Backspace" || event.key === "Delete")
+        ? resolveRichFileDeleteSelectionFromEditorSelection(scope, editor, event.key)
+        : null;
+    if (fileDeleteSelection) {
+      event.preventDefault();
+      setRichFileDeleteConfirmRect(null);
+      setRichFileDeleteConfirm(fileDeleteSelection);
+      return;
+    }
+
+    const selectedImageInScope =
+      selectedRichImage && isSameRichEditorScope(selectedRichImage.scope, scope)
+        ? selectedRichImage
+        : null;
+    const selectedImageNode = selectedImageInScope
+      ? getRichImageElementById(editor, selectedImageInScope.imageId)
+      : null;
+
+    if (selectedImageInScope && !selectedImageNode) {
+      setSelectedRichImage(null);
+      setActiveRichImageDeleteLine(null);
+    }
+
+    if (!hasModifierKey && event.key === "Delete" && selectedImageInScope && selectedImageNode) {
+      event.preventDefault();
+      setRichImageDeleteConfirmRect(null);
+      setRichImageDeleteConfirm(selectedImageInScope);
+      return;
+    }
+
+    if (!hasModifierKey && event.key === "Backspace") {
+      const interImageBreakTarget = getInterImageBreakTargetFromCollapsedSelection(
+        editor,
+        "before"
+      );
+      if (interImageBreakTarget) {
+        event.preventDefault();
+        interImageBreakTarget.breakNode.remove();
+        placeCaretBeforeRichImage(interImageBreakTarget.nextImage);
+        setSelectedRichImage(null);
+        setActiveRichImageDeleteLine(null);
+        applyEditorDomValue(scope, editor);
+        rememberRichSelection(scope);
+        syncRichToolbarState(scope);
+        return;
+      }
+    }
+
+    if (!hasModifierKey && event.key === "Delete") {
+      const interImageBreakTarget = getInterImageBreakTargetFromCollapsedSelection(editor, "after");
+      if (interImageBreakTarget) {
+        event.preventDefault();
+        interImageBreakTarget.breakNode.remove();
+        placeCaretBeforeRichImage(interImageBreakTarget.nextImage);
+        setSelectedRichImage(null);
+        setActiveRichImageDeleteLine(null);
+        applyEditorDomValue(scope, editor);
+        rememberRichSelection(scope);
+        syncRichToolbarState(scope);
+        return;
+      }
+    }
+
+    if (!hasModifierKey && (event.key === "Backspace" || event.key === "Delete")) {
+      const selection = window.getSelection();
+      if (selection && selection.rangeCount > 0) {
+        const selectionRange = selection.getRangeAt(0);
+        if (
+          !selectionRange.collapsed &&
+          editor.contains(selectionRange.startContainer) &&
+          editor.contains(selectionRange.endContainer)
+        ) {
+          const imageInsideSelection = Array.from(
+            editor.querySelectorAll<HTMLElement>(`.${RICH_IMAGE_CLASS_NAME}`)
+          ).find((imageNode) => {
+            try {
+              return selectionRange.intersectsNode(imageNode);
+            } catch {
+              return false;
+            }
+          });
+
+          if (imageInsideSelection) {
+            event.preventDefault();
+            if (event.key === "Backspace") {
+              placeCaretBeforeRichImage(imageInsideSelection);
+            } else {
+              placeCaretAfterRichImage(imageInsideSelection);
+            }
+
+            setSelectedRichImage(null);
+            setActiveRichImageDeleteLine(null);
+            rememberRichSelection(scope);
+            syncRichToolbarState(scope);
+            return;
+          }
+        }
+      }
+    }
+
+    if (!hasModifierKey && event.key === "Backspace") {
+      const imageBeforeCaret =
+        selectedImageNode ??
+        getAdjacentRichImageElementFromCollapsedSelection(editor, "before");
+      if (imageBeforeCaret) {
+        event.preventDefault();
+        placeCaretBeforeRichImage(imageBeforeCaret);
+        setSelectedRichImage(null);
+        setActiveRichImageDeleteLine(null);
+        rememberRichSelection(scope);
+        syncRichToolbarState(scope);
+        return;
+      }
+    }
+
+    if (!hasModifierKey && event.key === "Delete") {
+      const imageAfterCaret = getAdjacentRichImageElementFromCollapsedSelection(editor, "after");
+      if (imageAfterCaret) {
+        event.preventDefault();
+        placeCaretAfterRichImage(imageAfterCaret);
+        setSelectedRichImage(null);
+        setActiveRichImageDeleteLine(null);
+        rememberRichSelection(scope);
+        syncRichToolbarState(scope);
+        return;
+      }
+    }
+
+    if (selectedImageNode && (event.key === "Enter" || isPlainCharacterKey(event))) {
+      event.preventDefault();
+      placeCaretAfterRichImage(selectedImageNode);
+      setSelectedRichImage(null);
+      setActiveRichImageDeleteLine(null);
+      rememberRichSelection(scope);
+      syncRichToolbarState(scope);
+      return;
+    }
 
     const fromLineBelow =
       !event.shiftKey &&
@@ -4015,39 +5047,105 @@ export default function CategoryWorkspace() {
   function handleRichEditorFocus(scope: RichEditorScope) {
     const editor = getEditorElement(scope);
     if (editor) {
-      ensureRichImageDeleteLines(editor);
+      ensureRichImageDeleteLinesIfNeeded(editor);
     }
 
-    setActiveRichEditor(scope);
+    setActiveRichEditorIfChanged(scope);
     syncRichImageSelectionFromEditorSelection(scope);
     rememberRichSelection(scope);
     syncRichToolbarState(scope);
   }
 
   function handleRichEditorSelectionActivity(scope: RichEditorScope) {
-    setActiveRichEditor(scope);
+    setActiveRichEditorIfChanged(scope);
     syncRichImageSelectionFromEditorSelection(scope);
     rememberRichSelection(scope);
     syncRichToolbarState(scope);
+  }
+
+  function handleRichEditorInputActivity(scope: RichEditorScope) {
+    applyRichImageDisplayScaleToEditor(getEditorElement(scope), editorDisplayScale);
+    setActiveRichEditorIfChanged(scope);
+    rememberRichSelection(scope);
+    syncRichToolbarState(scope);
+  }
+
+  function handleRichEditorMouseUp(
+    scope: RichEditorScope,
+    event: React.MouseEvent<HTMLDivElement>
+  ) {
+    const editor = getEditorElement(scope);
+    if (!editor) {
+      return;
+    }
+
+    const targetNode = event.target instanceof Node ? event.target : null;
+    const imageNode = getRichImageElementFromNodeOrRow(targetNode);
+    if (!imageNode || !editor.contains(imageNode)) {
+      handleRichEditorSelectionActivity(scope);
+      return;
+    }
+
+    const imageId = imageNode.getAttribute("data-rich-image-id")?.trim() ?? "";
+    if (!imageId) {
+      handleRichEditorSelectionActivity(scope);
+      return;
+    }
+
+    setSelectedRichImageInScope(scope, imageId);
+    setActiveRichImageDeleteLine(null);
+    placeCaretAfterRichImage(imageNode);
+    rememberRichSelection(scope);
+    syncRichToolbarState(scope);
+  }
+
+  function handleRichEditorKeyUp(
+    scope: RichEditorScope,
+    event: React.KeyboardEvent<HTMLDivElement>
+  ) {
+    if (event.key === "Delete" || event.key === "Backspace") {
+      const editor = getEditorElement(scope);
+      const selectedImageInScope =
+        selectedRichImage && isSameRichEditorScope(selectedRichImage.scope, scope)
+          ? selectedRichImage
+          : null;
+      const selectedImageNode =
+        editor && selectedImageInScope
+          ? getRichImageElementById(editor, selectedImageInScope.imageId)
+          : null;
+
+      if (selectedImageNode) {
+        rememberRichSelection(scope);
+        syncRichToolbarState(scope);
+        return;
+      }
+    }
+
+    if (event.key === "Enter" || isPlainCharacterKey(event)) {
+      handleRichEditorInputActivity(scope);
+      return;
+    }
+
+    handleRichEditorSelectionActivity(scope);
   }
 
   function handleBlockEditorInput(
     messageId: string,
     event: FormEvent<HTMLDivElement>
   ) {
+    if (!currentCategoryId) {
+      return;
+    }
+
     const scope: RichEditorScope = {
       kind: "block",
       messageId,
     };
 
-    ensureRichImageDeleteLines(event.currentTarget);
-
-    handleMessageContentChange(
-      messageId,
-      sanitizeRichTextHtml(event.currentTarget.innerHTML)
-    );
+    queueMessageContentSync(currentCategoryId, messageId, event.currentTarget);
     setSelectedRichImage(null);
-    handleRichEditorSelectionActivity(scope);
+    setActiveRichImageDeleteLine(null);
+    handleRichEditorInputActivity(scope);
   }
 
   function handleContinuousEditorInput(event: FormEvent<HTMLDivElement>) {
@@ -4059,11 +5157,10 @@ export default function CategoryWorkspace() {
       kind: "continuous",
     };
 
-    ensureRichImageDeleteLines(event.currentTarget);
-
-    handleContinuousContentChange(sanitizeRichTextHtml(event.currentTarget.innerHTML));
+    queueContinuousContentSync(currentCategory.id, event.currentTarget);
     setSelectedRichImage(null);
-    handleRichEditorSelectionActivity(scope);
+    setActiveRichImageDeleteLine(null);
+    handleRichEditorInputActivity(scope);
   }
 
   function openCategory(categoryId: string, messageId?: string) {
@@ -4960,9 +6057,10 @@ export default function CategoryWorkspace() {
   function enqueueMessageContentSave(
     categoryId: string,
     messageId: string,
-    content: string,
+    rawContent: string,
     version: number
   ) {
+    const content = sanitizeRichTextHtml(rawContent);
     const ackVersion = messageAckVersionRef.current[messageId] ?? 0;
     if (savedMessageContentRef.current[messageId] === content && version <= ackVersion) {
       delete pendingMessageSaveRef.current[messageId];
@@ -5040,30 +6138,64 @@ export default function CategoryWorkspace() {
     syncMessageSavingState();
   }
 
-  function handleMessageContentChange(messageId: string, nextValue: string) {
-    if (!currentCategoryId) {
+  function syncMessageContentChange(
+    categoryId: string | null,
+    messageId: string,
+    nextValue: string
+  ) {
+    if (!categoryId) {
       return;
     }
-
-    const normalizedValue = sanitizeRichTextHtml(nextValue);
 
     const nextVersion = (messageDraftVersionRef.current[messageId] ?? 0) + 1;
     messageDraftVersionRef.current[messageId] = nextVersion;
 
-    setMessagesByCategory((prev) => ({
-      ...prev,
-      [currentCategoryId]: (prev[currentCategoryId] ?? []).map((message) =>
-        message.id === messageId
-          ? {
-              ...message,
-              content: normalizedValue,
-              updated_at: new Date().toISOString(),
-            }
-          : message
-      ),
-    }));
+    startEditorTransition(() => {
+      setMessagesByCategory((prev) => ({
+        ...prev,
+        [categoryId]: (prev[categoryId] ?? []).map((message) =>
+          message.id === messageId
+            ? {
+                ...message,
+                content: nextValue,
+                updated_at: new Date().toISOString(),
+              }
+            : message
+        ),
+      }));
+    });
 
-    scheduleMessageContentSave(currentCategoryId, messageId, normalizedValue, nextVersion);
+    scheduleMessageContentSave(categoryId, messageId, nextValue, nextVersion);
+  }
+
+  function queueMessageContentSync(
+    categoryId: string,
+    messageId: string,
+    editor: HTMLDivElement
+  ) {
+    const existingTimer = messageInputSyncTimersRef.current[messageId];
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+    }
+
+    messageInputSyncTimersRef.current[messageId] = setTimeout(() => {
+      delete messageInputSyncTimersRef.current[messageId];
+      syncMessageContentChange(categoryId, messageId, editor.innerHTML);
+    }, EDITOR_INPUT_SYNC_DELAY_MS);
+  }
+
+  function flushMessageContentSync(
+    categoryId: string,
+    messageId: string,
+    editor: HTMLDivElement
+  ) {
+    const existingTimer = messageInputSyncTimersRef.current[messageId];
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+      delete messageInputSyncTimersRef.current[messageId];
+    }
+
+    syncMessageContentChange(categoryId, messageId, editor.innerHTML);
   }
 
   function enqueueContinuousSave(categoryId: string, content: string, version: number) {
@@ -5128,6 +6260,56 @@ export default function CategoryWorkspace() {
     syncCategorySavingState();
   }
 
+  function scheduleContinuousDocumentSave(
+    categoryId: string,
+    document: ContinuousContentModel,
+    version: number
+  ) {
+    const existingTimer = categorySaveTimersRef.current[categoryId];
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+    }
+
+    categorySaveTimersRef.current[categoryId] = setTimeout(() => {
+      delete categorySaveTimersRef.current[categoryId];
+
+      const latestVersion = categoryDraftVersionRef.current[categoryId] ?? 0;
+      if (version < latestVersion) {
+        syncCategorySavingState();
+        return;
+      }
+
+      const serializedContent = serializeContinuousContent(document);
+      const ackVersion = categoryAckVersionRef.current[categoryId] ?? 0;
+      if (
+        savedCategoryContentRef.current[categoryId] === serializedContent &&
+        version <= ackVersion
+      ) {
+        syncCategorySavingState();
+        return;
+      }
+
+      startEditorTransition(() => {
+        setCategories((prev) =>
+          prev.map((category) =>
+            category.id === categoryId
+              ? {
+                  ...category,
+                  content: serializedContent,
+                  updated_at: new Date().toISOString(),
+                }
+              : category
+          )
+        );
+      });
+
+      enqueueContinuousSave(categoryId, serializedContent, version);
+      syncCategorySavingState();
+    }, 420);
+
+    syncCategorySavingState();
+  }
+
   function getContinuousDocumentForCategory(
     categoryId: string
   ): ContinuousContentModel | null {
@@ -5138,7 +6320,7 @@ export default function CategoryWorkspace() {
 
     if (currentCategory?.id === categoryId && currentCategory.format === "continuous") {
       return {
-        text: continuousDraft,
+        text: continuousEditorRef.current?.innerHTML ?? continuousDraft,
         checklists: normalizeChecklistBlocks(continuousChecklists),
       };
     }
@@ -5193,22 +6375,54 @@ export default function CategoryWorkspace() {
     return true;
   }
 
-  function handleContinuousContentChange(nextValue: string) {
-    if (!currentCategory || currentCategory.format !== "continuous") {
+  function syncContinuousContentChange(
+    categoryId: string | null,
+    nextValue: string
+  ) {
+    if (!categoryId) {
       return;
     }
 
-    const normalizedValue = sanitizeRichTextHtml(nextValue);
+    const nextVersion = (categoryDraftVersionRef.current[categoryId] ?? 0) + 1;
+    categoryDraftVersionRef.current[categoryId] = nextVersion;
+    const nextDocument = getContinuousDocumentForCategory(categoryId);
 
-    const document = getContinuousDocumentForCategory(currentCategory.id);
-    if (!document) {
-      return;
-    }
-
-    commitContinuousDocumentForCategory(currentCategory.id, {
-      text: normalizedValue,
-      checklists: document.checklists,
+    startEditorTransition(() => {
+      if (currentCategory?.id === categoryId && currentCategory.format === "continuous") {
+        setContinuousDraft(nextValue);
+      }
     });
+
+    scheduleContinuousDocumentSave(
+      categoryId,
+      {
+        text: nextValue,
+        checklists: nextDocument?.checklists ?? [],
+      },
+      nextVersion
+    );
+  }
+
+  function queueContinuousContentSync(categoryId: string, editor: HTMLDivElement) {
+    const existingTimer = categoryInputSyncTimersRef.current[categoryId];
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+    }
+
+    categoryInputSyncTimersRef.current[categoryId] = setTimeout(() => {
+      delete categoryInputSyncTimersRef.current[categoryId];
+      syncContinuousContentChange(categoryId, editor.innerHTML);
+    }, EDITOR_INPUT_SYNC_DELAY_MS);
+  }
+
+  function flushContinuousContentSync(categoryId: string, editor: HTMLDivElement) {
+    const existingTimer = categoryInputSyncTimersRef.current[categoryId];
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+      delete categoryInputSyncTimersRef.current[categoryId];
+    }
+
+    syncContinuousContentChange(categoryId, editor.innerHTML);
   }
 
   function openChecklistEditorForCreate() {
@@ -6941,6 +8155,7 @@ export default function CategoryWorkspace() {
   applyEditorDomValueRef.current = applyEditorDomValue;
   ensureRichImageDeleteLinesRef.current = ensureRichImageDeleteLines;
   deleteRichImageBySelectionRef.current = deleteRichImageBySelection;
+  deleteRichFileBySelectionRef.current = deleteRichFileBySelection;
   rememberRichSelectionRef.current = rememberRichSelection;
   syncRichToolbarStateRef.current = syncRichToolbarState;
 
@@ -7036,6 +8251,16 @@ export default function CategoryWorkspace() {
             disabled={!canUseRichToolbar}
           >
             image
+          </button>
+
+          <button
+            type="button"
+            className="mini-action text-tool-button"
+            onMouseDown={handleToolbarControlMouseDown}
+            onClick={handleToolbarFile}
+            disabled={!canUseRichToolbar}
+          >
+            file
           </button>
 
           <div className="text-color-wrap">
@@ -7668,6 +8893,17 @@ export default function CategoryWorkspace() {
                               contentEditable={!isMutating && !isLoading}
                               suppressContentEditableWarning
                               onInput={(event) => handleBlockEditorInput(message.id, event)}
+                              onBlur={(event) => {
+                                if (!currentCategoryId) {
+                                  return;
+                                }
+
+                                flushMessageContentSync(
+                                  currentCategoryId,
+                                  message.id,
+                                  event.currentTarget
+                                );
+                              }}
                               onPointerDown={(event) =>
                                 handleRichEditorPointerDown(
                                   {
@@ -7704,11 +8940,23 @@ export default function CategoryWorkspace() {
                                   messageId: message.id,
                                 });
                               }}
-                              onMouseUp={() =>
-                                handleRichEditorSelectionActivity({
-                                  kind: "block",
-                                  messageId: message.id,
-                                })
+                              onClick={(event) =>
+                                handleRichEditorClick(
+                                  {
+                                    kind: "block",
+                                    messageId: message.id,
+                                  },
+                                  event
+                                )
+                              }
+                              onMouseUp={(event) =>
+                                handleRichEditorMouseUp(
+                                  {
+                                    kind: "block",
+                                    messageId: message.id,
+                                  },
+                                  event
+                                )
                               }
                               onKeyDown={(event) =>
                                 handleRichEditorKeyDown(
@@ -7719,11 +8967,14 @@ export default function CategoryWorkspace() {
                                   event
                                 )
                               }
-                              onKeyUp={() =>
-                                handleRichEditorSelectionActivity({
-                                  kind: "block",
-                                  messageId: message.id,
-                                })
+                              onKeyUp={(event) =>
+                                handleRichEditorKeyUp(
+                                  {
+                                    kind: "block",
+                                    messageId: message.id,
+                                  },
+                                  event
+                                )
                               }
                               className="message-editor message-editor-rich"
                               style={editorTextScaleStyle}
@@ -7909,6 +9160,13 @@ export default function CategoryWorkspace() {
                     contentEditable={!(!currentCategoryId || isLoading || Boolean(loadError))}
                     suppressContentEditableWarning
                     onInput={handleContinuousEditorInput}
+                    onBlur={(event) => {
+                      if (!currentCategory || currentCategory.format !== "continuous") {
+                        return;
+                      }
+
+                      flushContinuousContentSync(currentCategory.id, event.currentTarget);
+                    }}
                     onPointerDown={(event) =>
                       handleRichEditorPointerDown(
                         {
@@ -7941,10 +9199,21 @@ export default function CategoryWorkspace() {
                         kind: "continuous",
                       });
                     }}
-                    onMouseUp={() =>
-                      handleRichEditorSelectionActivity({
-                        kind: "continuous",
-                      })
+                    onClick={(event) =>
+                      handleRichEditorClick(
+                        {
+                          kind: "continuous",
+                        },
+                        event
+                      )
+                    }
+                    onMouseUp={(event) =>
+                      handleRichEditorMouseUp(
+                        {
+                          kind: "continuous",
+                        },
+                        event
+                      )
                     }
                     onKeyDown={(event) =>
                       handleRichEditorKeyDown(
@@ -7954,10 +9223,13 @@ export default function CategoryWorkspace() {
                         event
                       )
                     }
-                    onKeyUp={() =>
-                      handleRichEditorSelectionActivity({
-                        kind: "continuous",
-                      })
+                    onKeyUp={(event) =>
+                      handleRichEditorKeyUp(
+                        {
+                          kind: "continuous",
+                        },
+                        event
+                      )
                     }
                     className="continuous-editor continuous-editor-main continuous-editor-rich"
                     style={editorTextScaleStyle}
@@ -8445,6 +9717,14 @@ export default function CategoryWorkspace() {
           onChange={(event) => void handleToolbarImageInputChange(event)}
         />
 
+        <input
+          ref={richFileRef}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={(event) => void handleToolbarFileInputChange(event)}
+        />
+
         {richImageDeleteConfirm && richImageDeleteConfirmRect && (
           <div
             className="rich-image-delete-confirm-overlay"
@@ -8473,6 +9753,46 @@ export default function CategoryWorkspace() {
                   type="button"
                   className="mini-action"
                   onClick={cancelRichImageDeleteConfirmation}
+                >
+                  отменить
+                </button>
+              </div>
+
+              <p className="rich-image-delete-confirm-hint">
+                нажать enter - чтобы удалить, либо у esc - чтобы отменить
+              </p>
+            </div>
+          </div>
+        )}
+
+        {richFileDeleteConfirm && richFileDeleteConfirmRect && (
+          <div
+            className="rich-image-delete-confirm-overlay"
+            style={{
+              top: `${richFileDeleteConfirmRect.top}px`,
+              left: `${richFileDeleteConfirmRect.left}px`,
+              width: `${richFileDeleteConfirmRect.width}px`,
+              height: `${richFileDeleteConfirmRect.height}px`,
+            }}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Подтверждение удаления файла"
+          >
+            <div className="rich-image-delete-confirm-content">
+              <p className="rich-image-delete-confirm-title">Подтвердить удаление файла</p>
+
+              <div className="rich-image-delete-confirm-actions">
+                <button
+                  type="button"
+                  className="danger-action"
+                  onClick={confirmRichFileDeleteConfirmation}
+                >
+                  удалить
+                </button>
+                <button
+                  type="button"
+                  className="mini-action"
+                  onClick={cancelRichFileDeleteConfirmation}
                 >
                   отменить
                 </button>
@@ -9452,6 +10772,8 @@ const RICH_IMAGE_ALLOWED_MIME_TYPES = new Set([
   "image/bmp",
 ]);
 
+const RICH_FILE_DEFAULT_MIME_TYPE = "application/octet-stream";
+
 function clampRichImageWidth(value: number): number {
   if (!Number.isFinite(value)) {
     return DEFAULT_RICH_IMAGE_WIDTH;
@@ -9468,6 +10790,20 @@ function clampEditorTextScalePercent(value: number): number {
   return Math.min(
     MAX_EDITOR_TEXT_SCALE_PERCENT,
     Math.max(MIN_EDITOR_TEXT_SCALE_PERCENT, Math.round(value))
+  );
+}
+
+function normalizeEditorDisplayScale(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    return 1;
+  }
+
+  return value;
+}
+
+function getEditorDisplayScale(textScalePercent: number): number {
+  return normalizeEditorDisplayScale(
+    clampEditorTextScalePercent(textScalePercent) / DEFAULT_EDITOR_TEXT_SCALE_PERCENT
   );
 }
 
@@ -9505,10 +10841,6 @@ function inferRichImageMimeTypeByFileName(fileName: string): string | null {
   }
 
   return null;
-}
-
-function isSupportedRichImageMimeType(value: string | null | undefined): boolean {
-  return Boolean(normalizeRichImageMimeType(value));
 }
 
 function isSupportedRichImageFile(file: File): boolean {
@@ -9581,9 +10913,24 @@ function parseRichImageWidth(value: string | null | undefined): number | null {
   return clampRichImageWidth(parsed);
 }
 
-function applyRichImageWidth(imageNode: HTMLElement, width: number): number {
+function getRichImageBaseWidth(imageNode: HTMLElement): number {
+  return (
+    parseRichImageWidth(imageNode.getAttribute("data-rich-image-width")) ??
+    parseRichImageWidth(imageNode.style.width) ??
+    parseRichImageWidth(imageNode.getAttribute("width")) ??
+    DEFAULT_RICH_IMAGE_WIDTH
+  );
+}
+
+function applyRichImageWidth(
+  imageNode: HTMLElement,
+  width: number,
+  displayScale = 1
+): number {
   const clamped = clampRichImageWidth(width);
-  imageNode.style.width = `${clamped}px`;
+  const displayWidth =
+    Math.round(clamped * normalizeEditorDisplayScale(displayScale) * 100) / 100;
+  imageNode.style.width = `${displayWidth}px`;
   imageNode.setAttribute("data-rich-image-width", String(clamped));
   return clamped;
 }
@@ -9594,6 +10941,7 @@ function createRichImageBlockElement(
   options?: {
     imageId?: string;
     width?: number;
+    displayScale?: number;
   }
 ): HTMLElement {
   const imageId = normalizeRichImageId(options?.imageId);
@@ -9604,7 +10952,7 @@ function createRichImageBlockElement(
   figure.setAttribute("data-rich-image-id", imageId);
   figure.setAttribute("draggable", "true");
   figure.setAttribute("contenteditable", "false");
-  applyRichImageWidth(figure, width);
+  applyRichImageWidth(figure, width, options?.displayScale);
 
   const image = ownerDocument.createElement("img");
   image.setAttribute("src", src);
@@ -9639,6 +10987,278 @@ async function fileToRichImageDataUrl(file: File): Promise<string | null> {
 
       const base64Body = result.slice(commaIndex + 1).replace(/\s+/g, "");
       resolve(normalizeRichImageSource(`data:${mimeType};base64,${base64Body}`));
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function normalizeRichFileMimeType(value: string | null | undefined): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  if (!/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/i.test(normalized)) {
+    return null;
+  }
+
+  return normalized;
+}
+
+function inferRichFileMimeTypeByFileName(fileName: string): string | null {
+  const lower = fileName.trim().toLowerCase();
+  if (!lower) {
+    return null;
+  }
+
+  if (lower.endsWith(".pdf")) {
+    return "application/pdf";
+  }
+  if (lower.endsWith(".txt")) {
+    return "text/plain";
+  }
+  if (lower.endsWith(".md")) {
+    return "text/markdown";
+  }
+  if (lower.endsWith(".csv")) {
+    return "text/csv";
+  }
+  if (lower.endsWith(".json")) {
+    return "application/json";
+  }
+  if (lower.endsWith(".xml")) {
+    return "application/xml";
+  }
+  if (lower.endsWith(".zip")) {
+    return "application/zip";
+  }
+  if (lower.endsWith(".rar")) {
+    return "application/vnd.rar";
+  }
+  if (lower.endsWith(".7z")) {
+    return "application/x-7z-compressed";
+  }
+  if (lower.endsWith(".doc")) {
+    return "application/msword";
+  }
+  if (lower.endsWith(".docx")) {
+    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  }
+  if (lower.endsWith(".xls")) {
+    return "application/vnd.ms-excel";
+  }
+  if (lower.endsWith(".xlsx")) {
+    return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  }
+  if (lower.endsWith(".ppt")) {
+    return "application/vnd.ms-powerpoint";
+  }
+  if (lower.endsWith(".pptx")) {
+    return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+  }
+  if (lower.endsWith(".rtf")) {
+    return "application/rtf";
+  }
+
+  return null;
+}
+
+function normalizeRichFileSource(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (/^data:/i.test(trimmed)) {
+    const match = trimmed.match(/^data:([^;,]+);base64,([a-z0-9+/=\s]+)$/i);
+    if (!match) {
+      return null;
+    }
+
+    const mimeType = normalizeRichFileMimeType(match[1]);
+    if (!mimeType) {
+      return null;
+    }
+
+    const base64Body = match[2]?.replace(/\s+/g, "") ?? "";
+    if (!base64Body || !/^[a-z0-9+/]+=*$/i.test(base64Body)) {
+      return null;
+    }
+
+    return `data:${mimeType};base64,${base64Body}`;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      return parsed.toString();
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function normalizeRichFileId(value: string | null | undefined): string {
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  if (/^[a-z0-9_-]{3,100}$/i.test(trimmed)) {
+    return trimmed;
+  }
+
+  return crypto.randomUUID();
+}
+
+function normalizeRichFileName(value: string | null | undefined): string {
+  const normalized = typeof value === "string" ? value.trim().replace(/\s+/g, " ") : "";
+  if (!normalized) {
+    return "file";
+  }
+
+  return normalized.slice(0, 220);
+}
+
+function normalizeRichFileSizeBytes(value: unknown): number | null {
+  const parsed =
+    typeof value === "number"
+      ? value
+      : typeof value === "string"
+        ? Number(value.trim())
+        : Number.NaN;
+
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+
+  if (parsed <= 0) {
+    return 0;
+  }
+
+  return Math.min(MAX_RICH_FILE_BYTES, Math.round(parsed));
+}
+
+function inferRichFileSizeBytesFromDataUrl(source: string): number | null {
+  const match = source.match(/^data:[^;,]+;base64,([a-z0-9+/=\s]+)$/i);
+  if (!match) {
+    return null;
+  }
+
+  const body = match[1].replace(/\s+/g, "");
+  if (!body) {
+    return 0;
+  }
+
+  const padding = body.endsWith("==") ? 2 : body.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((body.length * 3) / 4) - padding);
+}
+
+function formatRichFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unitIndex = 0;
+
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  const digits = unitIndex === 0 || value >= 100 ? 0 : 1;
+  return `${value.toFixed(digits)} ${units[unitIndex]}`;
+}
+
+function createRichFileAttachmentElement(
+  ownerDocument: Document,
+  options: {
+    src: string;
+    fileName: string;
+    mimeType?: string;
+    sizeBytes?: number;
+    fileId?: string;
+  }
+): HTMLAnchorElement {
+  const safeSrc = normalizeRichFileSource(options.src) ?? "";
+  const fileName = normalizeRichFileName(options.fileName);
+  const mimeType =
+    normalizeRichFileMimeType(options.mimeType) ??
+    inferRichFileMimeTypeByFileName(fileName) ??
+    RICH_FILE_DEFAULT_MIME_TYPE;
+  const normalizedSize =
+    normalizeRichFileSizeBytes(options.sizeBytes) ??
+    inferRichFileSizeBytesFromDataUrl(safeSrc) ??
+    0;
+  const sizeLabel = formatRichFileSize(normalizedSize);
+
+  const link = ownerDocument.createElement("a");
+  link.className = RICH_FILE_CLASS_NAME;
+  link.setAttribute("data-rich-file", "true");
+  link.setAttribute("data-rich-file-id", normalizeRichFileId(options.fileId));
+  link.setAttribute("data-rich-file-name", fileName);
+  link.setAttribute("data-rich-file-mime-type", mimeType);
+  link.setAttribute("data-rich-file-size-bytes", String(normalizedSize));
+  link.setAttribute("data-rich-file-size-label", sizeLabel);
+  link.setAttribute("href", safeSrc || "#");
+  link.setAttribute("target", "_blank");
+  link.setAttribute("rel", "noopener noreferrer");
+  link.setAttribute("contenteditable", "false");
+  link.setAttribute("draggable", "false");
+  link.setAttribute("aria-label", `Открыть файл ${fileName}`);
+  link.setAttribute("title", `${fileName} (${sizeLabel})`);
+  link.textContent = fileName;
+  return link;
+}
+
+async function fileToRichFileData(file: File): Promise<{
+  src: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+} | null> {
+  if (file.size > MAX_RICH_FILE_BYTES) {
+    return null;
+  }
+
+  const fileName = normalizeRichFileName(file.name);
+  const mimeType =
+    normalizeRichFileMimeType(file.type) ??
+    inferRichFileMimeTypeByFileName(fileName) ??
+    RICH_FILE_DEFAULT_MIME_TYPE;
+
+  if (typeof FileReader === "undefined") {
+    return null;
+  }
+
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onerror = () => resolve(null);
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      const commaIndex = result.indexOf(",");
+      if (commaIndex < 0) {
+        resolve(null);
+        return;
+      }
+
+      const base64Body = result.slice(commaIndex + 1).replace(/\s+/g, "");
+      const safeSrc = normalizeRichFileSource(`data:${mimeType};base64,${base64Body}`);
+      if (!safeSrc) {
+        resolve(null);
+        return;
+      }
+
+      resolve({
+        src: safeSrc,
+        fileName,
+        mimeType,
+        sizeBytes: file.size,
+      });
     };
     reader.readAsDataURL(file);
   });
@@ -9869,6 +11489,40 @@ function sanitizeRichNode(sourceNode: Node, ownerDocument: Document): Node | nul
   }
 
   if (normalizedTag === "A") {
+    const isRichFileLink =
+      sourceElement.getAttribute("data-rich-file") === "true" ||
+      sourceElement.classList.contains(RICH_FILE_CLASS_NAME) ||
+      sourceElement.hasAttribute("data-rich-file-id");
+
+    if (isRichFileLink) {
+      const safeSrc = normalizeRichFileSource(sourceElement.getAttribute("href") ?? "");
+      if (!safeSrc) {
+        const fragment = ownerDocument.createDocumentFragment();
+        appendChildren(fragment);
+        return fragment;
+      }
+
+      const fileName = normalizeRichFileName(
+        sourceElement.getAttribute("data-rich-file-name") ?? sourceElement.textContent ?? ""
+      );
+      const mimeType =
+        normalizeRichFileMimeType(sourceElement.getAttribute("data-rich-file-mime-type") ?? "") ??
+        inferRichFileMimeTypeByFileName(fileName) ??
+        RICH_FILE_DEFAULT_MIME_TYPE;
+      const sizeBytes =
+        normalizeRichFileSizeBytes(
+          sourceElement.getAttribute("data-rich-file-size-bytes") ?? ""
+        ) ?? inferRichFileSizeBytesFromDataUrl(safeSrc) ?? 0;
+
+      return createRichFileAttachmentElement(ownerDocument, {
+        src: safeSrc,
+        fileName,
+        mimeType,
+        sizeBytes,
+        fileId: sourceElement.getAttribute("data-rich-file-id") ?? "",
+      });
+    }
+
     const href = normalizeRichLinkUrl(sourceElement.getAttribute("href") ?? "");
     if (!href) {
       const fragment = ownerDocument.createDocumentFragment();
@@ -10097,6 +11751,62 @@ function normalizeChecklistBlocks(checklists: ChecklistBlock[]): ChecklistBlock[
   return result;
 }
 
+function parseContinuousChecklistCollection(value: unknown): ChecklistBlock[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const parsedChecklists: ChecklistBlock[] = [];
+  for (const rawChecklist of value) {
+    if (!isObjectRecord(rawChecklist)) {
+      continue;
+    }
+
+    const tags = Array.isArray(rawChecklist.tags)
+      ? rawChecklist.tags.filter((tag): tag is string => typeof tag === "string")
+      : [];
+
+    const checkedCategoryIds = Array.isArray(rawChecklist.checkedCategoryIds)
+      ? rawChecklist.checkedCategoryIds.filter((id): id is string => typeof id === "string")
+      : [];
+    const customOrderCategoryIds = Array.isArray(rawChecklist.customOrderCategoryIds)
+      ? rawChecklist.customOrderCategoryIds.filter((id): id is string => typeof id === "string")
+      : [];
+    const orderMode = normalizeChecklistItemOrderMode(rawChecklist.orderMode);
+
+    parsedChecklists.push({
+      id: typeof rawChecklist.id === "string" ? rawChecklist.id : "",
+      title: typeof rawChecklist.title === "string" ? rawChecklist.title : "",
+      tags,
+      checkedCategoryIds,
+      orderMode,
+      customOrderCategoryIds,
+    });
+  }
+
+  return normalizeChecklistBlocks(parsedChecklists);
+}
+
+function parseContinuousChecklists(value: string | null | undefined): ChecklistBlock[] {
+  const raw = typeof value === "string" ? value : "";
+  const trimmed = raw.trim();
+
+  if (!trimmed.startsWith("{")) {
+    return [];
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (!isObjectRecord(parsed) || parsed.kind !== CONTINUOUS_CONTENT_KIND) {
+      return [];
+    }
+
+    return parseContinuousChecklistCollection(parsed.checklists);
+  } catch {
+    return [];
+  }
+}
+
 function parseContinuousContent(value: string | null | undefined): ContinuousContentModel {
   const raw = typeof value === "string" ? value : "";
   const trimmed = raw.trim();
@@ -10128,41 +11838,9 @@ function parseContinuousContent(value: string | null | undefined): ContinuousCon
       };
     }
 
-    const parsedChecklists: ChecklistBlock[] = [];
-    for (const rawChecklist of parsed.checklists) {
-      if (!isObjectRecord(rawChecklist)) {
-        continue;
-      }
-
-      const tags = Array.isArray(rawChecklist.tags)
-        ? rawChecklist.tags.filter((tag): tag is string => typeof tag === "string")
-        : [];
-
-      const checkedCategoryIds = Array.isArray(rawChecklist.checkedCategoryIds)
-        ? rawChecklist.checkedCategoryIds.filter(
-            (id): id is string => typeof id === "string"
-          )
-        : [];
-      const customOrderCategoryIds = Array.isArray(rawChecklist.customOrderCategoryIds)
-        ? rawChecklist.customOrderCategoryIds.filter(
-            (id): id is string => typeof id === "string"
-          )
-        : [];
-      const orderMode = normalizeChecklistItemOrderMode(rawChecklist.orderMode);
-
-      parsedChecklists.push({
-        id: typeof rawChecklist.id === "string" ? rawChecklist.id : "",
-        title: typeof rawChecklist.title === "string" ? rawChecklist.title : "",
-        tags,
-        checkedCategoryIds,
-        orderMode,
-        customOrderCategoryIds,
-      });
-    }
-
     return {
       text: sanitizeRichTextHtml(parsed.text),
-      checklists: normalizeChecklistBlocks(parsedChecklists),
+      checklists: parseContinuousChecklistCollection(parsed.checklists),
     };
   } catch {
     return {

@@ -528,6 +528,74 @@ body {
   text-decoration: underline;
 }
 
+.message-editor-rich a.rich-file-link,
+.continuous-editor-rich a.rich-file-link {
+  position: relative;
+  display: block;
+  margin: 0.55rem 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid #666666;
+  border-radius: 0.42rem;
+  background: linear-gradient(180deg, #d7d7d7 0%, #bebebe 100%);
+  color: #1f1f1f;
+  text-decoration: none;
+  font-size: 0.86rem;
+  font-weight: 700;
+  line-height: 1.25;
+  padding: 0.46rem 0.68rem 0.54rem 3.2rem;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.7),
+    inset 0 -1px 0 rgba(104, 104, 104, 0.4),
+    0 1px 0 rgba(0, 0, 0, 0.18);
+}
+
+.message-editor-rich a.rich-file-link::before,
+.continuous-editor-rich a.rich-file-link::before {
+  content: "";
+  position: absolute;
+  left: 0.7rem;
+  top: 50%;
+  width: 1.85rem;
+  height: 1.85rem;
+  transform: translateY(-50%);
+  border: 1px solid #5e5e5e;
+  border-radius: 0.22rem;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.65) 0.45rem, transparent 0.45rem)
+      top right / 0.58rem 0.58rem no-repeat,
+    linear-gradient(180deg, #b8b8b8 0%, #949494 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+
+.message-editor-rich a.rich-file-link::after,
+.continuous-editor-rich a.rich-file-link::after {
+  content: attr(data-rich-file-size-label);
+  display: block;
+  margin-top: 0.16rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #393939;
+}
+
+.message-editor-rich a.rich-file-link:hover,
+.continuous-editor-rich a.rich-file-link:hover {
+  filter: brightness(1.03);
+}
+
+.message-editor-rich a.rich-file-link:focus-visible,
+.continuous-editor-rich a.rich-file-link:focus-visible {
+  outline: 2px solid #666666;
+  outline-offset: 2px;
+}
+
+.message-editor-rich a.rich-file-link.rich-file-delete-confirm,
+.continuous-editor-rich a.rich-file-link.rich-file-delete-confirm {
+  filter: brightness(0.58) saturate(0.68);
+}
+
 .message-editor-rich .rich-image-block,
 .continuous-editor-rich .rich-image-block {
   margin: 0.55rem 0;
@@ -635,9 +703,7 @@ body {
 
 .message-editor-rich .rich-image-delete-row,
 .continuous-editor-rich .rich-image-delete-row {
-  display: flex;
-  align-items: stretch;
-  gap: 0.38rem;
+  display: block;
   margin: 0.55rem 0;
   width: fit-content;
   max-width: 100%;
@@ -647,29 +713,6 @@ body {
 .message-editor-rich .rich-image-delete-row .rich-image-block,
 .continuous-editor-rich .rich-image-delete-row .rich-image-block {
   margin: 0;
-}
-
-.message-editor-rich .rich-image-delete-row .rich-image-delete-line,
-.continuous-editor-rich .rich-image-delete-row .rich-image-delete-line {
-  display: inline-block;
-  align-self: stretch;
-  width: 0.33rem;
-  min-width: 0.33rem;
-  min-height: 2.6rem;
-  border-radius: 999px;
-  background: rgba(86, 86, 86, 0.52);
-  box-shadow: inset 0 0 0 1px rgba(48, 48, 48, 0.52);
-  user-select: none;
-  cursor: default;
-  pointer-events: auto;
-}
-
-.message-editor-rich .rich-image-delete-row .rich-image-delete-line.rich-image-delete-line-active,
-.continuous-editor-rich .rich-image-delete-row .rich-image-delete-line.rich-image-delete-line-active {
-  background: #d55532;
-  box-shadow:
-    inset 0 0 0 1px rgba(120, 28, 10, 0.82),
-    0 0 0 1px rgba(248, 170, 150, 0.72);
 }
 
 .message-editor:focus {
