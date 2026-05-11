@@ -2,6 +2,7 @@
 
 import {
   type ChangeEvent,
+  type CSSProperties,
   type DragEvent,
   type FormEvent,
   type FocusEvent,
@@ -203,6 +204,7 @@ type ChecklistBlock = {
 type ContinuousContentModel = {
   text: string;
   checklists: ChecklistBlock[];
+  dictionaries: DictionaryBlock[];
 };
 
 type MessageChecklistPayload = {
@@ -251,6 +253,74 @@ type ChecklistDragItem = {
   categoryId: string;
   checked: boolean;
 };
+
+type DictionaryPromptSide = "side1" | "side2";
+
+type DictionaryEntry = {
+  id: string;
+  side1: string;
+  side1Note: string;
+  side2: string;
+  side2Note: string;
+};
+
+type DictionaryFieldLabels = {
+  side1: string;
+  side1Note: string;
+  side2: string;
+  side2Note: string;
+};
+
+type DictionaryBlock = {
+  id: string;
+  title: string;
+  description: string;
+  tags: string[];
+  promptSide: DictionaryPromptSide;
+  shuffle: boolean;
+  labels: DictionaryFieldLabels;
+  entries: DictionaryEntry[];
+};
+
+type MessageDictionaryPayload = {
+  description: string;
+  tags: string[];
+  promptSide: DictionaryPromptSide;
+  shuffle: boolean;
+  labels: DictionaryFieldLabels;
+  entries: DictionaryEntry[];
+};
+
+type DictionaryEditorState = {
+  source: "continuous" | "block-message";
+  sourceCategoryId: string;
+  sourceMessageId: string | null;
+  dictionaryId: string | null;
+  titleDraft: string;
+  descriptionDraft: string;
+  tagsDraft: string;
+  promptSide: DictionaryPromptSide;
+  shuffle: boolean;
+  labels: DictionaryFieldLabels;
+  entries: DictionaryEntry[];
+};
+
+type DictionaryStudyState = {
+  sourceCategoryId: string;
+  sourceMessageId: string | null;
+  dictionaryId: string | null;
+  title: string;
+  promptSide: DictionaryPromptSide;
+  labels: DictionaryFieldLabels;
+  cards: DictionaryEntry[];
+  currentIndex: number;
+  isAnswerRevealed: boolean;
+  transitionKey: number;
+};
+
+type DictionaryEntryField = Exclude<keyof DictionaryEntry, "id">;
+type DictionaryLabelField = keyof DictionaryFieldLabels;
+type DictionaryEditorTab = "entries" | "transfer" | "general";
 
 type CategoryFormState = {
   title: string;
@@ -311,6 +381,37 @@ type RichImageOverlayRect = {
   height: number;
 };
 
+type WorkspaceUiUndoSnapshot = {
+  currentCategoryId: string | null;
+  insertionTargetId: string | null;
+  activeProjectId: string | null;
+  selectedMessageId: string | null;
+  activeRichEditor: RichEditorScope | null;
+  editorTextScalePercent: number;
+};
+
+type WorkspaceUndoEntry =
+  | {
+      kind: "ui";
+      snapshot: WorkspaceUiUndoSnapshot;
+    }
+  | {
+      kind: "editor";
+      snapshot: WorkspaceUiUndoSnapshot;
+      scope: RichEditorScope;
+      categoryId: string | null;
+      html: string;
+    }
+  | {
+      kind: "editors";
+      snapshot: WorkspaceUiUndoSnapshot;
+      entries: Array<{
+        scope: RichEditorScope;
+        categoryId: string | null;
+        html: string;
+      }>;
+    };
+
 type ConfirmDialogTone = "neutral" | "danger";
 
 type ConfirmDialogState = {
@@ -335,7 +436,7 @@ const DEFAULT_CATEGORY_FORM: CategoryFormState = {
 const DEFAULT_TEXT_COLOR = "#1a1a1a";
 const DEFAULT_EDITOR_TEXT_SCALE_PERCENT = 100;
 const MIN_EDITOR_TEXT_SCALE_PERCENT = 70;
-const MAX_EDITOR_TEXT_SCALE_PERCENT = 180;
+const MAX_EDITOR_TEXT_SCALE_PERCENT = 1000;
 const EDITOR_TEXT_SCALE_STEP_PERCENT = 10;
 
 const TEXT_COLOR_PRESETS = [
@@ -349,6 +450,7 @@ const TEXT_COLOR_PRESETS = [
 ];
 
 const RICH_IMAGE_CLASS_NAME = "rich-image-block";
+const RICH_IMAGE_ZONE_CLASS_NAME = "rich-image-zone";
 const RICH_IMAGE_SELECTED_CLASS_NAME = "rich-image-selected";
 const RICH_IMAGE_DELETE_CONFIRM_CLASS_NAME = "rich-image-delete-confirm";
 const RICH_IMAGE_DELETE_ROW_CLASS_NAME = "rich-image-delete-row";
@@ -362,6 +464,9 @@ const MIN_RICH_IMAGE_WIDTH = 92;
 const MAX_RICH_IMAGE_WIDTH = 1400;
 const MAX_RICH_IMAGE_FILE_BYTES = 8 * 1024 * 1024;
 const RICH_IMAGE_EDGE_HIT_SIZE = 12;
+const MIN_RICH_IMAGE_DELETE_OVERLAY_WIDTH = 184;
+const MIN_RICH_IMAGE_DELETE_OVERLAY_HEIGHT = 124;
+const WORKSPACE_UNDO_LIMIT = 40;
 const RICH_FILE_CLASS_NAME = "rich-file-link";
 const MAX_RICH_FILE_BYTES = 16 * 1024 * 1024;
 const EDITOR_INPUT_SYNC_DELAY_MS = 180;
@@ -392,9 +497,16 @@ export default function CategoryWorkspace() {
   const [continuousChecklists, setContinuousChecklists] = useState<ChecklistBlock[]>(
     []
   );
+  const [continuousDictionaries, setContinuousDictionaries] = useState<
+    DictionaryBlock[]
+  >([]);
   const [editorTextScalePercent, setEditorTextScalePercent] = useState(
     DEFAULT_EDITOR_TEXT_SCALE_PERCENT
   );
+  const [editorTextScaleInputValue, setEditorTextScaleInputValue] = useState(
+    formatEditorTextScalePercent(DEFAULT_EDITOR_TEXT_SCALE_PERCENT)
+  );
+  const [undoRevision, setUndoRevision] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [showSearch, setShowSearch] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
@@ -405,6 +517,18 @@ export default function CategoryWorkspace() {
   const [showProjectCreateModal, setShowProjectCreateModal] = useState(false);
   const [checklistEditor, setChecklistEditor] =
     useState<ChecklistEditorState | null>(null);
+  const [dictionaryEditor, setDictionaryEditor] =
+    useState<DictionaryEditorState | null>(null);
+  const [dictionaryEditorTab, setDictionaryEditorTab] =
+    useState<DictionaryEditorTab>("entries");
+  const [dictionaryStudy, setDictionaryStudy] =
+    useState<DictionaryStudyState | null>(null);
+  const [dictionaryStudyCardScale, setDictionaryStudyCardScale] = useState(1);
+  const [dictionaryImportDraft, setDictionaryImportDraft] = useState("");
+  const dictionaryImportPreview = useMemo(
+    () => parseDictionaryImportDraft(dictionaryImportDraft, dictionaryEditor?.labels),
+    [dictionaryImportDraft, dictionaryEditor?.labels]
+  );
   const [checklistTagSearchQuery, setChecklistTagSearchQuery] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const normalizedSearchQuery = searchQuery.trim().toLowerCase();
@@ -492,6 +616,9 @@ export default function CategoryWorkspace() {
   const [isSavingProject, setIsSavingProject] = useState(false);
 
   const importFileRef = useRef<HTMLInputElement | null>(null);
+  const dictionaryImportFileRef = useRef<HTMLInputElement | null>(null);
+  const dictionaryStudyCardShellRef = useRef<HTMLDivElement | null>(null);
+  const dictionaryStudyCardContentRef = useRef<HTMLDivElement | null>(null);
   const richImageFileRef = useRef<HTMLInputElement | null>(null);
   const richFileRef = useRef<HTMLInputElement | null>(null);
   const categoryTagInputRef = useRef<HTMLInputElement | null>(null);
@@ -500,6 +627,12 @@ export default function CategoryWorkspace() {
   const savedRichSelectionRef = useRef<SavedRichSelection | null>(null);
   const draggedRichImageRef = useRef<DraggedRichImage | null>(null);
   const richImageResizeStateRef = useRef<RichImageResizeState | null>(null);
+  const workspaceUndoStackRef = useRef<WorkspaceUndoEntry[]>([]);
+  const isRestoringWorkspaceUndoRef = useRef(false);
+  const lastEditorUndoHtmlRef = useRef<Record<string, string>>({});
+  const performWorkspaceUndoRef = useRef<() => void>(() => {
+    return;
+  });
   const ensureRichImageDeleteLinesRef = useRef<(editor: HTMLDivElement) => void>(() => {
     return;
   });
@@ -657,7 +790,7 @@ export default function CategoryWorkspace() {
       currentMessages.some(
         (message) =>
           typeof message.content === "string" &&
-          !parseMessageChecklistContent(message.content)
+          !isSpecialMessageContent(message.content)
       ),
     [currentMessages]
   );
@@ -679,6 +812,7 @@ export default function CategoryWorkspace() {
     canAdjustEditorTextScale && editorTextScalePercent > MIN_EDITOR_TEXT_SCALE_PERCENT;
   const canIncreaseEditorTextScale =
     canAdjustEditorTextScale && editorTextScalePercent < MAX_EDITOR_TEXT_SCALE_PERCENT;
+  const canUndoWorkspace = undoRevision >= 0 && workspaceUndoStackRef.current.length > 0;
   const editorDisplayScale = useMemo(
     () => getEditorDisplayScale(editorTextScalePercent),
     [editorTextScalePercent]
@@ -966,9 +1100,15 @@ export default function CategoryWorkspace() {
 
     for (const category of categories) {
       if (category.format === "continuous") {
+        const document = parseContinuousContent(category.content);
+        const dictionaryText = document.dictionaries
+          .map((dictionary) =>
+            `${dictionary.title}\n${dictionaryPayloadToPlainText(dictionary)}`
+          )
+          .join("\n");
         map.set(
           category.id,
-          richTextToPlainText(parseContinuousContent(category.content).text)
+          `${richTextToPlainText(document.text)}\n${dictionaryText}`.trim()
         );
         continue;
       }
@@ -1009,6 +1149,14 @@ export default function CategoryWorkspace() {
     });
   }, [categories, continuousChecklists, currentCategory]);
 
+  const continuousDictionaryCards = useMemo(() => {
+    if (!currentCategory || currentCategory.format !== "continuous") {
+      return [] as DictionaryBlock[];
+    }
+
+    return continuousDictionaries;
+  }, [continuousDictionaries, currentCategory]);
+
   const blockChecklistCardsByMessageId = useMemo(() => {
     const map = new Map<
       string,
@@ -1046,6 +1194,32 @@ export default function CategoryWorkspace() {
 
     return map;
   }, [categories, currentCategory, currentMessages]);
+
+  const blockDictionaryCardsByMessageId = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        payload: MessageDictionaryPayload;
+      }
+    >();
+
+    if (!currentCategory || currentCategory.format !== "block") {
+      return map;
+    }
+
+    for (const message of currentMessages) {
+      const payload = parseMessageDictionaryContent(message.content);
+      if (!payload) {
+        continue;
+      }
+
+      map.set(message.id, {
+        payload,
+      });
+    }
+
+    return map;
+  }, [currentCategory, currentMessages]);
 
   const checklistParticipation = useMemo(() => {
     if (!currentCategory) {
@@ -1161,9 +1335,13 @@ export default function CategoryWorkspace() {
 
     const messageHits: SearchResult[] = [];
     for (const message of allLoadedMessages) {
-      const plainContent = parseMessageChecklistContent(message.content)
+      const checklistPayload = parseMessageChecklistContent(message.content);
+      const dictionaryPayload = parseMessageDictionaryContent(message.content);
+      const plainContent = checklistPayload
         ? ""
-        : richTextToPlainText(message.content);
+        : dictionaryPayload
+          ? dictionaryPayloadToPlainText(dictionaryPayload)
+          : richTextToPlainText(message.content);
       const messageText = `${message.title} ${plainContent}`.toLowerCase();
       if (!messageText.includes(normalizedSearchQuery)) {
         continue;
@@ -1184,7 +1362,7 @@ export default function CategoryWorkspace() {
         path: `${buildCategoryPath(visibleCategories, message.category_id)
           .map((part) => part.title)
           .join(" / ")} / сообщение`,
-        preview: makePreview(message.content, normalizedSearchQuery),
+        preview: makePreview(plainContent, normalizedSearchQuery),
       });
     }
 
@@ -1325,6 +1503,7 @@ export default function CategoryWorkspace() {
     setMessageTitleDraft("");
     setContinuousDraft("");
     setContinuousChecklists([]);
+    setContinuousDictionaries([]);
     setActiveRichEditor(null);
     setRichToolbarState({
       bold: false,
@@ -1341,6 +1520,8 @@ export default function CategoryWorkspace() {
     setRichFileDeleteConfirm(null);
     setRichFileDeleteConfirmRect(null);
     setChecklistEditor(null);
+    setDictionaryEditor(null);
+    setDictionaryStudy(null);
     setChecklistTagSearchQuery("");
     setSource("unknown");
     setLoadError(null);
@@ -1842,6 +2023,7 @@ export default function CategoryWorkspace() {
       syncedContinuousCategoryIdRef.current = null;
       setContinuousDraft("");
       setContinuousChecklists([]);
+      setContinuousDictionaries([]);
       return;
     }
 
@@ -1853,6 +2035,7 @@ export default function CategoryWorkspace() {
     const parsedContinuous = parseContinuousContent(currentCategory.content);
     setContinuousDraft(parsedContinuous.text);
     setContinuousChecklists(parsedContinuous.checklists);
+    setContinuousDictionaries(parsedContinuous.dictionaries);
   }, [currentCategory]);
 
   useEffect(() => {
@@ -1879,7 +2062,7 @@ export default function CategoryWorkspace() {
     const stillExists = currentMessages.some(
       (message) =>
         message.id === activeRichEditor.messageId &&
-        !parseMessageChecklistContent(message.content)
+        !isSpecialMessageContent(message.content)
     );
 
     if (!stillExists) {
@@ -2095,12 +2278,7 @@ export default function CategoryWorkspace() {
         return;
       }
 
-      const nextRect: RichImageOverlayRect = {
-        top: rect.top,
-        left: rect.left,
-        width: rect.width,
-        height: rect.height,
-      };
+      const nextRect = getDeleteConfirmOverlayRect(rect);
 
       setRichImageDeleteConfirmRect((previousRect) => {
         if (
@@ -2159,12 +2337,7 @@ export default function CategoryWorkspace() {
         return;
       }
 
-      const nextRect: RichImageOverlayRect = {
-        top: rect.top,
-        left: rect.left,
-        width: rect.width,
-        height: rect.height,
-      };
+      const nextRect = getDeleteConfirmOverlayRect(rect);
 
       setRichFileDeleteConfirmRect((previousRect) => {
         if (
@@ -2347,7 +2520,7 @@ export default function CategoryWorkspace() {
     }
 
     for (const message of currentMessages) {
-      if (parseMessageChecklistContent(message.content)) {
+      if (isSpecialMessageContent(message.content)) {
         continue;
       }
 
@@ -2379,6 +2552,10 @@ export default function CategoryWorkspace() {
   }, [applyRichImageDisplayScaleToMountedEditors, editorDisplayScale]);
 
   useEffect(() => {
+    setEditorTextScaleInputValue(formatEditorTextScalePercent(editorTextScalePercent));
+  }, [editorTextScalePercent]);
+
+  useEffect(() => {
     function handleEscape(event: KeyboardEvent) {
       if (event.key === "Escape") {
         if (richImageDeleteConfirm) {
@@ -2408,6 +2585,8 @@ export default function CategoryWorkspace() {
         setLinkSelectionPreview("");
         setSelectedRichImage(null);
         setChecklistEditor(null);
+        setDictionaryEditor(null);
+        setDictionaryStudy(null);
         setChecklistTagSearchQuery("");
         setMenuPanel("main");
       }
@@ -2418,6 +2597,156 @@ export default function CategoryWorkspace() {
       window.removeEventListener("keydown", handleEscape);
     };
   }, [richImageDeleteConfirm, richFileDeleteConfirm]);
+
+  useEffect(() => {
+    function handleWorkspaceUndoKey(event: KeyboardEvent) {
+      const isUndoKey =
+        (event.ctrlKey || event.metaKey) &&
+        !event.shiftKey &&
+        !event.altKey &&
+        event.key.toLowerCase() === "z";
+      if (!isUndoKey) {
+        return;
+      }
+
+      const target = event.target;
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      performWorkspaceUndoRef.current();
+    }
+
+    window.addEventListener("keydown", handleWorkspaceUndoKey);
+    return () => {
+      window.removeEventListener("keydown", handleWorkspaceUndoKey);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!dictionaryStudy) {
+      setDictionaryStudyCardScale(1);
+      return;
+    }
+
+    const shell = dictionaryStudyCardShellRef.current;
+    const content = dictionaryStudyCardContentRef.current;
+    if (!shell || !content) {
+      return;
+    }
+
+    let animationFrameId = 0;
+    let secondAnimationFrameId = 0;
+
+    const applyFit = () => {
+      const shellWidth = Math.max(1, shell.clientWidth - 4);
+      const shellHeight = Math.max(1, shell.clientHeight - 4);
+      const rootFontSize =
+        Number.parseFloat(window.getComputedStyle(document.documentElement).fontSize) ||
+        16;
+      const clampPx = (min: number, value: number, max: number) =>
+        Math.max(min, Math.min(value, max));
+      const baseWordSize = clampPx(
+        2 * rootFontSize,
+        window.innerWidth * 0.07,
+        5.1 * rootFontSize
+      );
+      const baseNoteSize = clampPx(
+        0.95 * rootFontSize,
+        window.innerWidth * 0.022,
+        1.35 * rootFontSize
+      );
+      const basePadding = clampPx(
+        0.9 * rootFontSize,
+        window.innerWidth * 0.03,
+        1.5 * rootFontSize
+      );
+      const baseGap = 0.75 * rootFontSize;
+      const baseNotePaddingY = 0.48 * rootFontSize;
+      const baseNotePaddingX = 0.65 * rootFontSize;
+      const applyScale = (scale: number) => {
+        content.style.setProperty("--dictionary-study-scale", String(scale));
+        content.style.setProperty(
+          "--dictionary-study-word-size",
+          `${Math.max(0.9 * rootFontSize, baseWordSize * scale)}px`
+        );
+        content.style.setProperty(
+          "--dictionary-study-note-size",
+          `${Math.max(0.62 * rootFontSize, baseNoteSize * scale)}px`
+        );
+        content.style.setProperty(
+          "--dictionary-study-padding",
+          `${Math.max(0.42 * rootFontSize, basePadding * scale)}px`
+        );
+        content.style.setProperty(
+          "--dictionary-study-gap",
+          `${Math.max(0.22 * rootFontSize, baseGap * scale)}px`
+        );
+        content.style.setProperty(
+          "--dictionary-study-note-padding",
+          `${Math.max(0.24 * rootFontSize, baseNotePaddingY * scale)}px ${Math.max(
+            0.34 * rootFontSize,
+            baseNotePaddingX * scale
+          )}px`
+        );
+      };
+      let low = 0.32;
+      let high = 1;
+      let best = low;
+
+      for (let index = 0; index < 10; index += 1) {
+        const scale = (low + high) / 2;
+        applyScale(scale);
+
+        const fits =
+          content.scrollWidth <= shellWidth && content.scrollHeight <= shellHeight;
+        if (fits) {
+          best = scale;
+          low = scale;
+        } else {
+          high = scale;
+        }
+      }
+
+      applyScale(best);
+      setDictionaryStudyCardScale((prev) =>
+        Math.abs(prev - best) < 0.01 ? prev : best
+      );
+    };
+
+    const scheduleFit = () => {
+      window.cancelAnimationFrame(animationFrameId);
+      window.cancelAnimationFrame(secondAnimationFrameId);
+      animationFrameId = window.requestAnimationFrame(() => {
+        content.style.setProperty("--dictionary-study-scale", "1");
+        content.style.removeProperty("--dictionary-study-word-size");
+        content.style.removeProperty("--dictionary-study-note-size");
+        content.style.removeProperty("--dictionary-study-padding");
+        content.style.removeProperty("--dictionary-study-gap");
+        content.style.removeProperty("--dictionary-study-note-padding");
+        secondAnimationFrameId = window.requestAnimationFrame(applyFit);
+      });
+    };
+
+    scheduleFit();
+    window.addEventListener("resize", scheduleFit);
+    return () => {
+      window.cancelAnimationFrame(animationFrameId);
+      window.cancelAnimationFrame(secondAnimationFrameId);
+      window.removeEventListener("resize", scheduleFit);
+    };
+  }, [
+    dictionaryStudy,
+    dictionaryStudy?.currentIndex,
+    dictionaryStudy?.isAnswerRevealed,
+    dictionaryStudy?.transitionKey,
+  ]);
 
   useEffect(() => {
     const categorySaveTimers = categorySaveTimersRef.current;
@@ -2486,6 +2815,283 @@ export default function CategoryWorkspace() {
     return false;
   }
 
+  function cloneRichEditorScope(scope: RichEditorScope | null): RichEditorScope | null {
+    if (!scope) {
+      return null;
+    }
+
+    return scope.kind === "continuous"
+      ? { kind: "continuous" }
+      : { kind: "block", messageId: scope.messageId };
+  }
+
+  function getRichEditorUndoKey(scope: RichEditorScope): string {
+    return scope.kind === "continuous" ? "continuous" : `block:${scope.messageId}`;
+  }
+
+  function areWorkspaceUiUndoSnapshotsEqual(
+    left: WorkspaceUiUndoSnapshot,
+    right: WorkspaceUiUndoSnapshot
+  ): boolean {
+    return (
+      left.currentCategoryId === right.currentCategoryId &&
+      left.insertionTargetId === right.insertionTargetId &&
+      left.activeProjectId === right.activeProjectId &&
+      left.selectedMessageId === right.selectedMessageId &&
+      left.editorTextScalePercent === right.editorTextScalePercent &&
+      isSameRichEditorScope(left.activeRichEditor, right.activeRichEditor)
+    );
+  }
+
+  function captureWorkspaceUiUndoSnapshot(): WorkspaceUiUndoSnapshot {
+    return {
+      currentCategoryId,
+      insertionTargetId,
+      activeProjectId,
+      selectedMessageId,
+      activeRichEditor: cloneRichEditorScope(activeRichEditor),
+      editorTextScalePercent,
+    };
+  }
+
+  function getCategoryIdForRichEditorScope(scope: RichEditorScope): string | null {
+    if (scope.kind === "continuous") {
+      return currentCategory?.format === "continuous"
+        ? currentCategory.id
+        : currentCategoryId;
+    }
+
+    if (currentMessages.some((message) => message.id === scope.messageId)) {
+      return currentCategoryId;
+    }
+
+    for (const [categoryId, messages] of Object.entries(messagesByCategory)) {
+      if (messages.some((message) => message.id === scope.messageId)) {
+        return categoryId;
+      }
+    }
+
+    return null;
+  }
+
+  function getRichEditorHtmlForUndo(scope: RichEditorScope): string {
+    const editor = getEditorElement(scope);
+    if (editor) {
+      ensureRichImageDeleteLinesIfNeeded(editor);
+      return sanitizeRichTextHtml(editor.innerHTML);
+    }
+
+    if (scope.kind === "continuous") {
+      return sanitizeRichTextHtml(continuousDraft);
+    }
+
+    const categoryId = getCategoryIdForRichEditorScope(scope);
+    const sourceMessages = categoryId ? messagesByCategory[categoryId] ?? [] : currentMessages;
+    const message = sourceMessages.find((row) => row.id === scope.messageId) ?? null;
+
+    return sanitizeRichTextHtml(message?.content ?? "");
+  }
+
+  function refreshWorkspaceUndoAvailability() {
+    setUndoRevision((prev) => prev + 1);
+  }
+
+  function pushWorkspaceUndoEntry(entry: WorkspaceUndoEntry) {
+    if (isRestoringWorkspaceUndoRef.current) {
+      return;
+    }
+
+    const stack = workspaceUndoStackRef.current;
+    const previous = stack[stack.length - 1] ?? null;
+    if (
+      previous?.kind === "ui" &&
+      entry.kind === "ui" &&
+      areWorkspaceUiUndoSnapshotsEqual(previous.snapshot, entry.snapshot)
+    ) {
+      return;
+    }
+
+    if (
+      previous?.kind === "editor" &&
+      entry.kind === "editor" &&
+      isSameRichEditorScope(previous.scope, entry.scope) &&
+      previous.categoryId === entry.categoryId &&
+      previous.html === entry.html
+    ) {
+      return;
+    }
+
+    stack.push(entry);
+    if (stack.length > WORKSPACE_UNDO_LIMIT) {
+      stack.splice(0, stack.length - WORKSPACE_UNDO_LIMIT);
+    }
+    refreshWorkspaceUndoAvailability();
+  }
+
+  function pushUiUndoSnapshot() {
+    pushWorkspaceUndoEntry({
+      kind: "ui",
+      snapshot: captureWorkspaceUiUndoSnapshot(),
+    });
+  }
+
+  function pushEditorUndoSnapshot(scope: RichEditorScope) {
+    pushWorkspaceUndoEntry({
+      kind: "editor",
+      snapshot: captureWorkspaceUiUndoSnapshot(),
+      scope: cloneRichEditorScope(scope) ?? scope,
+      categoryId: getCategoryIdForRichEditorScope(scope),
+      html: getRichEditorHtmlForUndo(scope),
+    });
+  }
+
+  function pushEditorUndoSnapshots(scopes: RichEditorScope[]) {
+    const entries = scopes
+      .map((scope) => ({
+        scope: cloneRichEditorScope(scope) ?? scope,
+        categoryId: getCategoryIdForRichEditorScope(scope),
+        html: getRichEditorHtmlForUndo(scope),
+      }))
+      .filter((entry, index, source) =>
+        source.findIndex((candidate) => isSameRichEditorScope(candidate.scope, entry.scope)) ===
+        index
+      );
+
+    if (entries.length === 0) {
+      return;
+    }
+
+    if (entries.length === 1) {
+      pushWorkspaceUndoEntry({
+        kind: "editor",
+        snapshot: captureWorkspaceUiUndoSnapshot(),
+        ...entries[0],
+      });
+      return;
+    }
+
+    pushWorkspaceUndoEntry({
+      kind: "editors",
+      snapshot: captureWorkspaceUiUndoSnapshot(),
+      entries,
+    });
+  }
+
+  function rememberCurrentEditorUndoHtml(scope: RichEditorScope, editor?: HTMLDivElement | null) {
+    lastEditorUndoHtmlRef.current[getRichEditorUndoKey(scope)] = sanitizeRichTextHtml(
+      editor?.innerHTML ?? getRichEditorHtmlForUndo(scope)
+    );
+  }
+
+  function applyWorkspaceUiUndoSnapshot(snapshot: WorkspaceUiUndoSnapshot) {
+    setActiveProjectId(snapshot.activeProjectId);
+    setCurrentCategoryId(snapshot.currentCategoryId);
+    setInsertionTargetId(snapshot.insertionTargetId);
+    setSelectedMessageId(snapshot.selectedMessageId);
+    setActiveRichEditor(cloneRichEditorScope(snapshot.activeRichEditor));
+    setEditorTextScalePercent(snapshot.editorTextScalePercent);
+    setSelectedRichImage(null);
+    setActiveRichImageDeleteLine(null);
+    setRichImageDeleteConfirm(null);
+    setRichImageDeleteConfirmRect(null);
+    setRichFileDeleteConfirm(null);
+    setRichFileDeleteConfirmRect(null);
+    setShowTextColorPalette(false);
+    savedRichSelectionRef.current = null;
+  }
+
+  function writeEditorHtmlAfterUndo(scope: RichEditorScope, html: string) {
+    const editor = getEditorElement(scope);
+    if (!editor) {
+      return;
+    }
+
+    editor.innerHTML = html;
+    ensureRichImageDeleteLines(editor);
+    applyRichImageDisplayScaleToEditor(editor, editorDisplayScale);
+    rememberCurrentEditorUndoHtml(scope, editor);
+  }
+
+  function restoreEditorUndoEntry(entry: Extract<WorkspaceUndoEntry, { kind: "editor" }>) {
+    applyWorkspaceUiUndoSnapshot(entry.snapshot);
+
+    if (entry.scope.kind === "continuous") {
+      if (entry.categoryId) {
+        const currentDocument = getContinuousDocumentForCategory(entry.categoryId);
+        commitContinuousDocumentForCategory(entry.categoryId, {
+          text: entry.html,
+          checklists: currentDocument?.checklists ?? [],
+          dictionaries: currentDocument?.dictionaries ?? [],
+        });
+
+        if (entry.snapshot.currentCategoryId === entry.categoryId) {
+          setContinuousDraft(entry.html);
+        }
+      }
+    } else if (entry.categoryId) {
+      syncMessageContentChange(entry.categoryId, entry.scope.messageId, entry.html);
+    }
+
+    writeEditorHtmlAfterUndo(entry.scope, entry.html);
+    window.setTimeout(() => {
+      writeEditorHtmlAfterUndo(entry.scope, entry.html);
+    }, 0);
+  }
+
+  function restoreEditorUndoPayload(payload: {
+    scope: RichEditorScope;
+    categoryId: string | null;
+    html: string;
+  }) {
+    if (payload.scope.kind === "continuous") {
+      if (payload.categoryId) {
+        const currentDocument = getContinuousDocumentForCategory(payload.categoryId);
+        commitContinuousDocumentForCategory(payload.categoryId, {
+          text: payload.html,
+          checklists: currentDocument?.checklists ?? [],
+          dictionaries: currentDocument?.dictionaries ?? [],
+        });
+      }
+    } else if (payload.categoryId) {
+      syncMessageContentChange(payload.categoryId, payload.scope.messageId, payload.html);
+    }
+
+    writeEditorHtmlAfterUndo(payload.scope, payload.html);
+    window.setTimeout(() => {
+      writeEditorHtmlAfterUndo(payload.scope, payload.html);
+    }, 0);
+  }
+
+  function restoreEditorsUndoEntry(entry: Extract<WorkspaceUndoEntry, { kind: "editors" }>) {
+    applyWorkspaceUiUndoSnapshot(entry.snapshot);
+    for (const payload of entry.entries) {
+      restoreEditorUndoPayload(payload);
+    }
+  }
+
+  function performWorkspaceUndo() {
+    const entry = workspaceUndoStackRef.current.pop();
+    refreshWorkspaceUndoAvailability();
+    if (!entry) {
+      return;
+    }
+
+    isRestoringWorkspaceUndoRef.current = true;
+    try {
+      if (entry.kind === "ui") {
+        applyWorkspaceUiUndoSnapshot(entry.snapshot);
+      } else if (entry.kind === "editor") {
+        restoreEditorUndoEntry(entry);
+      } else {
+        restoreEditorsUndoEntry(entry);
+      }
+    } finally {
+      window.setTimeout(() => {
+        isRestoringWorkspaceUndoRef.current = false;
+      }, 0);
+    }
+  }
+
   function setActiveRichEditorIfChanged(scope: RichEditorScope | null) {
     setActiveRichEditor((prev) => {
       if (isSameRichEditorScope(prev, scope)) {
@@ -2515,14 +3121,10 @@ export default function CategoryWorkspace() {
       return false;
     }
 
+    pushEditorUndoSnapshot(selection.scope);
+
     const imageRow = getRichImageDeleteRowElementByChild(imageNode);
-    const rowTrailingBreak =
-      imageRow?.nextSibling instanceof HTMLBRElement ? imageRow.nextSibling : null;
     const deleteLine = getRichImageDeleteLineElementById(editor, selection.imageId);
-    const deleteLineBreak =
-      !imageRow && deleteLine?.nextSibling instanceof HTMLBRElement
-        ? deleteLine.nextSibling
-        : null;
     const legacyTrailingBreak =
       imageRow || deleteLine || !(imageNode.nextSibling instanceof HTMLBRElement)
         ? null
@@ -2531,11 +3133,9 @@ export default function CategoryWorkspace() {
     clearActiveRichImageResize();
     if (imageRow) {
       imageRow.remove();
-      rowTrailingBreak?.remove();
     } else {
       imageNode.remove();
       deleteLine?.remove();
-      deleteLineBreak?.remove();
     }
     legacyTrailingBreak?.remove();
     setSelectedRichImage(null);
@@ -2583,7 +3183,7 @@ export default function CategoryWorkspace() {
 
   function createRichImageDeleteRowElement(ownerDocument: Document): HTMLElement {
     const row = ownerDocument.createElement("span");
-    row.className = RICH_IMAGE_DELETE_ROW_CLASS_NAME;
+    row.className = `${RICH_IMAGE_ZONE_CLASS_NAME} ${RICH_IMAGE_DELETE_ROW_CLASS_NAME}`;
     row.setAttribute("data-rich-image-delete-row", "true");
     row.setAttribute("contenteditable", "false");
     row.setAttribute("draggable", "false");
@@ -2591,10 +3191,40 @@ export default function CategoryWorkspace() {
   }
 
   function normalizeRichImageDeleteRowElement(row: HTMLElement) {
+    row.classList.add(RICH_IMAGE_ZONE_CLASS_NAME);
     row.classList.add(RICH_IMAGE_DELETE_ROW_CLASS_NAME);
     row.setAttribute("data-rich-image-delete-row", "true");
     row.setAttribute("contenteditable", "false");
     row.setAttribute("draggable", "false");
+  }
+
+  function createRichImageDeleteLineElement(
+    ownerDocument: Document,
+    imageId: string,
+    position: "before" | "after"
+  ): HTMLElement {
+    const line = ownerDocument.createElement("span");
+    line.className = RICH_IMAGE_DELETE_LINE_CLASS_NAME;
+    line.setAttribute("data-rich-image-id", imageId);
+    line.setAttribute("data-rich-image-buffer-position", position);
+    line.setAttribute("contenteditable", "false");
+    line.setAttribute("draggable", "false");
+    line.setAttribute("aria-hidden", "true");
+    return line;
+  }
+
+  function normalizeRichImageDeleteLineElement(
+    line: HTMLElement,
+    imageId: string,
+    position: "before" | "after"
+  ) {
+    line.classList.add(RICH_IMAGE_DELETE_LINE_CLASS_NAME);
+    line.setAttribute("data-rich-image-id", imageId);
+    line.setAttribute("data-rich-image-buffer-position", position);
+    line.setAttribute("contenteditable", "false");
+    line.setAttribute("draggable", "false");
+    line.setAttribute("aria-hidden", "true");
+    line.textContent = "";
   }
 
   function getRichImageDeleteRowElementByChild(child: Node | null): HTMLElement | null {
@@ -2635,7 +3265,9 @@ export default function CategoryWorkspace() {
     imageId: string
   ): HTMLElement {
     const row = createRichImageDeleteRowElement(ownerDocument);
+    row.appendChild(createRichImageDeleteLineElement(ownerDocument, imageId, "before"));
     row.appendChild(imageNode);
+    row.appendChild(createRichImageDeleteLineElement(ownerDocument, imageId, "after"));
     row.setAttribute("data-rich-image-id", imageId);
     return row;
   }
@@ -2658,6 +3290,10 @@ export default function CategoryWorkspace() {
 
   function getRichImageDeleteLineElementFromRow(row: HTMLElement): HTMLElement | null {
     return row.querySelector<HTMLElement>(`.${RICH_IMAGE_DELETE_LINE_CLASS_NAME}`);
+  }
+
+  function getRichImageDeleteLineElementsFromRow(row: HTMLElement): HTMLElement[] {
+    return Array.from(row.querySelectorAll<HTMLElement>(`.${RICH_IMAGE_DELETE_LINE_CLASS_NAME}`));
   }
 
   function getRichImageDeleteLineElementFromEventTarget(
@@ -2808,14 +3444,19 @@ export default function CategoryWorkspace() {
       range.startContainer.classList.contains(RICH_IMAGE_DELETE_ROW_CLASS_NAME)
     ) {
       const row = range.startContainer;
-      const lineFromRow = getRichImageDeleteLineElementFromRow(row);
-      if (lineFromRow && editor.contains(lineFromRow)) {
-        const lineIndex = Array.from(row.childNodes).indexOf(lineFromRow);
-        if (range.startOffset < lineIndex) {
-          return null;
-        }
+      const linesFromRow = getRichImageDeleteLineElementsFromRow(row);
+      if (linesFromRow.length > 0) {
+        const rowChildNodes = Array.from(row.childNodes);
+        const lineAtCaret =
+          linesFromRow.find((line) => rowChildNodes.indexOf(line) === range.startOffset) ??
+          [...linesFromRow]
+            .reverse()
+            .find((line) => rowChildNodes.indexOf(line) < range.startOffset) ??
+          null;
 
-        return lineFromRow;
+        if (lineAtCaret && editor.contains(lineAtCaret)) {
+          return lineAtCaret;
+        }
       }
     }
 
@@ -3018,16 +3659,9 @@ export default function CategoryWorkspace() {
 
     const row = getRichImageDeleteRowElementByChild(imageNode);
     const anchorNode = row ?? imageNode;
-    const leadingBreak =
-      row?.previousSibling instanceof HTMLBRElement
-        ? row.previousSibling
-        : imageNode.previousSibling instanceof HTMLBRElement
-          ? imageNode.previousSibling
-          : null;
-    const caretTarget = leadingBreak ?? anchorNode;
 
     const range = document.createRange();
-    range.setStartBefore(caretTarget);
+    range.setStartBefore(anchorNode);
     range.collapse(true);
     selection.removeAllRanges();
     selection.addRange(range);
@@ -3041,19 +3675,9 @@ export default function CategoryWorkspace() {
 
     const row = getRichImageDeleteRowElementByChild(imageNode);
     const anchorNode = row ?? imageNode;
-    const trailingBreak =
-      row?.nextSibling instanceof HTMLBRElement
-        ? row.nextSibling
-        : imageNode.nextSibling instanceof HTMLBRElement
-          ? imageNode.nextSibling
-          : null;
 
     const range = document.createRange();
-    if (trailingBreak) {
-      range.setStartAfter(trailingBreak);
-    } else {
-      range.setStartAfter(anchorNode);
-    }
+    range.setStartAfter(anchorNode);
     range.collapse(true);
     selection.removeAllRanges();
     selection.addRange(range);
@@ -3147,16 +3771,31 @@ export default function CategoryWorkspace() {
     }
 
     const range = document.createRange();
-    const rowTrailingBreak =
-      row.nextSibling instanceof HTMLBRElement ? row.nextSibling : null;
-    if (rowTrailingBreak) {
-      range.setStartAfter(rowTrailingBreak);
-    } else {
-      range.setStartAfter(row);
-    }
+    range.setStartAfter(row);
     range.collapse(true);
     selection.removeAllRanges();
     selection.addRange(range);
+  }
+
+  function placeCaretOutsideRichImageDeleteLine(line: HTMLElement) {
+    const selection = window.getSelection();
+    const row = getRichImageDeleteRowElementFromNode(line);
+    if (!selection || !row) {
+      return false;
+    }
+
+    const position = line.getAttribute("data-rich-image-buffer-position");
+    const range = document.createRange();
+    if (position === "before") {
+      range.setStartBefore(row);
+    } else {
+      range.setStartAfter(row);
+    }
+
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return true;
   }
 
   function focusRichImageDeleteLineInScope(
@@ -3204,45 +3843,51 @@ export default function CategoryWorkspace() {
         row.appendChild(figure);
       }
 
-      if (row.firstElementChild !== figure) {
-        row.insertAdjacentElement("afterbegin", figure);
+      let beforeLine =
+        getRichImageDeleteLineElementsFromRow(row).find(
+          (line) => line.getAttribute("data-rich-image-buffer-position") === "before"
+        ) ?? null;
+      let afterLine =
+        getRichImageDeleteLineElementsFromRow(row).find(
+          (line) => line.getAttribute("data-rich-image-buffer-position") === "after"
+        ) ?? null;
+
+      if (!beforeLine) {
+        beforeLine = createRichImageDeleteLineElement(editor.ownerDocument, imageId, "before");
+      }
+      if (!afterLine) {
+        afterLine = createRichImageDeleteLineElement(editor.ownerDocument, imageId, "after");
       }
 
-      for (const child of Array.from(row.children)) {
-        if (child !== figure) {
-          child.remove();
-        }
-      }
+      normalizeRichImageDeleteLineElement(beforeLine, imageId, "before");
+      normalizeRichImageDeleteLineElement(afterLine, imageId, "after");
 
       for (const childNode of Array.from(row.childNodes)) {
-        if (childNode !== figure && childNode.nodeType === Node.TEXT_NODE) {
+        if (childNode !== beforeLine && childNode !== figure && childNode !== afterLine) {
           childNode.remove();
         }
       }
 
+      if (row.firstChild !== beforeLine) {
+        row.insertBefore(beforeLine, row.firstChild);
+      }
+      if (beforeLine.nextSibling !== figure) {
+        row.insertBefore(figure, beforeLine.nextSibling);
+      }
+      if (figure.nextSibling !== afterLine) {
+        row.insertBefore(afterLine, figure.nextSibling);
+      }
+
       expectedRows.add(row);
 
-      const nextSibling = row.nextSibling;
-      const hasAdjacentImageRow =
-        nextSibling instanceof HTMLElement &&
-        nextSibling.classList.contains(RICH_IMAGE_DELETE_ROW_CLASS_NAME);
-      if (!hasAdjacentImageRow && !(nextSibling instanceof HTMLBRElement)) {
-        row.insertAdjacentElement("afterend", editor.ownerDocument.createElement("br"));
-      }
     }
 
     for (const line of Array.from(
       editor.querySelectorAll<HTMLElement>(`.${RICH_IMAGE_DELETE_LINE_CLASS_NAME}`)
     )) {
-      const nextBreak =
-        line.nextSibling instanceof HTMLBRElement &&
-        (!line.parentElement ||
-          !line.parentElement.classList.contains(RICH_IMAGE_DELETE_ROW_CLASS_NAME))
-          ? line.nextSibling
-          : null;
-      line.remove();
-      if (nextBreak) {
-        nextBreak.remove();
+      const parentRow = getRichImageDeleteRowElementFromNode(line);
+      if (!parentRow || !expectedRows.has(parentRow)) {
+        line.remove();
       }
     }
 
@@ -3273,6 +3918,7 @@ export default function CategoryWorkspace() {
       editor.querySelector(
         [
           `.${RICH_IMAGE_CLASS_NAME}`,
+          `.${RICH_IMAGE_ZONE_CLASS_NAME}`,
           `.${RICH_IMAGE_DELETE_ROW_CLASS_NAME}`,
           `.${RICH_IMAGE_DELETE_LINE_CLASS_NAME}`,
         ].join(",")
@@ -3442,6 +4088,7 @@ export default function CategoryWorkspace() {
     const previousSibling = fileNode.previousSibling;
     const selectionApi = window.getSelection();
 
+    pushEditorUndoSnapshot(selection.scope);
     fileNode.remove();
     trailingBreak?.remove();
 
@@ -3642,6 +4289,7 @@ export default function CategoryWorkspace() {
     }
 
     const range = normalizeRichImageInsertionRange(editor, selectionRange);
+    pushEditorUndoSnapshot(scope);
 
     const imageNode = createRichImageBlockElement(editor.ownerDocument, safeSrc, {
       width: options?.width,
@@ -3661,24 +4309,9 @@ export default function CategoryWorkspace() {
     }
 
     range.insertNode(imageRowNode);
-    if (imageRowNode.previousSibling && !(imageRowNode.previousSibling instanceof HTMLBRElement)) {
-      imageRowNode.insertAdjacentElement("beforebegin", editor.ownerDocument.createElement("br"));
-    }
-
-    const trailingBreak =
-      imageRowNode.nextSibling instanceof HTMLBRElement
-        ? imageRowNode.nextSibling
-        : editor.ownerDocument.createElement("br");
-    if (!(imageRowNode.nextSibling instanceof HTMLBRElement)) {
-      imageRowNode.insertAdjacentElement("afterend", trailingBreak);
-    }
 
     if (selection) {
-      const nextRange = document.createRange();
-      nextRange.setStartAfter(trailingBreak);
-      nextRange.collapse(true);
-      selection.removeAllRanges();
-      selection.addRange(nextRange);
+      placeCaretAfterRichImage(imageNode);
     }
 
     setSelectedRichImageInScope(scope, imageId);
@@ -3707,6 +4340,7 @@ export default function CategoryWorkspace() {
     }
 
     const range = normalizeRichImageInsertionRange(editor, selectionRange);
+    pushEditorUndoSnapshot(scope);
 
     const fileNode = createRichFileAttachmentElement(editor.ownerDocument, {
       src: safeSrc,
@@ -3867,7 +4501,7 @@ export default function CategoryWorkspace() {
 
     if (
       selectedMessage &&
-      !parseMessageChecklistContent(selectedMessage.content)
+      !isSpecialMessageContent(selectedMessage.content)
     ) {
       return {
         kind: "block",
@@ -3876,7 +4510,7 @@ export default function CategoryWorkspace() {
     }
 
     const firstEditableMessage = currentMessages.find(
-      (message) => !parseMessageChecklistContent(message.content)
+      (message) => !isSpecialMessageContent(message.content)
     );
 
     if (!firstEditableMessage) {
@@ -4114,6 +4748,7 @@ export default function CategoryWorkspace() {
       return;
     }
 
+    pushEditorUndoSnapshot(scope);
     document.execCommand(command, false, value);
     normalizeEditorLinks(editor);
     applyEditorDomValue(scope, editor);
@@ -4304,26 +4939,22 @@ export default function CategoryWorkspace() {
       return false;
     }
 
-    const sourceDeleteLine = getRichImageDeleteLineElementById(
-      sourceEditor,
-      draggedImage.imageId
+    pushEditorUndoSnapshots(
+      isSameRichEditorScope(draggedImage.scope, targetScope)
+        ? [targetScope]
+        : [draggedImage.scope, targetScope]
     );
-    const sourceTrailingBreak =
-      sourceRow?.nextSibling instanceof HTMLBRElement
-        ? sourceRow.nextSibling
-        : sourceDeleteLine?.nextSibling instanceof HTMLBRElement
-          ? sourceDeleteLine.nextSibling
-          : sourceImageNode.nextSibling instanceof HTMLBRElement
-            ? sourceImageNode.nextSibling
-            : null;
 
     if (sourceRow) {
       sourceRow.remove();
     } else {
+      const sourceDeleteLine = getRichImageDeleteLineElementById(
+        sourceEditor,
+        draggedImage.imageId
+      );
       sourceImageNode.remove();
       sourceDeleteLine?.remove();
     }
-    sourceTrailingBreak?.remove();
     sourceImageNode.classList.remove(RICH_IMAGE_DRAGGING_CLASS_NAME);
 
     const targetRange = ensureSelectionRangeInEditor(targetEditor);
@@ -4347,24 +4978,11 @@ export default function CategoryWorkspace() {
     }
 
     insertionRange.insertNode(imageRowNode);
-    if (imageRowNode.previousSibling && !(imageRowNode.previousSibling instanceof HTMLBRElement)) {
-      imageRowNode.insertAdjacentElement("beforebegin", targetEditor.ownerDocument.createElement("br"));
-    }
-
-    const trailingBreak =
-      imageRowNode.nextSibling instanceof HTMLBRElement
-        ? imageRowNode.nextSibling
-        : targetEditor.ownerDocument.createElement("br");
-    if (!(imageRowNode.nextSibling instanceof HTMLBRElement)) {
-      imageRowNode.insertAdjacentElement("afterend", trailingBreak);
-    }
+    ensureRichImageDeleteLines(sourceEditor);
+    ensureRichImageDeleteLines(targetEditor);
 
     if (selection) {
-      const nextRange = document.createRange();
-      nextRange.setStartAfter(trailingBreak);
-      nextRange.collapse(true);
-      selection.removeAllRanges();
-      selection.addRange(nextRange);
+      placeCaretAfterRichImage(sourceImageNode);
     }
 
     if (isSameRichEditorScope(draggedImage.scope, targetScope)) {
@@ -4402,6 +5020,7 @@ export default function CategoryWorkspace() {
     }
 
     if (deleteLineNode && editor.contains(deleteLineNode)) {
+      editor.focus();
       if (!focusRichImageDeleteLineInScope(scope, deleteLineNode)) {
         setSelectedRichImage(null);
         setActiveRichImageDeleteLine(null);
@@ -4454,6 +5073,7 @@ export default function CategoryWorkspace() {
     event.preventDefault();
     event.stopPropagation();
 
+    pushEditorUndoSnapshot(scope);
     clearActiveRichImageResize();
     const displayScale = editorDisplayScale;
     const currentWidth = clampRichImageWidth(
@@ -4816,6 +5436,10 @@ export default function CategoryWorkspace() {
     setActiveRichImageDeleteLine(null);
   }
 
+  function handleRichEditorBeforeInput(scope: RichEditorScope) {
+    void scope;
+  }
+
   function handleRichEditorKeyDown(
     scope: RichEditorScope,
     event: React.KeyboardEvent<HTMLDivElement>
@@ -4861,7 +5485,12 @@ export default function CategoryWorkspace() {
       setActiveRichImageDeleteLine(null);
     }
 
-    if (!hasModifierKey && event.key === "Delete" && selectedImageInScope && selectedImageNode) {
+    if (
+      !hasModifierKey &&
+      (event.key === "Delete" || event.key === "Backspace") &&
+      selectedImageInScope &&
+      selectedImageNode
+    ) {
       event.preventDefault();
       setRichImageDeleteConfirmRect(null);
       setRichImageDeleteConfirm(selectedImageInScope);
@@ -4922,14 +5551,18 @@ export default function CategoryWorkspace() {
 
           if (imageInsideSelection) {
             event.preventDefault();
-            if (event.key === "Backspace") {
-              placeCaretBeforeRichImage(imageInsideSelection);
-            } else {
-              placeCaretAfterRichImage(imageInsideSelection);
+            const imageId = imageInsideSelection.getAttribute("data-rich-image-id")?.trim() ?? "";
+            if (!imageId) {
+              return;
             }
-
-            setSelectedRichImage(null);
+            const imageSelection = {
+              scope,
+              imageId,
+            };
+            setSelectedRichImageInScope(scope, imageId);
             setActiveRichImageDeleteLine(null);
+            setRichImageDeleteConfirmRect(null);
+            setRichImageDeleteConfirm(imageSelection);
             rememberRichSelection(scope);
             syncRichToolbarState(scope);
             return;
@@ -4944,9 +5577,14 @@ export default function CategoryWorkspace() {
         getAdjacentRichImageElementFromCollapsedSelection(editor, "before");
       if (imageBeforeCaret) {
         event.preventDefault();
-        placeCaretBeforeRichImage(imageBeforeCaret);
-        setSelectedRichImage(null);
+        const imageId = imageBeforeCaret.getAttribute("data-rich-image-id")?.trim() ?? "";
+        if (!imageId) {
+          return;
+        }
+        setSelectedRichImageInScope(scope, imageId);
         setActiveRichImageDeleteLine(null);
+        setRichImageDeleteConfirmRect(null);
+        setRichImageDeleteConfirm({ scope, imageId });
         rememberRichSelection(scope);
         syncRichToolbarState(scope);
         return;
@@ -4957,9 +5595,14 @@ export default function CategoryWorkspace() {
       const imageAfterCaret = getAdjacentRichImageElementFromCollapsedSelection(editor, "after");
       if (imageAfterCaret) {
         event.preventDefault();
-        placeCaretAfterRichImage(imageAfterCaret);
-        setSelectedRichImage(null);
+        const imageId = imageAfterCaret.getAttribute("data-rich-image-id")?.trim() ?? "";
+        if (!imageId) {
+          return;
+        }
+        setSelectedRichImageInScope(scope, imageId);
         setActiveRichImageDeleteLine(null);
+        setRichImageDeleteConfirmRect(null);
+        setRichImageDeleteConfirm({ scope, imageId });
         rememberRichSelection(scope);
         syncRichToolbarState(scope);
         return;
@@ -4969,8 +5612,14 @@ export default function CategoryWorkspace() {
     if (selectedImageNode && (event.key === "Enter" || isPlainCharacterKey(event))) {
       event.preventDefault();
       placeCaretAfterRichImage(selectedImageNode);
+      if (event.key === "Enter") {
+        document.execCommand("insertLineBreak");
+      } else {
+        document.execCommand("insertText", false, event.key);
+      }
       setSelectedRichImage(null);
       setActiveRichImageDeleteLine(null);
+      applyEditorDomValue(scope, editor);
       rememberRichSelection(scope);
       syncRichToolbarState(scope);
       return;
@@ -5041,6 +5690,21 @@ export default function CategoryWorkspace() {
 
     if (event.key === "Enter" || isPlainCharacterKey(event)) {
       event.preventDefault();
+      if (!placeCaretOutsideRichImageDeleteLine(activeDeleteLine)) {
+        return;
+      }
+
+      if (event.key === "Enter") {
+        document.execCommand("insertLineBreak");
+      } else {
+        document.execCommand("insertText", false, event.key);
+      }
+
+      setActiveRichImageDeleteLine(null);
+      setSelectedRichImage(null);
+      applyEditorDomValue(scope, editor);
+      rememberRichSelection(scope);
+      syncRichToolbarState(scope);
     }
   }
 
@@ -5048,6 +5712,7 @@ export default function CategoryWorkspace() {
     const editor = getEditorElement(scope);
     if (editor) {
       ensureRichImageDeleteLinesIfNeeded(editor);
+      rememberCurrentEditorUndoHtml(scope, editor);
     }
 
     setActiveRichEditorIfChanged(scope);
@@ -5064,8 +5729,10 @@ export default function CategoryWorkspace() {
   }
 
   function handleRichEditorInputActivity(scope: RichEditorScope) {
-    applyRichImageDisplayScaleToEditor(getEditorElement(scope), editorDisplayScale);
+    const editor = getEditorElement(scope);
+    applyRichImageDisplayScaleToEditor(editor, editorDisplayScale);
     setActiveRichEditorIfChanged(scope);
+    rememberCurrentEditorUndoHtml(scope, editor);
     rememberRichSelection(scope);
     syncRichToolbarState(scope);
   }
@@ -5129,6 +5796,57 @@ export default function CategoryWorkspace() {
     handleRichEditorSelectionActivity(scope);
   }
 
+  function handleRichEditorCopy(
+    scope: RichEditorScope,
+    event: React.ClipboardEvent<HTMLDivElement>
+  ) {
+    const editor = getEditorElement(scope);
+    const selection = window.getSelection();
+    if (!editor || !selection || selection.rangeCount === 0) {
+      return;
+    }
+
+    const range = selection.getRangeAt(0);
+    if (!editor.contains(range.startContainer) || !editor.contains(range.endContainer)) {
+      return;
+    }
+
+    const selectedImageInScope =
+      selectedRichImage && isSameRichEditorScope(selectedRichImage.scope, scope)
+        ? getRichImageElementById(editor, selectedRichImage.imageId)
+        : null;
+    const imageInsideSelection =
+      selectedImageInScope ??
+      Array.from(editor.querySelectorAll<HTMLElement>(`.${RICH_IMAGE_CLASS_NAME}`)).find(
+        (imageNode) => {
+          try {
+            return range.intersectsNode(imageNode);
+          } catch {
+            return false;
+          }
+        }
+      ) ??
+      null;
+
+    let html = "";
+    if (imageInsideSelection) {
+      html = sanitizeRichTextHtml(imageInsideSelection.outerHTML);
+    } else if (!range.collapsed) {
+      const fragment = range.cloneContents();
+      const wrapper = document.createElement("div");
+      wrapper.appendChild(fragment);
+      html = sanitizeRichTextHtml(wrapper.innerHTML);
+    }
+
+    if (!html) {
+      return;
+    }
+
+    event.preventDefault();
+    event.clipboardData.setData("text/html", html);
+    event.clipboardData.setData("text/plain", richTextToPlainText(html));
+  }
+
   function handleBlockEditorInput(
     messageId: string,
     event: FormEvent<HTMLDivElement>
@@ -5164,6 +5882,10 @@ export default function CategoryWorkspace() {
   }
 
   function openCategory(categoryId: string, messageId?: string) {
+    if (currentCategoryId !== categoryId || selectedMessageId !== (messageId ?? null)) {
+      pushUiUndoSnapshot();
+    }
+
     setCurrentCategoryId(categoryId);
     setInsertionTargetId(categoryId);
     setActiveRichEditor(null);
@@ -5185,6 +5907,8 @@ export default function CategoryWorkspace() {
     setShowCategoryTagLibrary(false);
     setShowProjectCreateModal(false);
     setChecklistEditor(null);
+    setDictionaryEditor(null);
+    setDictionaryStudy(null);
     setChecklistTagSearchQuery("");
   }
 
@@ -5228,6 +5952,10 @@ export default function CategoryWorkspace() {
   }
 
   function handleSelectProjectTab(projectId: string | null) {
+    if (activeProjectId !== projectId || currentCategoryId || selectedMessageId) {
+      pushUiUndoSnapshot();
+    }
+
     setActiveProjectId(projectId);
     setCurrentCategoryId(null);
     setInsertionTargetId(null);
@@ -5244,11 +5972,15 @@ export default function CategoryWorkspace() {
     setShowCategoryTagSuggestions(false);
     setShowCategoryTagLibrary(false);
     setChecklistEditor(null);
+    setDictionaryEditor(null);
+    setDictionaryStudy(null);
     setChecklistTagSearchQuery("");
   }
 
   function openProjectCreateModal() {
     setChecklistEditor(null);
+    setDictionaryEditor(null);
+    setDictionaryStudy(null);
     setChecklistTagSearchQuery("");
     setProjectTagSearchQuery("");
     setProjectTagSelection([]);
@@ -6322,6 +7054,7 @@ export default function CategoryWorkspace() {
       return {
         text: continuousEditorRef.current?.innerHTML ?? continuousDraft,
         checklists: normalizeChecklistBlocks(continuousChecklists),
+        dictionaries: normalizeDictionaryBlocks(continuousDictionaries),
       };
     }
 
@@ -6340,6 +7073,7 @@ export default function CategoryWorkspace() {
     const nextDocument: ContinuousContentModel = {
       text: document.text,
       checklists: normalizeChecklistBlocks(document.checklists),
+      dictionaries: normalizeDictionaryBlocks(document.dictionaries),
     };
     const serialized = serializeContinuousContent(nextDocument);
 
@@ -6347,6 +7081,7 @@ export default function CategoryWorkspace() {
       if (currentCategory?.id === categoryId && currentCategory.format === "continuous") {
         setContinuousDraft(nextDocument.text);
         setContinuousChecklists(nextDocument.checklists);
+        setContinuousDictionaries(nextDocument.dictionaries);
       }
       return false;
     }
@@ -6357,6 +7092,7 @@ export default function CategoryWorkspace() {
     if (currentCategory?.id === categoryId && currentCategory.format === "continuous") {
       setContinuousDraft(nextDocument.text);
       setContinuousChecklists(nextDocument.checklists);
+      setContinuousDictionaries(nextDocument.dictionaries);
     }
 
     setCategories((prev) =>
@@ -6398,6 +7134,7 @@ export default function CategoryWorkspace() {
       {
         text: nextValue,
         checklists: nextDocument?.checklists ?? [],
+        dictionaries: nextDocument?.dictionaries ?? [],
       },
       nextVersion
     );
@@ -6430,6 +7167,8 @@ export default function CategoryWorkspace() {
       return;
     }
 
+    setDictionaryEditor(null);
+    setDictionaryStudy(null);
     setChecklistTagSearchQuery("");
     setChecklistEditor({
       source: currentCategory.format === "block" ? "block-message" : "continuous",
@@ -6455,6 +7194,8 @@ export default function CategoryWorkspace() {
       return;
     }
 
+    setDictionaryEditor(null);
+    setDictionaryStudy(null);
     setChecklistTagSearchQuery("");
     setChecklistEditor({
       source: "continuous",
@@ -6476,6 +7217,8 @@ export default function CategoryWorkspace() {
       return;
     }
 
+    setDictionaryEditor(null);
+    setDictionaryStudy(null);
     setChecklistTagSearchQuery("");
     setChecklistEditor({
       source: "block-message",
@@ -6743,6 +7486,7 @@ export default function CategoryWorkspace() {
       commitContinuousDocumentForCategory(checklistEditor.sourceCategoryId, {
         text: sourceDocument.text,
         checklists: nextChecklists,
+        dictionaries: sourceDocument.dictionaries,
       });
       pushNotice("#Checklist обновлен.");
       closeChecklistEditor();
@@ -6761,6 +7505,7 @@ export default function CategoryWorkspace() {
     commitContinuousDocumentForCategory(checklistEditor.sourceCategoryId, {
       text: sourceDocument.text,
       checklists: [...sourceDocument.checklists, createdChecklist],
+      dictionaries: sourceDocument.dictionaries,
     });
     pushNotice("#Checklist добавлен.");
     closeChecklistEditor();
@@ -6836,9 +7581,707 @@ export default function CategoryWorkspace() {
     commitContinuousDocumentForCategory(checklistEditor.sourceCategoryId, {
       text: sourceDocument.text,
       checklists: nextChecklists,
+      dictionaries: sourceDocument.dictionaries,
     });
     pushNotice("#Checklist удален.");
     closeChecklistEditor();
+  }
+
+  function handleAddDictionaryBlock() {
+    if (!currentCategory) {
+      return;
+    }
+
+    setChecklistEditor(null);
+    setChecklistTagSearchQuery("");
+    setDictionaryStudy(null);
+    setDictionaryImportDraft("");
+    setDictionaryEditorTab("entries");
+    setDictionaryEditor({
+      source: currentCategory.format === "block" ? "block-message" : "continuous",
+      sourceCategoryId: currentCategory.id,
+      sourceMessageId: null,
+      dictionaryId: null,
+      titleDraft: "Словарь",
+      descriptionDraft: "",
+      tagsDraft: "",
+      promptSide: "side1",
+      shuffle: false,
+      labels: createDefaultDictionaryLabels(),
+      entries: [createEmptyDictionaryEntry()],
+    });
+  }
+
+  function openDictionaryEditorForBlockMessage(
+    message: MessageRow,
+    payload: MessageDictionaryPayload
+  ) {
+    if (!currentCategory || currentCategory.format !== "block") {
+      return;
+    }
+
+    setChecklistEditor(null);
+    setChecklistTagSearchQuery("");
+    setDictionaryStudy(null);
+    setDictionaryImportDraft("");
+    setDictionaryEditorTab("entries");
+    setDictionaryEditor({
+      source: "block-message",
+      sourceCategoryId: currentCategory.id,
+      sourceMessageId: message.id,
+      dictionaryId: null,
+      titleDraft: message.title,
+      descriptionDraft: payload.description,
+      tagsDraft: serializeDictionaryTags(payload.tags),
+      promptSide: payload.promptSide,
+      shuffle: payload.shuffle,
+      labels: normalizeDictionaryLabels(payload.labels),
+      entries: makeDictionaryEditorEntries(payload),
+    });
+  }
+
+  function openDictionaryEditorForContinuousDictionary(dictionaryId: string) {
+    if (!currentCategory || currentCategory.format !== "continuous") {
+      return;
+    }
+
+    const dictionary = continuousDictionaries.find((item) => item.id === dictionaryId);
+    if (!dictionary) {
+      return;
+    }
+
+    setChecklistEditor(null);
+    setChecklistTagSearchQuery("");
+    setDictionaryStudy(null);
+    setDictionaryImportDraft("");
+    setDictionaryEditorTab("entries");
+    setDictionaryEditor({
+      source: "continuous",
+      sourceCategoryId: currentCategory.id,
+      sourceMessageId: null,
+      dictionaryId: dictionary.id,
+      titleDraft: dictionary.title,
+      descriptionDraft: dictionary.description,
+      tagsDraft: serializeDictionaryTags(dictionary.tags),
+      promptSide: dictionary.promptSide,
+      shuffle: dictionary.shuffle,
+      labels: normalizeDictionaryLabels(dictionary.labels),
+      entries: makeDictionaryEditorEntries(dictionary),
+    });
+  }
+
+  function closeDictionaryEditor() {
+    setDictionaryImportDraft("");
+    setDictionaryEditorTab("entries");
+    setDictionaryEditor(null);
+  }
+
+  function updateDictionaryEditorTitle(value: string) {
+    setDictionaryEditor((prev) => (prev ? { ...prev, titleDraft: value } : prev));
+  }
+
+  function updateDictionaryEditorDescription(value: string) {
+    setDictionaryEditor((prev) =>
+      prev ? { ...prev, descriptionDraft: value } : prev
+    );
+  }
+
+  function updateDictionaryEditorTags(value: string) {
+    setDictionaryEditor((prev) => (prev ? { ...prev, tagsDraft: value } : prev));
+  }
+
+  function updateDictionaryEditorPromptSide(side: DictionaryPromptSide) {
+    setDictionaryEditor((prev) =>
+      prev ? { ...prev, promptSide: normalizeDictionaryPromptSide(side) } : prev
+    );
+  }
+
+  function updateDictionaryEditorShuffle(shuffle: boolean) {
+    setDictionaryEditor((prev) => (prev ? { ...prev, shuffle } : prev));
+  }
+
+  function updateDictionaryEditorLabel(
+    field: DictionaryLabelField,
+    value: string
+  ) {
+    setDictionaryEditor((prev) =>
+      prev
+        ? {
+            ...prev,
+            labels: {
+              ...prev.labels,
+              [field]: value,
+            },
+          }
+        : prev
+    );
+  }
+
+  function updateDictionaryEditorEntry(
+    entryId: string,
+    field: DictionaryEntryField,
+    value: string
+  ) {
+    setDictionaryEditor((prev) => {
+      if (!prev) {
+        return prev;
+      }
+
+      return {
+        ...prev,
+        entries: prev.entries.map((entry) =>
+          entry.id === entryId
+            ? {
+                ...entry,
+                [field]: value,
+              }
+            : entry
+        ),
+      };
+    });
+  }
+
+  function addDictionaryEditorEntry() {
+    setDictionaryEditor((prev) =>
+      prev
+        ? {
+            ...prev,
+            entries: [...prev.entries, createEmptyDictionaryEntry()],
+          }
+        : prev
+    );
+  }
+
+  function removeDictionaryEditorEntry(entryId: string) {
+    setDictionaryEditor((prev) => {
+      if (!prev) {
+        return prev;
+      }
+
+      const entries = prev.entries.filter((entry) => entry.id !== entryId);
+      return {
+        ...prev,
+        entries: entries.length > 0 ? entries : [createEmptyDictionaryEntry()],
+      };
+    });
+  }
+
+  function getDictionaryEditorNormalizedDraft(): {
+    title: string;
+    payload: MessageDictionaryPayload;
+  } | null {
+    if (!dictionaryEditor) {
+      return null;
+    }
+
+    const validation = validateDictionaryEditorEntries(dictionaryEditor.entries);
+    if (validation.error) {
+      pushNotice(validation.error, "warn");
+      return null;
+    }
+
+    return {
+      title: normalizeDictionaryTitle(dictionaryEditor.titleDraft),
+      payload: {
+        description: normalizeDictionaryDescription(
+          dictionaryEditor.descriptionDraft
+        ),
+        tags: parseDictionaryTags(dictionaryEditor.tagsDraft),
+        promptSide: dictionaryEditor.promptSide,
+        shuffle: dictionaryEditor.shuffle,
+        labels: normalizeDictionaryLabels(dictionaryEditor.labels),
+        entries: validation.entries,
+      },
+    };
+  }
+
+  function handleExportDictionaryJson() {
+    const draft = getDictionaryEditorNormalizedDraft();
+    if (!draft) {
+      return;
+    }
+
+    const document = buildDictionaryExportDocument(draft.title, draft.payload);
+    downloadTextFile(
+      makeDictionaryExportFileName(draft.title, "json"),
+      JSON.stringify(document, null, 2),
+      "application/json;charset=utf-8"
+    );
+    pushNotice("#DICT экспортирован в JSON.");
+  }
+
+  function handleExportDictionaryTsv() {
+    const draft = getDictionaryEditorNormalizedDraft();
+    if (!draft) {
+      return;
+    }
+
+    downloadTextFile(
+      makeDictionaryExportFileName(draft.title, "tsv"),
+      dictionaryPayloadToTsv(draft.payload),
+      "text/tab-separated-values;charset=utf-8"
+    );
+    pushNotice("#DICT экспортирован в TSV.");
+  }
+
+  function handleOpenDictionaryImportFilePicker() {
+    dictionaryImportFileRef.current?.click();
+  }
+
+  async function handleDictionaryImportFileChange(
+    event: ChangeEvent<HTMLInputElement>
+  ) {
+    const file = event.target.files?.[0] ?? null;
+    event.target.value = "";
+
+    if (!file) {
+      return;
+    }
+
+    try {
+      const text = await file.text();
+      setDictionaryImportDraft(text);
+      const parsed = parseDictionaryImportDraft(text, dictionaryEditor?.labels);
+      if (parsed.ok) {
+        pushNotice(`Файл прочитан: ${parsed.entries.length} пар.`);
+      } else {
+        pushNotice(parsed.error, "warn");
+      }
+    } catch (error) {
+      pushNotice(toErrorMessage(error, "Не удалось прочитать файл импорта."), "error");
+    }
+  }
+
+  async function handleApplyDictionaryImport() {
+    if (!dictionaryEditor) {
+      return;
+    }
+
+    if (!dictionaryImportPreview.ok) {
+      pushNotice(dictionaryImportPreview.error, "warn");
+      return;
+    }
+
+    const message =
+      dictionaryImportPreview.kind === "json"
+        ? `JSON импорт заменит весь черновик словаря и загрузит ${dictionaryImportPreview.entries.length} пар. Продолжить?`
+        : `Импорт таблицы полностью заменит текущие строки словаря на ${dictionaryImportPreview.entries.length} пар. Название, описание, теги, подписи и настройки останутся как сейчас. Продолжить?`;
+
+    const confirmed = await requestConfirmation({
+      title: "Импорт #DICT",
+      message,
+      confirmLabel: "заменить",
+      cancelLabel: "отмена",
+      tone: "danger",
+    });
+    if (!confirmed) {
+      return;
+    }
+
+    if (dictionaryImportPreview.kind === "json") {
+      setDictionaryEditor((prev) =>
+        prev
+          ? {
+              ...prev,
+              titleDraft: dictionaryImportPreview.title,
+              descriptionDraft: dictionaryImportPreview.payload.description,
+              tagsDraft: serializeDictionaryTags(dictionaryImportPreview.payload.tags),
+              promptSide: dictionaryImportPreview.payload.promptSide,
+              shuffle: dictionaryImportPreview.payload.shuffle,
+              labels: normalizeDictionaryLabels(dictionaryImportPreview.payload.labels),
+              entries: makeDictionaryEditorEntries(dictionaryImportPreview.payload),
+            }
+          : prev
+      );
+      setDictionaryImportDraft("");
+      pushNotice("JSON импортирован в черновик #DICT.");
+      return;
+    }
+
+    setDictionaryEditor((prev) =>
+      prev
+        ? {
+            ...prev,
+            entries: dictionaryImportPreview.entries.map((entry) => ({ ...entry })),
+          }
+        : prev
+    );
+    setDictionaryImportDraft("");
+    pushNotice("Строки #DICT заменены импортом.");
+  }
+
+  async function handleSaveDictionaryEditor() {
+    if (!dictionaryEditor) {
+      return;
+    }
+
+    const sourceCategoryId = dictionaryEditor.sourceCategoryId;
+    const validation = validateDictionaryEditorEntries(dictionaryEditor.entries);
+    if (validation.error) {
+      pushNotice(validation.error, "warn");
+      return;
+    }
+
+    const nextTitle = normalizeDictionaryTitle(dictionaryEditor.titleDraft);
+    const nextPayload: MessageDictionaryPayload = {
+      description: normalizeDictionaryDescription(
+        dictionaryEditor.descriptionDraft
+      ),
+      tags: parseDictionaryTags(dictionaryEditor.tagsDraft),
+      promptSide: dictionaryEditor.promptSide,
+      shuffle: dictionaryEditor.shuffle,
+      labels: normalizeDictionaryLabels(dictionaryEditor.labels),
+      entries: validation.entries,
+    };
+    const serializedContent = serializeMessageDictionaryContent(nextPayload);
+
+    if (dictionaryEditor.source === "continuous") {
+      const sourceDocument = getContinuousDocumentForCategory(sourceCategoryId);
+      if (!sourceDocument) {
+        pushNotice("Не удалось открыть сплошной словарь.", "error");
+        return;
+      }
+
+      if (dictionaryEditor.dictionaryId) {
+        let foundDictionary = false;
+        const nextDictionaries = sourceDocument.dictionaries.map((dictionary) => {
+          if (dictionary.id !== dictionaryEditor.dictionaryId) {
+            return dictionary;
+          }
+
+          foundDictionary = true;
+          return {
+            id: dictionary.id,
+            title: nextTitle,
+            ...nextPayload,
+          };
+        });
+
+        if (!foundDictionary) {
+          pushNotice("Словарь не найден.", "warn");
+          closeDictionaryEditor();
+          return;
+        }
+
+        commitContinuousDocumentForCategory(sourceCategoryId, {
+          text: sourceDocument.text,
+          checklists: sourceDocument.checklists,
+          dictionaries: nextDictionaries,
+        });
+        pushNotice("#DICT обновлен.");
+        closeDictionaryEditor();
+        return;
+      }
+
+      const createdDictionary: DictionaryBlock = {
+        id: crypto.randomUUID(),
+        title: nextTitle,
+        ...nextPayload,
+      };
+
+      commitContinuousDocumentForCategory(sourceCategoryId, {
+        text: sourceDocument.text,
+        checklists: sourceDocument.checklists,
+        dictionaries: [...sourceDocument.dictionaries, createdDictionary],
+      });
+      pushNotice("#DICT добавлен.");
+      closeDictionaryEditor();
+      return;
+    }
+
+    if (!dictionaryEditor.sourceMessageId) {
+      setIsMutating(true);
+      try {
+        const created = await createMessageRequest(
+          sourceCategoryId,
+          nextTitle,
+          serializedContent,
+          "info"
+        );
+        savedMessageContentRef.current[created.id] = created.content;
+        messageDraftVersionRef.current[created.id] = 0;
+        messageAckVersionRef.current[created.id] = 0;
+        clearMessageSaveState(created.id);
+        setMessagesByCategory((prev) => ({
+          ...prev,
+          [sourceCategoryId]: [...(prev[sourceCategoryId] ?? []), created].sort(
+            sortMessages
+          ),
+        }));
+        setSelectedMessageId(created.id);
+        pushNotice("#DICT добавлен.");
+      } catch (error) {
+        pushNotice(toErrorMessage(error, "Не удалось добавить #DICT."), "error");
+      } finally {
+        setIsMutating(false);
+        closeDictionaryEditor();
+      }
+      return;
+    }
+
+    const targetMessage = (messagesByCategory[sourceCategoryId] ?? []).find(
+      (message) => message.id === dictionaryEditor.sourceMessageId
+    );
+    if (!targetMessage) {
+      pushNotice("Словарь не найден.", "warn");
+      closeDictionaryEditor();
+      return;
+    }
+
+    if (!parseMessageDictionaryContent(targetMessage.content)) {
+      pushNotice("Содержимое блока больше не является #DICT.", "warn");
+      closeDictionaryEditor();
+      return;
+    }
+
+    const previousTitle = targetMessage.title;
+    const previousContent = targetMessage.content;
+
+    setMessagesByCategory((prev) => ({
+      ...prev,
+      [sourceCategoryId]: (prev[sourceCategoryId] ?? []).map((message) =>
+        message.id === targetMessage.id
+          ? {
+              ...message,
+              title: nextTitle,
+              content: serializedContent,
+              updated_at: new Date().toISOString(),
+            }
+          : message
+      ),
+    }));
+
+    try {
+      await patchMessage(targetMessage.id, sourceCategoryId, {
+        title: nextTitle,
+        content: serializedContent,
+      });
+      pushNotice("#DICT обновлен.");
+    } catch (error) {
+      setMessagesByCategory((prev) => ({
+        ...prev,
+        [sourceCategoryId]: (prev[sourceCategoryId] ?? []).map((message) =>
+          message.id === targetMessage.id
+            ? {
+                ...message,
+                title: previousTitle,
+                content: previousContent,
+              }
+            : message
+        ),
+      }));
+      pushNotice(toErrorMessage(error, "Не удалось обновить #DICT."), "error");
+    } finally {
+      closeDictionaryEditor();
+    }
+  }
+
+  async function handleDeleteDictionaryFromEditor() {
+    const confirmed = await requestConfirmation({
+      title: "Удалить #DICT",
+      message:
+        "Словарь будет удален полностью. Это действие нельзя отменить через настройки словаря. Продолжить?",
+      confirmLabel: "удалить",
+      cancelLabel: "отмена",
+      tone: "danger",
+    });
+    if (!confirmed) {
+      return;
+    }
+
+    if (dictionaryEditor?.source === "continuous") {
+      if (!dictionaryEditor.dictionaryId) {
+        closeDictionaryEditor();
+        return;
+      }
+
+      const sourceDocument = getContinuousDocumentForCategory(
+        dictionaryEditor.sourceCategoryId
+      );
+      if (!sourceDocument) {
+        pushNotice("Не удалось удалить словарь.", "error");
+        return;
+      }
+
+      const nextDictionaries = sourceDocument.dictionaries.filter(
+        (dictionary) => dictionary.id !== dictionaryEditor.dictionaryId
+      );
+
+      if (nextDictionaries.length === sourceDocument.dictionaries.length) {
+        closeDictionaryEditor();
+        return;
+      }
+
+      commitContinuousDocumentForCategory(dictionaryEditor.sourceCategoryId, {
+        text: sourceDocument.text,
+        checklists: sourceDocument.checklists,
+        dictionaries: nextDictionaries,
+      });
+      setDictionaryStudy((prev) =>
+        prev?.dictionaryId === dictionaryEditor.dictionaryId ? null : prev
+      );
+      pushNotice("#DICT удален.");
+      closeDictionaryEditor();
+      return;
+    }
+
+    if (!dictionaryEditor?.sourceMessageId) {
+      closeDictionaryEditor();
+      return;
+    }
+
+    const sourceCategoryId = dictionaryEditor.sourceCategoryId;
+    const messageId = dictionaryEditor.sourceMessageId;
+
+    setIsMutating(true);
+    try {
+      await deleteMessageRequest(messageId);
+
+      clearMessageSaveState(messageId);
+      delete savedMessageContentRef.current[messageId];
+      delete messageDraftVersionRef.current[messageId];
+      delete messageAckVersionRef.current[messageId];
+      syncMessageSavingState();
+
+      setMessagesByCategory((prev) => ({
+        ...prev,
+        [sourceCategoryId]: (prev[sourceCategoryId] ?? []).filter(
+          (message) => message.id !== messageId
+        ),
+      }));
+
+      if (selectedMessageId === messageId) {
+        setSelectedMessageId(null);
+      }
+
+      setDictionaryStudy((prev) =>
+        prev?.sourceMessageId === messageId ? null : prev
+      );
+      pushNotice("#DICT удален.");
+    } catch (error) {
+      pushNotice(toErrorMessage(error, "Не удалось удалить #DICT."), "error");
+    } finally {
+      setIsMutating(false);
+      closeDictionaryEditor();
+    }
+  }
+
+  function cancelDictionarySpeech() {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      return;
+    }
+
+    window.speechSynthesis.cancel();
+  }
+
+  function openDictionaryStudy(options: {
+    sourceCategoryId: string;
+    sourceMessageId: string | null;
+    dictionaryId: string | null;
+    title: string;
+    payload: MessageDictionaryPayload;
+  }) {
+    const payload = options.payload;
+    const cards =
+      payload.shuffle && payload.entries.length > 1
+        ? shuffleDictionaryEntries(payload.entries)
+        : [...payload.entries];
+
+    if (cards.length === 0) {
+      pushNotice("Добавь пары в словарь перед заучиванием.", "warn");
+      return;
+    }
+
+    cancelDictionarySpeech();
+    setChecklistEditor(null);
+    setDictionaryEditor(null);
+    setDictionaryImportDraft("");
+    setDictionaryStudy({
+      sourceCategoryId: options.sourceCategoryId,
+      sourceMessageId: options.sourceMessageId,
+      dictionaryId: options.dictionaryId,
+      title: options.title,
+      promptSide: payload.promptSide,
+      labels: normalizeDictionaryLabels(payload.labels),
+      cards,
+      currentIndex: 0,
+      isAnswerRevealed: false,
+      transitionKey: 0,
+    });
+  }
+
+  function closeDictionaryStudy() {
+    cancelDictionarySpeech();
+    setDictionaryStudy(null);
+  }
+
+  function toggleDictionaryStudySide() {
+    cancelDictionarySpeech();
+    setDictionaryStudy((prev) =>
+      prev
+        ? {
+            ...prev,
+            isAnswerRevealed: !prev.isAnswerRevealed,
+            transitionKey: prev.transitionKey + 1,
+          }
+        : prev
+    );
+  }
+
+  function moveDictionaryStudy(offset: number) {
+    cancelDictionarySpeech();
+    setDictionaryStudy((prev) => {
+      if (!prev || prev.cards.length === 0) {
+        return prev;
+      }
+
+      const nextIndex =
+        (prev.currentIndex + offset + prev.cards.length) % prev.cards.length;
+
+      return {
+        ...prev,
+        currentIndex: nextIndex,
+        isAnswerRevealed: false,
+        transitionKey: prev.transitionKey + 1,
+      };
+    });
+  }
+
+  function speakDictionaryStudyCurrentCard() {
+    if (!dictionaryStudy) {
+      return;
+    }
+
+    const currentEntry = dictionaryStudy.cards[dictionaryStudy.currentIndex] ?? null;
+    if (!currentEntry) {
+      return;
+    }
+
+    const activeSide = dictionaryStudy.isAnswerRevealed
+      ? oppositeDictionaryPromptSide(dictionaryStudy.promptSide)
+      : dictionaryStudy.promptSide;
+    const activeText = getDictionaryEntrySideText(currentEntry, activeSide);
+    const textToSpeak = activeText.trim();
+
+    if (!textToSpeak) {
+      pushNotice("На карточке нечего озвучить.", "warn");
+      return;
+    }
+
+    if (
+      typeof window === "undefined" ||
+      !("speechSynthesis" in window) ||
+      typeof SpeechSynthesisUtterance === "undefined"
+    ) {
+      pushNotice("Браузер не поддерживает озвучку.", "warn");
+      return;
+    }
+
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(textToSpeak);
+    utterance.lang =
+      document.documentElement.lang || window.navigator.language || "ru-RU";
+    window.speechSynthesis.speak(utterance);
   }
 
   function toggleChecklistMessageCategoryCheckState(
@@ -6955,6 +8398,7 @@ export default function CategoryWorkspace() {
     commitContinuousDocumentForCategory(sourceCategoryId, {
       text: sourceDocument.text,
       checklists: nextChecklists,
+      dictionaries: sourceDocument.dictionaries,
     });
   }
 
@@ -7066,6 +8510,7 @@ export default function CategoryWorkspace() {
     commitContinuousDocumentForCategory(currentCategory.id, {
       text: sourceDocument.text,
       checklists: nextChecklists,
+      dictionaries: sourceDocument.dictionaries,
     });
     setDragChecklistItem(null);
   }
@@ -7304,6 +8749,12 @@ export default function CategoryWorkspace() {
           (message) => message.id !== selectedMessage.id
         ),
       }));
+      setDictionaryStudy((prev) =>
+        prev?.sourceMessageId === selectedMessage.id ? null : prev
+      );
+      setDictionaryEditor((prev) =>
+        prev?.sourceMessageId === selectedMessage.id ? null : prev
+      );
       setSelectedMessageId(null);
       pushNotice("Сообщение удалено.");
     } catch (error) {
@@ -7617,6 +9068,7 @@ export default function CategoryWorkspace() {
         });
 
         setContinuousChecklists([]);
+        setContinuousDictionaries([]);
       } else if (previousFormat === "block" && nextFormat === "continuous") {
         const orderedMessages = [...currentMessages].sort(sortMessages);
         const mergedText = orderedMessages.map((message) => message.content).join("\n\n");
@@ -7641,6 +9093,7 @@ export default function CategoryWorkspace() {
         }));
         setContinuousDraft(mergedText);
         setContinuousChecklists([]);
+        setContinuousDictionaries([]);
         setSelectedMessageId(null);
       } else {
         await patchCategoryById(categoryId, { format: nextFormat });
@@ -8158,17 +9611,90 @@ export default function CategoryWorkspace() {
   deleteRichFileBySelectionRef.current = deleteRichFileBySelection;
   rememberRichSelectionRef.current = rememberRichSelection;
   syncRichToolbarStateRef.current = syncRichToolbarState;
+  performWorkspaceUndoRef.current = performWorkspaceUndo;
 
   function handleDecreaseEditorTextScale() {
+    pushUiUndoSnapshot();
     setEditorTextScalePercent((prev) =>
       clampEditorTextScalePercent(prev - EDITOR_TEXT_SCALE_STEP_PERCENT)
     );
   }
 
   function handleIncreaseEditorTextScale() {
+    pushUiUndoSnapshot();
     setEditorTextScalePercent((prev) =>
       clampEditorTextScalePercent(prev + EDITOR_TEXT_SCALE_STEP_PERCENT)
     );
+  }
+
+  function handleEditorTextScaleInputMouseDown(
+    event: React.MouseEvent<HTMLInputElement>
+  ) {
+    event.stopPropagation();
+
+    const scope = resolveRichEditorScope();
+    if (!scope) {
+      return;
+    }
+
+    rememberRichSelection(scope);
+  }
+
+  function handleEditorTextScaleInputFocus(event: FocusEvent<HTMLInputElement>) {
+    event.currentTarget.select();
+  }
+
+  function handleEditorTextScaleInputChange(event: ChangeEvent<HTMLInputElement>) {
+    setEditorTextScaleInputValue(event.target.value);
+  }
+
+  function applyEditorTextScaleInputValue(rawValue: string) {
+    const nextScale = parseEditorTextScalePercentInput(rawValue);
+    if (nextScale === null) {
+      setEditorTextScaleInputValue(formatEditorTextScalePercent(editorTextScalePercent));
+      return;
+    }
+
+    if (nextScale !== editorTextScalePercent) {
+      pushUiUndoSnapshot();
+    }
+    setEditorTextScalePercent(nextScale);
+    setEditorTextScaleInputValue(formatEditorTextScalePercent(nextScale));
+  }
+
+  function cancelEditorTextScaleInputValue(input: HTMLInputElement) {
+    const currentValue = formatEditorTextScalePercent(editorTextScalePercent);
+    input.value = currentValue;
+    setEditorTextScaleInputValue(currentValue);
+  }
+
+  function handleEditorTextScaleInputBlur(event: FocusEvent<HTMLInputElement>) {
+    applyEditorTextScaleInputValue(event.currentTarget.value);
+  }
+
+  function handleEditorTextScaleInputKeyDown(
+    event: React.KeyboardEvent<HTMLInputElement>
+  ) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      applyEditorTextScaleInputValue(event.currentTarget.value);
+      event.currentTarget.blur();
+      return;
+    }
+
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelEditorTextScaleInputValue(event.currentTarget);
+      event.currentTarget.blur();
+    }
+  }
+
+  function handleWorkspaceUndoButtonMouseDown(event: React.MouseEvent<HTMLButtonElement>) {
+    event.preventDefault();
+  }
+
+  function handleWorkspaceUndoButtonClick() {
+    performWorkspaceUndo();
   }
 
   function renderEditorTextScaleControls() {
@@ -8180,6 +9706,18 @@ export default function CategoryWorkspace() {
       >
         <button
           type="button"
+          className="mini-action toolbar-zoom-button toolbar-undo-button"
+          onMouseDown={handleWorkspaceUndoButtonMouseDown}
+          onClick={handleWorkspaceUndoButtonClick}
+          disabled={!canUndoWorkspace}
+          aria-label="Отменить последнее действие"
+          title="Отменить последнее действие"
+        >
+          ↶
+        </button>
+
+        <button
+          type="button"
           className="mini-action toolbar-zoom-button"
           onMouseDown={handleToolbarControlMouseDown}
           onClick={handleDecreaseEditorTextScale}
@@ -8189,9 +9727,19 @@ export default function CategoryWorkspace() {
           -
         </button>
 
-        <span className="toolbar-zoom-value" aria-live="polite">
-          {editorTextScalePercent}%
-        </span>
+        <input
+          type="text"
+          inputMode="numeric"
+          className="toolbar-zoom-value"
+          value={editorTextScaleInputValue}
+          onMouseDown={handleEditorTextScaleInputMouseDown}
+          onFocus={handleEditorTextScaleInputFocus}
+          onChange={handleEditorTextScaleInputChange}
+          onBlur={handleEditorTextScaleInputBlur}
+          onKeyDown={handleEditorTextScaleInputKeyDown}
+          disabled={!canAdjustEditorTextScale}
+          aria-label="Editor zoom percent"
+        />
 
         <button
           type="button"
@@ -8637,12 +10185,23 @@ export default function CategoryWorkspace() {
                   >
                     #CL
                   </button>
+                  <button
+                    type="button"
+                    className="mini-action"
+                    onClick={() => void handleAddDictionaryBlock()}
+                    disabled={!currentCategoryId || isMutating || isLoading}
+                  >
+                    #DICT
+                  </button>
                   {renderRichTextTools("block")}
                 </div>
 
                 <div
                   className="message-board message-board-block"
                   onClick={() => {
+                    if (selectedMessageId || activeRichEditor) {
+                      pushUiUndoSnapshot();
+                    }
                     setSelectedMessageId(null);
                     setActiveRichEditor(null);
                     setSelectedRichImage(null);
@@ -8655,6 +10214,7 @@ export default function CategoryWorkspace() {
                   ) : (
                     currentMessages.map((message) => {
                       const checklistCard = blockChecklistCardsByMessageId.get(message.id);
+                      const dictionaryCard = blockDictionaryCardsByMessageId.get(message.id);
 
                       return (
                         <article
@@ -8699,6 +10259,9 @@ export default function CategoryWorkspace() {
                           }}
                           onClick={(event) => {
                             event.stopPropagation();
+                            if (selectedMessageId !== message.id) {
+                              pushUiUndoSnapshot();
+                            }
                             setSelectedMessageId(message.id);
 
                             const target = event.target;
@@ -8716,7 +10279,9 @@ export default function CategoryWorkspace() {
                             <span className="message-title">{message.title}</span>
                             <div className="message-head-right">
                               <span className="message-kind">
-                                {checklistCard
+                                {dictionaryCard
+                                  ? "#DICT"
+                                  : checklistCard
                                   ? "#Checklist"
                                   : toMessageTypeLabel(message.message_type)}
                               </span>
@@ -8760,7 +10325,10 @@ export default function CategoryWorkspace() {
                           </div>
 
                           {checklistCard ? (
-                            <div className="message-editor">
+                            <div
+                              className="message-editor message-editor-checklist"
+                              style={editorTextScaleStyle}
+                            >
                               {(() => {
                                 const uncheckedItemCount = checklistCard.items.filter(
                                   (item) => !item.checked
@@ -8887,11 +10455,91 @@ export default function CategoryWorkspace() {
                                 );
                               })()}
                             </div>
+                          ) : dictionaryCard ? (
+                            <div
+                              className="message-editor message-editor-dictionary"
+                              style={editorTextScaleStyle}
+                            >
+                              <div className="dictionary-block-card">
+                                <div className="dictionary-block-meta">
+                                  <span>{dictionaryCard.payload.entries.length} пар</span>
+                                  <span>
+                                    показывать:{" "}
+                                    {toDictionaryPromptSideLabel(
+                                      dictionaryCard.payload.promptSide,
+                                      dictionaryCard.payload.labels
+                                    )}
+                                  </span>
+                                  {dictionaryCard.payload.shuffle && (
+                                    <span>перемешивание</span>
+                                  )}
+                                </div>
+
+                                <p className="dictionary-block-name">{message.title}</p>
+
+                                {(dictionaryCard.payload.description ||
+                                  dictionaryCard.payload.tags.length > 0) && (
+                                  <div className="dictionary-block-info">
+                                    {dictionaryCard.payload.description && (
+                                      <p className="dictionary-block-description">
+                                        {dictionaryCard.payload.description}
+                                      </p>
+                                    )}
+                                    {dictionaryCard.payload.tags.length > 0 && (
+                                      <div className="dictionary-block-tags">
+                                        {dictionaryCard.payload.tags.map((tag) => (
+                                          <span key={tag}>{tag}</span>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+
+                                <div className="dictionary-block-actions">
+                                  <button
+                                    type="button"
+                                    className="mini-action"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      openDictionaryStudy({
+                                        sourceCategoryId: message.category_id,
+                                        sourceMessageId: message.id,
+                                        dictionaryId: null,
+                                        title: message.title,
+                                        payload: dictionaryCard.payload,
+                                      });
+                                    }}
+                                    disabled={dictionaryCard.payload.entries.length === 0}
+                                  >
+                                    заучивание
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="mini-action"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      openDictionaryEditorForBlockMessage(
+                                        message,
+                                        dictionaryCard.payload
+                                      );
+                                    }}
+                                  >
+                                    настройки
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
                           ) : (
                             <div
                               ref={(element) => setBlockEditorElement(message.id, element)}
                               contentEditable={!isMutating && !isLoading}
                               suppressContentEditableWarning
+                              onBeforeInput={() =>
+                                handleRichEditorBeforeInput({
+                                  kind: "block",
+                                  messageId: message.id,
+                                })
+                              }
                               onInput={(event) => handleBlockEditorInput(message.id, event)}
                               onBlur={(event) => {
                                 if (!currentCategoryId) {
@@ -8976,6 +10624,15 @@ export default function CategoryWorkspace() {
                                   event
                                 )
                               }
+                              onCopy={(event) =>
+                                handleRichEditorCopy(
+                                  {
+                                    kind: "block",
+                                    messageId: message.id,
+                                  },
+                                  event
+                                )
+                              }
                               className="message-editor message-editor-rich"
                               style={editorTextScaleStyle}
                               data-placeholder="Текст сообщения..."
@@ -9004,11 +10661,22 @@ export default function CategoryWorkspace() {
                   >
                     #CL
                   </button>
+                  <button
+                    type="button"
+                    className="mini-action"
+                    onClick={handleAddDictionaryBlock}
+                    disabled={!currentCategoryId || isMutating || isLoading}
+                  >
+                    #DICT
+                  </button>
                   {renderRichTextTools("continuous")}
                 </div>
                 <div className="continuous-wrap">
                   {continuousChecklistCards.length > 0 && (
-                    <div className="continuous-checklist-board">
+                    <div
+                      className="continuous-checklist-board"
+                      style={editorTextScaleStyle}
+                    >
                       {continuousChecklistCards.map(({ checklist, items }) => {
                         const uncheckedItemCount = items.filter((item) => !item.checked).length;
                         const checkedItemCount = items.filter((item) => item.checked).length;
@@ -9155,10 +10823,92 @@ export default function CategoryWorkspace() {
                     </div>
                   )}
 
+                  {continuousDictionaryCards.length > 0 && (
+                    <div
+                      className="continuous-dictionary-board"
+                      style={editorTextScaleStyle}
+                    >
+                      {continuousDictionaryCards.map((dictionary) => (
+                        <article
+                          key={`continuous-dictionary-${dictionary.id}`}
+                          className="continuous-dictionary-card"
+                        >
+                          <div className="continuous-checklist-head">
+                            <div className="min-w-0">
+                              <p className="continuous-checklist-title">
+                                {dictionary.title}
+                              </p>
+                              <p className="continuous-checklist-tags">
+                                {dictionary.entries.length} пар · показывать{" "}
+                                {toDictionaryPromptSideLabel(
+                                  dictionary.promptSide,
+                                  dictionary.labels
+                                )}
+                                {dictionary.shuffle ? " · перемешивание" : ""}
+                              </p>
+                            </div>
+                          </div>
+
+                          {(dictionary.description || dictionary.tags.length > 0) && (
+                            <div className="dictionary-block-info">
+                              {dictionary.description && (
+                                <p className="dictionary-block-description">
+                                  {dictionary.description}
+                                </p>
+                              )}
+                              {dictionary.tags.length > 0 && (
+                                <div className="dictionary-block-tags">
+                                  {dictionary.tags.map((tag) => (
+                                    <span key={tag}>{tag}</span>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          <div className="dictionary-block-actions">
+                            <button
+                              type="button"
+                              className="mini-action"
+                              onClick={() =>
+                                openDictionaryStudy({
+                                  sourceCategoryId: currentCategoryId ?? "",
+                                  sourceMessageId: null,
+                                  dictionaryId: dictionary.id,
+                                  title: dictionary.title,
+                                  payload: dictionary,
+                                })
+                              }
+                              disabled={dictionary.entries.length === 0}
+                            >
+                              заучивание
+                            </button>
+                            <button
+                              type="button"
+                              className="mini-action"
+                              onClick={() =>
+                                openDictionaryEditorForContinuousDictionary(
+                                  dictionary.id
+                                )
+                              }
+                            >
+                              настройки
+                            </button>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  )}
+
                   <div
                     ref={continuousEditorRef}
                     contentEditable={!(!currentCategoryId || isLoading || Boolean(loadError))}
                     suppressContentEditableWarning
+                    onBeforeInput={() =>
+                      handleRichEditorBeforeInput({
+                        kind: "continuous",
+                      })
+                    }
                     onInput={handleContinuousEditorInput}
                     onBlur={(event) => {
                       if (!currentCategory || currentCategory.format !== "continuous") {
@@ -9225,6 +10975,14 @@ export default function CategoryWorkspace() {
                     }
                     onKeyUp={(event) =>
                       handleRichEditorKeyUp(
+                        {
+                          kind: "continuous",
+                        },
+                        event
+                      )
+                    }
+                    onCopy={(event) =>
+                      handleRichEditorCopy(
                         {
                           kind: "continuous",
                         },
@@ -10172,6 +11930,501 @@ export default function CategoryWorkspace() {
           </div>
         )}
 
+        {dictionaryEditor &&
+          (() => {
+            const dictionaryEditorLabels = normalizeDictionaryLabels(
+              dictionaryEditor.labels
+            );
+            const dictionaryImportStatus = dictionaryImportDraft.trim()
+              ? dictionaryImportPreview.ok
+                ? `${dictionaryImportPreview.entries.length} пар готово к замене`
+                : dictionaryImportPreview.error
+              : "Поддерживаются JSON экспорта #DICT, TSV и CSV.";
+
+            return (
+          <div className="absolute inset-0 z-50 flex items-center justify-center p-3">
+            <button
+              type="button"
+              className="absolute inset-0 bg-black/45"
+              onClick={closeDictionaryEditor}
+              aria-label="Закрыть окно словаря"
+            />
+
+            <div className="project-create-modal dictionary-editor-modal popup-3d relative z-10 w-full max-w-5xl p-4 sm:p-5">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <h2 className="font-display text-4xl leading-none">Настройки #DICT</h2>
+                <button
+                  type="button"
+                  className="menu-action h-9 w-9 text-xl"
+                  onClick={closeDictionaryEditor}
+                  aria-label="Закрыть окно словаря"
+                >
+                  x
+                </button>
+              </div>
+
+              <div className="dictionary-editor-tabs" role="tablist">
+                <button
+                  type="button"
+                  className={`mini-action dictionary-editor-tab ${
+                    dictionaryEditorTab === "entries"
+                      ? "dictionary-editor-tab-active"
+                      : ""
+                  }`}
+                  onClick={() => setDictionaryEditorTab("entries")}
+                >
+                  слова
+                </button>
+                <button
+                  type="button"
+                  className={`mini-action dictionary-editor-tab ${
+                    dictionaryEditorTab === "transfer"
+                      ? "dictionary-editor-tab-active"
+                      : ""
+                  }`}
+                  onClick={() => setDictionaryEditorTab("transfer")}
+                >
+                  импорт / экспорт
+                </button>
+                <button
+                  type="button"
+                  className={`mini-action dictionary-editor-tab ${
+                    dictionaryEditorTab === "general"
+                      ? "dictionary-editor-tab-active"
+                      : ""
+                  }`}
+                  onClick={() => setDictionaryEditorTab("general")}
+                >
+                  общие
+                </button>
+              </div>
+
+              <div className="dictionary-editor-body">
+                {dictionaryEditorTab === "entries" && (
+                  <div className="dictionary-editor-table-wrap">
+                    <table className="dictionary-editor-table">
+                      <thead>
+                        <tr>
+                          <th>
+                            <input
+                              value={dictionaryEditor.labels.side1}
+                              onChange={(event) =>
+                                updateDictionaryEditorLabel("side1", event.target.value)
+                              }
+                              className="settings-input dictionary-editor-label-input"
+                              aria-label="Подпись стороны 1"
+                              placeholder={DEFAULT_DICTIONARY_FIELD_LABELS.side1}
+                            />
+                          </th>
+                          <th>
+                            <input
+                              value={dictionaryEditor.labels.side1Note}
+                              onChange={(event) =>
+                                updateDictionaryEditorLabel(
+                                  "side1Note",
+                                  event.target.value
+                                )
+                              }
+                              className="settings-input dictionary-editor-label-input"
+                              aria-label="Подпись пояснения 1"
+                              placeholder={DEFAULT_DICTIONARY_FIELD_LABELS.side1Note}
+                            />
+                          </th>
+                          <th>
+                            <input
+                              value={dictionaryEditor.labels.side2}
+                              onChange={(event) =>
+                                updateDictionaryEditorLabel("side2", event.target.value)
+                              }
+                              className="settings-input dictionary-editor-label-input"
+                              aria-label="Подпись стороны 2"
+                              placeholder={DEFAULT_DICTIONARY_FIELD_LABELS.side2}
+                            />
+                          </th>
+                          <th>
+                            <input
+                              value={dictionaryEditor.labels.side2Note}
+                              onChange={(event) =>
+                                updateDictionaryEditorLabel(
+                                  "side2Note",
+                                  event.target.value
+                                )
+                              }
+                              className="settings-input dictionary-editor-label-input"
+                              aria-label="Подпись пояснения 2"
+                              placeholder={DEFAULT_DICTIONARY_FIELD_LABELS.side2Note}
+                            />
+                          </th>
+                          <th aria-label="действия" />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {dictionaryEditor.entries.map((entry, index) => (
+                          <tr key={entry.id}>
+                            <td>
+                              <textarea
+                                value={entry.side1}
+                                onChange={(event) =>
+                                  updateDictionaryEditorEntry(
+                                    entry.id,
+                                    "side1",
+                                    event.target.value
+                                  )
+                                }
+                                className="settings-input dictionary-editor-cell"
+                                placeholder={`${dictionaryEditorLabels.side1} ${index + 1}`}
+                              />
+                            </td>
+                            <td>
+                              <textarea
+                                value={entry.side1Note}
+                                onChange={(event) =>
+                                  updateDictionaryEditorEntry(
+                                    entry.id,
+                                    "side1Note",
+                                    event.target.value
+                                  )
+                                }
+                                className="settings-input dictionary-editor-cell"
+                                placeholder={dictionaryEditorLabels.side1Note}
+                              />
+                            </td>
+                            <td>
+                              <textarea
+                                value={entry.side2}
+                                onChange={(event) =>
+                                  updateDictionaryEditorEntry(
+                                    entry.id,
+                                    "side2",
+                                    event.target.value
+                                  )
+                                }
+                                className="settings-input dictionary-editor-cell"
+                                placeholder={dictionaryEditorLabels.side2}
+                              />
+                            </td>
+                            <td>
+                              <textarea
+                                value={entry.side2Note}
+                                onChange={(event) =>
+                                  updateDictionaryEditorEntry(
+                                    entry.id,
+                                    "side2Note",
+                                    event.target.value
+                                  )
+                                }
+                                className="settings-input dictionary-editor-cell"
+                                placeholder={dictionaryEditorLabels.side2Note}
+                              />
+                            </td>
+                            <td>
+                              <button
+                                type="button"
+                                className="danger-action dictionary-editor-remove"
+                                onClick={() => removeDictionaryEditorEntry(entry.id)}
+                              >
+                                -
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {dictionaryEditorTab === "transfer" && (
+                  <div className="dictionary-editor-transfer">
+                    <div className="dictionary-editor-transfer-head">
+                      <label className="settings-label" htmlFor="dictionary-import-draft">
+                        экспорт / импорт #DICT
+                      </label>
+                      <div className="dictionary-editor-transfer-actions">
+                        <button
+                          type="button"
+                          className="mini-action"
+                          onClick={handleExportDictionaryJson}
+                        >
+                          экспорт JSON
+                        </button>
+                        <button
+                          type="button"
+                          className="mini-action"
+                          onClick={handleExportDictionaryTsv}
+                        >
+                          экспорт TSV
+                        </button>
+                        <button
+                          type="button"
+                          className="mini-action"
+                          onClick={handleOpenDictionaryImportFilePicker}
+                        >
+                          файл
+                        </button>
+                      </div>
+                    </div>
+                    <textarea
+                      id="dictionary-import-draft"
+                      value={dictionaryImportDraft}
+                      onChange={(event) => setDictionaryImportDraft(event.target.value)}
+                      className="settings-input settings-textarea dictionary-editor-import-textarea"
+                      placeholder={`Вставь TSV/CSV: ${dictionaryEditorLabels.side1}\t${dictionaryEditorLabels.side2}`}
+                    />
+                    <div className="dictionary-editor-transfer-footer">
+                      <p
+                        className={`dictionary-editor-import-status ${
+                          dictionaryImportDraft.trim() && !dictionaryImportPreview.ok
+                            ? "dictionary-editor-import-status-error"
+                            : ""
+                        }`}
+                      >
+                        {dictionaryImportStatus}
+                      </p>
+                      <button
+                        type="button"
+                        className="danger-action"
+                        onClick={() => void handleApplyDictionaryImport()}
+                        disabled={!dictionaryImportPreview.ok}
+                      >
+                        импорт: заменить
+                      </button>
+                    </div>
+                    <input
+                      ref={dictionaryImportFileRef}
+                      type="file"
+                      accept=".json,.tsv,.csv,text/plain,application/json,text/csv,text/tab-separated-values"
+                      className="sr-only"
+                      onChange={(event) => void handleDictionaryImportFileChange(event)}
+                    />
+                  </div>
+                )}
+
+                {dictionaryEditorTab === "general" && (
+                  <div className="dictionary-editor-general">
+                    <div className="dictionary-editor-settings">
+                      <label className="dictionary-editor-field">
+                        <span className="settings-label">название словаря</span>
+                        <input
+                          value={dictionaryEditor.titleDraft}
+                          onChange={(event) =>
+                            updateDictionaryEditorTitle(event.target.value)
+                          }
+                          className="settings-input"
+                          placeholder="Словарь"
+                        />
+                      </label>
+
+                      <label className="dictionary-editor-field dictionary-editor-field-wide">
+                        <span className="settings-label">теги словаря</span>
+                        <input
+                          value={dictionaryEditor.tagsDraft}
+                          onChange={(event) =>
+                            updateDictionaryEditorTags(event.target.value)
+                          }
+                          className="settings-input"
+                          placeholder="#verbs #lesson-1"
+                        />
+                      </label>
+
+                      <label className="dictionary-editor-field">
+                        <span className="settings-label">в заучивании показывать</span>
+                        <select
+                          value={dictionaryEditor.promptSide}
+                          className="settings-input"
+                          onChange={(event) =>
+                            updateDictionaryEditorPromptSide(
+                              normalizeDictionaryPromptSide(event.target.value)
+                            )
+                          }
+                        >
+                          <option value="side1">{dictionaryEditorLabels.side1}</option>
+                          <option value="side2">{dictionaryEditorLabels.side2}</option>
+                        </select>
+                      </label>
+
+                      <label className="dictionary-editor-toggle">
+                        <input
+                          type="checkbox"
+                          checked={dictionaryEditor.shuffle}
+                          onChange={(event) =>
+                            updateDictionaryEditorShuffle(event.target.checked)
+                          }
+                        />
+                        <span>давать слова в перемешку</span>
+                      </label>
+                    </div>
+
+                    <label className="dictionary-editor-field">
+                      <span className="settings-label">описание словаря</span>
+                      <textarea
+                        value={dictionaryEditor.descriptionDraft}
+                        onChange={(event) =>
+                          updateDictionaryEditorDescription(event.target.value)
+                        }
+                        className="settings-input settings-textarea"
+                        placeholder="Для чего этот словарь, тема, заметки..."
+                      />
+                    </label>
+                  </div>
+                )}
+              </div>
+
+              <div className="dictionary-editor-actions">
+                {dictionaryEditorTab === "entries" && (
+                  <button
+                    type="button"
+                    className="mini-action"
+                    onClick={addDictionaryEditorEntry}
+                  >
+                    + пара
+                  </button>
+                )}
+
+                {(dictionaryEditor.source === "continuous" &&
+                  dictionaryEditor.dictionaryId) ||
+                (dictionaryEditor.source === "block-message" &&
+                  dictionaryEditor.sourceMessageId) ? (
+                  <button
+                    type="button"
+                    className="danger-action"
+                    onClick={() => void handleDeleteDictionaryFromEditor()}
+                  >
+                    удалить словарь
+                  </button>
+                ) : null}
+
+                <button
+                  type="button"
+                  className="mini-action"
+                  onClick={() => void handleSaveDictionaryEditor()}
+                >
+                  сохранить
+                </button>
+              </div>
+            </div>
+          </div>
+            );
+          })()}
+
+        {dictionaryStudy &&
+          (() => {
+            const currentEntry =
+              dictionaryStudy.cards[dictionaryStudy.currentIndex] ?? null;
+            if (!currentEntry) {
+              return null;
+            }
+
+            const activeSide = dictionaryStudy.isAnswerRevealed
+              ? oppositeDictionaryPromptSide(dictionaryStudy.promptSide)
+              : dictionaryStudy.promptSide;
+            const hiddenSide = oppositeDictionaryPromptSide(activeSide);
+            const activeSideLabel = toDictionaryPromptSideLabel(
+              activeSide,
+              dictionaryStudy.labels
+            );
+            const hiddenSideLabel = toDictionaryPromptSideLabel(
+              hiddenSide,
+              dictionaryStudy.labels
+            );
+            const activeNoteLabel = toDictionaryNoteSideLabel(
+              activeSide,
+              dictionaryStudy.labels
+            );
+            const activeText = getDictionaryEntrySideText(currentEntry, activeSide);
+            const activeNote = getDictionaryEntrySideNote(currentEntry, activeSide);
+
+            return (
+              <div className="dictionary-study-overlay absolute inset-0 z-[80]">
+                <div className="dictionary-study-backdrop" />
+                <div className="dictionary-study-panel">
+                  <header className="dictionary-study-head">
+                    <div className="min-w-0">
+                      <p className="dictionary-study-kicker">#DICT</p>
+                      <h2 className="dictionary-study-title">
+                        {dictionaryStudy.title}
+                      </h2>
+                    </div>
+                    <div className="dictionary-study-head-actions">
+                      <button
+                        type="button"
+                        className="menu-action h-9 w-9"
+                        onClick={speakDictionaryStudyCurrentCard}
+                        aria-label={`Озвучить ${activeSideLabel}`}
+                        title={`Озвучить ${activeSideLabel}`}
+                      >
+                        <SpeakerIcon />
+                      </button>
+                      <button
+                        type="button"
+                        className="menu-action h-9 w-9 text-xl"
+                        onClick={closeDictionaryStudy}
+                        aria-label="Закрыть заучивание"
+                      >
+                        x
+                      </button>
+                    </div>
+                  </header>
+
+                  <div className="dictionary-study-counter">
+                    {dictionaryStudy.currentIndex + 1} / {dictionaryStudy.cards.length}
+                  </div>
+
+                  <div
+                    ref={dictionaryStudyCardShellRef}
+                    className="dictionary-study-card-shell"
+                  >
+                    <div
+                      ref={dictionaryStudyCardContentRef}
+                      key={`${currentEntry.id}-${activeSide}-${dictionaryStudy.transitionKey}`}
+                      className="dictionary-study-card-content"
+                      style={
+                        {
+                          "--dictionary-study-scale": dictionaryStudyCardScale,
+                        } as CSSProperties
+                      }
+                    >
+                      <p className="dictionary-study-side">{activeSideLabel}</p>
+                      <div className="dictionary-study-word">{activeText}</div>
+                      {activeNote ? (
+                        <div className="dictionary-study-note">{activeNote}</div>
+                      ) : (
+                        <div className="dictionary-study-note dictionary-study-note-empty">
+                          без {activeNoteLabel.toLocaleLowerCase()}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="dictionary-study-actions">
+                    <button
+                      type="button"
+                      className="tool-button tool-blue dictionary-study-arrow"
+                      onClick={() => moveDictionaryStudy(-1)}
+                      aria-label="Предыдущая карточка"
+                    >
+                      &lt;
+                    </button>
+                    <button
+                      type="button"
+                      className="mini-action dictionary-study-reveal"
+                      onClick={toggleDictionaryStudySide}
+                    >
+                      {hiddenSideLabel}
+                    </button>
+                    <button
+                      type="button"
+                      className="tool-button tool-green dictionary-study-arrow"
+                      onClick={() => moveDictionaryStudy(1)}
+                      aria-label="Следующая карточка"
+                    >
+                      &gt;
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
         {showSearch && (
           <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/35 p-3">
             <div className="popup-3d w-full max-w-3xl p-4 sm:p-5">
@@ -10793,6 +13046,36 @@ function clampEditorTextScalePercent(value: number): number {
   );
 }
 
+function formatEditorTextScalePercent(value: number): string {
+  return `${clampEditorTextScalePercent(value)}%`;
+}
+
+function parseEditorTextScalePercentInput(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const withoutPercent = trimmed.endsWith("%")
+    ? trimmed.slice(0, -1).trim()
+    : trimmed;
+  if (!withoutPercent) {
+    return null;
+  }
+
+  const normalized = withoutPercent.replace(",", ".");
+  if (!/^-?\d+(?:\.\d+)?$/.test(normalized)) {
+    return null;
+  }
+
+  const parsed = Number(normalized);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+
+  return clampEditorTextScalePercent(parsed);
+}
+
 function normalizeEditorDisplayScale(value: number): number {
   if (!Number.isFinite(value) || value <= 0) {
     return 1;
@@ -10805,6 +13088,26 @@ function getEditorDisplayScale(textScalePercent: number): number {
   return normalizeEditorDisplayScale(
     clampEditorTextScalePercent(textScalePercent) / DEFAULT_EDITOR_TEXT_SCALE_PERCENT
   );
+}
+
+function getDeleteConfirmOverlayRect(anchorRect: DOMRect): RichImageOverlayRect {
+  const width = Math.max(anchorRect.width, MIN_RICH_IMAGE_DELETE_OVERLAY_WIDTH);
+  const height = Math.max(anchorRect.height, MIN_RICH_IMAGE_DELETE_OVERLAY_HEIGHT);
+  const viewportWidth =
+    typeof window === "undefined" ? anchorRect.left + width : window.innerWidth;
+  const viewportHeight =
+    typeof window === "undefined" ? anchorRect.top + height : window.innerHeight;
+  const centeredLeft = anchorRect.left + anchorRect.width / 2 - width / 2;
+  const centeredTop = anchorRect.top + anchorRect.height / 2 - height / 2;
+  const left = Math.min(Math.max(8, centeredLeft), Math.max(8, viewportWidth - width - 8));
+  const top = Math.min(Math.max(8, centeredTop), Math.max(8, viewportHeight - height - 8));
+
+  return {
+    top,
+    left,
+    width: Math.min(width, Math.max(80, viewportWidth - 16)),
+    height: Math.min(height, Math.max(80, viewportHeight - 16)),
+  };
 }
 
 function normalizeRichImageMimeType(value: string | null | undefined): string | null {
@@ -11624,6 +13927,35 @@ function richTextToPlainText(value: string | null | undefined): string {
 
 const CONTINUOUS_CONTENT_KIND = "itemkey-continuous-v1";
 const MESSAGE_CHECKLIST_KIND = "itemkey-message-checklist-v1";
+const MESSAGE_DICTIONARY_KIND = "itemkey-message-dictionary-v1";
+const DICTIONARY_EXPORT_KIND = "itemkey-dict-export";
+const DICTIONARY_EXPORT_SCHEMA_VERSION = 1;
+const DICTIONARY_LABEL_MAX_LENGTH = 42;
+
+const DEFAULT_DICTIONARY_FIELD_LABELS: DictionaryFieldLabels = {
+  side1: "сторона 1",
+  side1Note: "пояснение 1",
+  side2: "сторона 2",
+  side2Note: "пояснение 2",
+};
+
+type DictionaryImportPreview =
+  | {
+      ok: false;
+      error: string;
+    }
+  | {
+      ok: true;
+      kind: "json";
+      title: string;
+      payload: MessageDictionaryPayload;
+      entries: DictionaryEntry[];
+    }
+  | {
+      ok: true;
+      kind: "table";
+      entries: DictionaryEntry[];
+    };
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -11640,6 +13972,149 @@ function normalizeChecklistTitle(value: string | null | undefined): string {
 
 function normalizeChecklistItemOrderMode(value: unknown): ChecklistItemOrderMode {
   return value === "custom" ? "custom" : "auto";
+}
+
+function normalizeDictionaryPromptSide(value: unknown): DictionaryPromptSide {
+  return value === "side2" ? "side2" : "side1";
+}
+
+function normalizeDictionaryText(value: string | null | undefined): string {
+  return (typeof value === "string" ? value : "").trim();
+}
+
+function normalizeDictionaryTitle(value: string | null | undefined): string {
+  const normalized = normalizeMessageTitle(value);
+  return normalized === "Новый блок" ? "Словарь" : normalized;
+}
+
+function normalizeDictionaryDescription(value: string | null | undefined): string {
+  return normalizeDictionaryText(value).slice(0, 420);
+}
+
+function createDefaultDictionaryLabels(): DictionaryFieldLabels {
+  return { ...DEFAULT_DICTIONARY_FIELD_LABELS };
+}
+
+function normalizeDictionaryLabel(value: unknown, fallback: string): string {
+  const normalized =
+    typeof value === "string"
+      ? normalizeDictionaryText(value).slice(0, DICTIONARY_LABEL_MAX_LENGTH)
+      : "";
+
+  return normalized || fallback;
+}
+
+function normalizeDictionaryLabels(value: unknown): DictionaryFieldLabels {
+  const raw = isObjectRecord(value) ? value : {};
+
+  return {
+    side1: normalizeDictionaryLabel(
+      raw.side1,
+      DEFAULT_DICTIONARY_FIELD_LABELS.side1
+    ),
+    side1Note: normalizeDictionaryLabel(
+      raw.side1Note,
+      DEFAULT_DICTIONARY_FIELD_LABELS.side1Note
+    ),
+    side2: normalizeDictionaryLabel(
+      raw.side2,
+      DEFAULT_DICTIONARY_FIELD_LABELS.side2
+    ),
+    side2Note: normalizeDictionaryLabel(
+      raw.side2Note,
+      DEFAULT_DICTIONARY_FIELD_LABELS.side2Note
+    ),
+  };
+}
+
+function parseDictionaryTags(value: string | null | undefined): string[] {
+  const raw = typeof value === "string" ? value : "";
+  return dedupeCategoryTags(raw.split(/[\s,;]+/g));
+}
+
+function serializeDictionaryTags(tags: string[]): string {
+  return dedupeCategoryTags(tags).join(" ");
+}
+
+function normalizeDictionaryEntries(entries: DictionaryEntry[]): DictionaryEntry[] {
+  const seen = new Set<string>();
+  const result: DictionaryEntry[] = [];
+
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    const side1 = normalizeDictionaryText(entry.side1);
+    const side1Note = normalizeDictionaryText(entry.side1Note);
+    const side2 = normalizeDictionaryText(entry.side2);
+    const side2Note = normalizeDictionaryText(entry.side2Note);
+
+    if (!side1 || !side2) {
+      continue;
+    }
+
+    const rawId = normalizeDictionaryText(entry.id);
+    const baseId = rawId || `entry-${index + 1}`;
+    let resolvedId = baseId;
+    let suffix = 2;
+    while (seen.has(resolvedId.toLocaleLowerCase())) {
+      resolvedId = `${baseId}-${suffix}`;
+      suffix += 1;
+    }
+    seen.add(resolvedId.toLocaleLowerCase());
+
+    result.push({
+      id: resolvedId,
+      side1,
+      side1Note,
+      side2,
+      side2Note,
+    });
+  }
+
+  return result;
+}
+
+function normalizeMessageDictionaryPayload(
+  payload: MessageDictionaryPayload
+): MessageDictionaryPayload {
+  return {
+    description: normalizeDictionaryDescription(payload.description),
+    tags: dedupeCategoryTags(Array.isArray(payload.tags) ? payload.tags : []),
+    promptSide: normalizeDictionaryPromptSide(payload.promptSide),
+    shuffle: Boolean(payload.shuffle),
+    labels: normalizeDictionaryLabels(payload.labels),
+    entries: normalizeDictionaryEntries(payload.entries),
+  };
+}
+
+function normalizeDictionaryBlocks(dictionaries: DictionaryBlock[]): DictionaryBlock[] {
+  const seen = new Set<string>();
+  const result: DictionaryBlock[] = [];
+
+  for (let index = 0; index < dictionaries.length; index += 1) {
+    const dictionary = dictionaries[index];
+    const rawId = normalizeDictionaryText(dictionary.id);
+    const baseId = rawId || `dictionary-${index + 1}`;
+    let resolvedId = baseId;
+    let suffix = 2;
+    while (seen.has(resolvedId.toLocaleLowerCase())) {
+      resolvedId = `${baseId}-${suffix}`;
+      suffix += 1;
+    }
+    seen.add(resolvedId.toLocaleLowerCase());
+
+    const normalizedPayload = normalizeMessageDictionaryPayload(dictionary);
+    if (normalizedPayload.entries.length === 0) {
+      continue;
+    }
+
+    result.push({
+      id: resolvedId,
+      title: normalizeDictionaryTitle(dictionary.title),
+      ...normalizedPayload,
+    });
+  }
+
+  return result;
 }
 
 function normalizeMessageChecklistPayload(
@@ -11709,10 +14184,77 @@ function serializeMessageChecklistContent(payload: MessageChecklistPayload): str
   });
 }
 
+function parseMessageDictionaryContent(
+  value: string | null | undefined
+): MessageDictionaryPayload | null {
+  const raw = typeof value === "string" ? value : "";
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("{")) {
+    return null;
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (!isObjectRecord(parsed) || parsed.kind !== MESSAGE_DICTIONARY_KIND) {
+      return null;
+    }
+
+    const entries = Array.isArray(parsed.entries)
+      ? parsed.entries
+          .filter(isObjectRecord)
+          .map((entry): DictionaryEntry => ({
+            id: typeof entry.id === "string" ? entry.id : "",
+            side1: typeof entry.side1 === "string" ? entry.side1 : "",
+            side1Note: typeof entry.side1Note === "string" ? entry.side1Note : "",
+            side2: typeof entry.side2 === "string" ? entry.side2 : "",
+            side2Note: typeof entry.side2Note === "string" ? entry.side2Note : "",
+          }))
+      : [];
+
+    return normalizeMessageDictionaryPayload({
+      description:
+        typeof parsed.description === "string" ? parsed.description : "",
+      tags: Array.isArray(parsed.tags)
+        ? parsed.tags.filter((tag): tag is string => typeof tag === "string")
+        : [],
+      promptSide: normalizeDictionaryPromptSide(parsed.promptSide),
+      shuffle: Boolean(parsed.shuffle),
+      labels: normalizeDictionaryLabels(parsed.labels),
+      entries,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function serializeMessageDictionaryContent(payload: MessageDictionaryPayload): string {
+  const normalized = normalizeMessageDictionaryPayload(payload);
+  return JSON.stringify({
+    kind: MESSAGE_DICTIONARY_KIND,
+    description: normalized.description,
+    tags: normalized.tags,
+    promptSide: normalized.promptSide,
+    shuffle: normalized.shuffle,
+    labels: normalized.labels,
+    entries: normalized.entries,
+  });
+}
+
+function isSpecialMessageContent(value: string | null | undefined): boolean {
+  return Boolean(
+    parseMessageChecklistContent(value) || parseMessageDictionaryContent(value)
+  );
+}
+
 function normalizePersistedMessageContent(value: string): string {
   const checklistPayload = parseMessageChecklistContent(value);
   if (checklistPayload) {
     return serializeMessageChecklistContent(checklistPayload);
+  }
+
+  const dictionaryPayload = parseMessageDictionaryContent(value);
+  if (dictionaryPayload) {
+    return serializeMessageDictionaryContent(dictionaryPayload);
   }
 
   return sanitizeRichTextHtml(value);
@@ -11787,6 +14329,49 @@ function parseContinuousChecklistCollection(value: unknown): ChecklistBlock[] {
   return normalizeChecklistBlocks(parsedChecklists);
 }
 
+function parseContinuousDictionaryCollection(value: unknown): DictionaryBlock[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const parsedDictionaries: DictionaryBlock[] = [];
+  for (const rawDictionary of value) {
+    if (!isObjectRecord(rawDictionary)) {
+      continue;
+    }
+
+    const entries = Array.isArray(rawDictionary.entries)
+      ? rawDictionary.entries
+          .filter(isObjectRecord)
+          .map((entry): DictionaryEntry => ({
+            id: typeof entry.id === "string" ? entry.id : "",
+            side1: typeof entry.side1 === "string" ? entry.side1 : "",
+            side1Note: typeof entry.side1Note === "string" ? entry.side1Note : "",
+            side2: typeof entry.side2 === "string" ? entry.side2 : "",
+            side2Note: typeof entry.side2Note === "string" ? entry.side2Note : "",
+          }))
+      : [];
+
+    parsedDictionaries.push({
+      id: typeof rawDictionary.id === "string" ? rawDictionary.id : "",
+      title: typeof rawDictionary.title === "string" ? rawDictionary.title : "",
+      description:
+        typeof rawDictionary.description === "string"
+          ? rawDictionary.description
+          : "",
+      tags: Array.isArray(rawDictionary.tags)
+        ? rawDictionary.tags.filter((tag): tag is string => typeof tag === "string")
+        : [],
+      promptSide: normalizeDictionaryPromptSide(rawDictionary.promptSide),
+      shuffle: Boolean(rawDictionary.shuffle),
+      labels: normalizeDictionaryLabels(rawDictionary.labels),
+      entries,
+    });
+  }
+
+  return normalizeDictionaryBlocks(parsedDictionaries);
+}
+
 function parseContinuousChecklists(value: string | null | undefined): ChecklistBlock[] {
   const raw = typeof value === "string" ? value : "";
   const trimmed = raw.trim();
@@ -11815,6 +14400,7 @@ function parseContinuousContent(value: string | null | undefined): ContinuousCon
     return {
       text: sanitizeRichTextHtml(raw),
       checklists: [],
+      dictionaries: [],
     };
   }
 
@@ -11824,6 +14410,7 @@ function parseContinuousContent(value: string | null | undefined): ContinuousCon
       return {
         text: sanitizeRichTextHtml(raw),
         checklists: [],
+        dictionaries: [],
       };
     }
 
@@ -11835,17 +14422,20 @@ function parseContinuousContent(value: string | null | undefined): ContinuousCon
       return {
         text: sanitizeRichTextHtml(raw),
         checklists: [],
+        dictionaries: [],
       };
     }
 
     return {
       text: sanitizeRichTextHtml(parsed.text),
       checklists: parseContinuousChecklistCollection(parsed.checklists),
+      dictionaries: parseContinuousDictionaryCollection(parsed.dictionaries),
     };
   } catch {
     return {
       text: sanitizeRichTextHtml(raw),
       checklists: [],
+      dictionaries: [],
     };
   }
 }
@@ -11854,9 +14444,13 @@ function serializeContinuousContent(document: ContinuousContentModel): string {
   const nextDocument: ContinuousContentModel = {
     text: sanitizeRichTextHtml(document.text),
     checklists: normalizeChecklistBlocks(document.checklists),
+    dictionaries: normalizeDictionaryBlocks(document.dictionaries),
   };
 
-  if (nextDocument.checklists.length === 0) {
+  if (
+    nextDocument.checklists.length === 0 &&
+    nextDocument.dictionaries.length === 0
+  ) {
     return nextDocument.text;
   }
 
@@ -11864,6 +14458,7 @@ function serializeContinuousContent(document: ContinuousContentModel): string {
     kind: CONTINUOUS_CONTENT_KIND,
     text: nextDocument.text,
     checklists: nextDocument.checklists,
+    dictionaries: nextDocument.dictionaries,
   });
 }
 
@@ -11970,6 +14565,435 @@ function buildChecklistDisplayItems(
   };
 
   return [...sortGroupByCustom(uncheckedItems), ...sortGroupByCustom(checkedItems)];
+}
+
+function createEmptyDictionaryEntry(): DictionaryEntry {
+  return {
+    id: crypto.randomUUID(),
+    side1: "",
+    side1Note: "",
+    side2: "",
+    side2Note: "",
+  };
+}
+
+function makeDictionaryEditorEntries(
+  payload: MessageDictionaryPayload
+): DictionaryEntry[] {
+  return payload.entries.length > 0
+    ? payload.entries.map((entry) => ({ ...entry }))
+    : [createEmptyDictionaryEntry()];
+}
+
+function validateDictionaryEditorEntries(entries: DictionaryEntry[]): {
+  entries: DictionaryEntry[];
+  error: string | null;
+} {
+  const draftEntries: DictionaryEntry[] = [];
+
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    const side1 = normalizeDictionaryText(entry.side1);
+    const side1Note = normalizeDictionaryText(entry.side1Note);
+    const side2 = normalizeDictionaryText(entry.side2);
+    const side2Note = normalizeDictionaryText(entry.side2Note);
+    const hasAnyValue = Boolean(side1 || side1Note || side2 || side2Note);
+
+    if (!hasAnyValue) {
+      continue;
+    }
+
+    if (!side1 || !side2) {
+      return {
+        entries: [],
+        error: `Заполни обе стороны в строке ${index + 1}.`,
+      };
+    }
+
+    draftEntries.push({
+      id: normalizeDictionaryText(entry.id) || `entry-${index + 1}`,
+      side1,
+      side1Note,
+      side2,
+      side2Note,
+    });
+  }
+
+  if (draftEntries.length === 0) {
+    return {
+      entries: [],
+      error: "Добавь хотя бы одну пару слов.",
+    };
+  }
+
+  return {
+    entries: normalizeDictionaryEntries(draftEntries),
+    error: null,
+  };
+}
+
+function buildDictionaryExportDocument(
+  title: string,
+  payload: MessageDictionaryPayload
+) {
+  const normalized = normalizeMessageDictionaryPayload(payload);
+
+  return {
+    kind: DICTIONARY_EXPORT_KIND,
+    schemaVersion: DICTIONARY_EXPORT_SCHEMA_VERSION,
+    title: normalizeDictionaryTitle(title),
+    description: normalized.description,
+    tags: normalized.tags,
+    promptSide: normalized.promptSide,
+    shuffle: normalized.shuffle,
+    labels: normalized.labels,
+    entries: normalized.entries,
+  };
+}
+
+function parseDictionaryImportDraft(
+  value: string,
+  labels?: DictionaryFieldLabels
+): DictionaryImportPreview {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return {
+      ok: false,
+      error: "Вставь текст импорта или выбери файл.",
+    };
+  }
+
+  if (trimmed.startsWith("{")) {
+    return parseDictionaryJsonImport(trimmed);
+  }
+
+  return parseDictionaryTableImport(trimmed, labels);
+}
+
+function parseDictionaryJsonImport(value: string): DictionaryImportPreview {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!isObjectRecord(parsed)) {
+      throw new Error("JSON должен быть объектом экспорта #DICT.");
+    }
+
+    if (
+      parsed.kind !== DICTIONARY_EXPORT_KIND ||
+      parsed.schemaVersion !== DICTIONARY_EXPORT_SCHEMA_VERSION
+    ) {
+      throw new Error("Поддерживается только JSON экспорта #DICT v1.");
+    }
+
+    const entries = Array.isArray(parsed.entries)
+      ? parsed.entries
+          .filter(isObjectRecord)
+          .map((entry): DictionaryEntry => ({
+            id: typeof entry.id === "string" ? entry.id : "",
+            side1: typeof entry.side1 === "string" ? entry.side1 : "",
+            side1Note: typeof entry.side1Note === "string" ? entry.side1Note : "",
+            side2: typeof entry.side2 === "string" ? entry.side2 : "",
+            side2Note: typeof entry.side2Note === "string" ? entry.side2Note : "",
+          }))
+      : [];
+
+    const payload = normalizeMessageDictionaryPayload({
+      description:
+        typeof parsed.description === "string" ? parsed.description : "",
+      tags: Array.isArray(parsed.tags)
+        ? parsed.tags.filter((tag): tag is string => typeof tag === "string")
+        : [],
+      promptSide: normalizeDictionaryPromptSide(parsed.promptSide),
+      shuffle: Boolean(parsed.shuffle),
+      labels: normalizeDictionaryLabels(parsed.labels),
+      entries,
+    });
+
+    if (payload.entries.length === 0) {
+      throw new Error("В JSON нет ни одной полной пары слов.");
+    }
+
+    return {
+      ok: true,
+      kind: "json",
+      title:
+        typeof parsed.title === "string"
+          ? normalizeDictionaryTitle(parsed.title)
+          : "Словарь",
+      payload,
+      entries: payload.entries,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: toErrorMessage(error, "Не удалось прочитать JSON импорт #DICT."),
+    };
+  }
+}
+
+function parseDictionaryTableImport(
+  value: string,
+  labels?: DictionaryFieldLabels
+): DictionaryImportPreview {
+  const delimiter = detectDictionaryTableDelimiter(value);
+  const rows = parseDelimitedRows(value, delimiter)
+    .map((row) => row.map((cell) => normalizeDictionaryText(cell)))
+    .filter((row) => row.some(Boolean));
+
+  if (rows.length === 0) {
+    return {
+      ok: false,
+      error: "В таблице импорта нет строк.",
+    };
+  }
+
+  const dataRows = isDictionaryTableHeaderRow(rows[0], labels)
+    ? rows.slice(1)
+    : rows;
+  const entries: DictionaryEntry[] = [];
+
+  for (let index = 0; index < dataRows.length; index += 1) {
+    const row = dataRows[index];
+    const rowNumber = index + (dataRows.length === rows.length ? 1 : 2);
+    const nonEmptyCells = row.filter(Boolean);
+
+    if (nonEmptyCells.length === 0) {
+      continue;
+    }
+
+    if (row.length < 2 || row.length === 3) {
+      return {
+        ok: false,
+        error: `Строка ${rowNumber}: нужно 2 или 4 колонки.`,
+      };
+    }
+
+    const side1 = row[0] ?? "";
+    const side1Note = row.length >= 4 ? (row[1] ?? "") : "";
+    const side2 = row.length >= 4 ? (row[2] ?? "") : (row[1] ?? "");
+    const side2Note = row.length >= 4 ? (row[3] ?? "") : "";
+
+    if (!side1 || !side2) {
+      return {
+        ok: false,
+        error: `Строка ${rowNumber}: заполни обе стороны пары.`,
+      };
+    }
+
+    entries.push({
+      id: `entry-${index + 1}`,
+      side1,
+      side1Note,
+      side2,
+      side2Note,
+    });
+  }
+
+  const normalizedEntries = normalizeDictionaryEntries(entries);
+  if (normalizedEntries.length === 0) {
+    return {
+      ok: false,
+      error: "В таблице нет ни одной полной пары слов.",
+    };
+  }
+
+  return {
+    ok: true,
+    kind: "table",
+    entries: normalizedEntries,
+  };
+}
+
+function detectDictionaryTableDelimiter(value: string): string {
+  const sample = value
+    .split(/\r?\n/g)
+    .filter((line) => line.trim().length > 0)
+    .slice(0, 8)
+    .join("\n");
+  const candidates = ["\t", ";", ","];
+
+  return candidates
+    .map((delimiter) => ({
+      delimiter,
+      score: sample.split(delimiter).length - 1,
+    }))
+    .sort((left, right) => right.score - left.score)[0]?.delimiter ?? "\t";
+}
+
+function parseDelimitedRows(value: string, delimiter: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let isQuoted = false;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    const nextChar = value[index + 1];
+
+    if (char === "\"") {
+      if (isQuoted && nextChar === "\"") {
+        cell += "\"";
+        index += 1;
+      } else {
+        isQuoted = !isQuoted;
+      }
+      continue;
+    }
+
+    if (!isQuoted && char === delimiter) {
+      row.push(cell);
+      cell = "";
+      continue;
+    }
+
+    if (!isQuoted && (char === "\n" || char === "\r")) {
+      if (char === "\r" && nextChar === "\n") {
+        index += 1;
+      }
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = "";
+      continue;
+    }
+
+    cell += char;
+  }
+
+  row.push(cell);
+  rows.push(row);
+  return rows;
+}
+
+function isDictionaryTableHeaderRow(
+  row: string[],
+  labels?: DictionaryFieldLabels
+): boolean {
+  const normalizedCells = row.map((cell) => cell.trim().toLocaleLowerCase());
+  const normalizedLabels = normalizeDictionaryLabels(labels);
+  const headerWords = new Set([
+    "side1",
+    "side 1",
+    "side2",
+    "side 2",
+    "term",
+    "definition",
+    "термин",
+    "определение",
+    DEFAULT_DICTIONARY_FIELD_LABELS.side1,
+    DEFAULT_DICTIONARY_FIELD_LABELS.side1Note,
+    DEFAULT_DICTIONARY_FIELD_LABELS.side2,
+    DEFAULT_DICTIONARY_FIELD_LABELS.side2Note,
+    normalizedLabels.side1.toLocaleLowerCase(),
+    normalizedLabels.side1Note.toLocaleLowerCase(),
+    normalizedLabels.side2.toLocaleLowerCase(),
+    normalizedLabels.side2Note.toLocaleLowerCase(),
+  ]);
+
+  return normalizedCells.some(
+    (cell) =>
+      headerWords.has(cell) ||
+      cell.includes("сторона") ||
+      cell.includes("пояснение")
+  );
+}
+
+function dictionaryPayloadToTsv(payload: MessageDictionaryPayload): string {
+  const normalized = normalizeMessageDictionaryPayload(payload);
+  const header = [
+    normalized.labels.side1,
+    normalized.labels.side1Note,
+    normalized.labels.side2,
+    normalized.labels.side2Note,
+  ];
+  const rows = normalized.entries.map((entry) => [
+    entry.side1,
+    entry.side1Note,
+    entry.side2,
+    entry.side2Note,
+  ]);
+
+  return [header, ...rows]
+    .map((row) => row.map(escapeDictionaryTableCell).join("\t"))
+    .join("\n");
+}
+
+function escapeDictionaryTableCell(value: string): string {
+  if (!/["\t\r\n]/.test(value)) {
+    return value;
+  }
+
+  return `"${value.replace(/"/g, "\"\"")}"`;
+}
+
+function dictionaryPayloadToPlainText(payload: MessageDictionaryPayload): string {
+  return [
+    payload.description,
+    payload.tags.join(" "),
+    payload.entries
+      .map((entry) =>
+        [
+          entry.side1,
+          entry.side1Note ? `(${entry.side1Note})` : "",
+          "-",
+          entry.side2,
+          entry.side2Note ? `(${entry.side2Note})` : "",
+        ]
+          .filter(Boolean)
+          .join(" ")
+      )
+      .join("\n"),
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function oppositeDictionaryPromptSide(
+  side: DictionaryPromptSide
+): DictionaryPromptSide {
+  return side === "side1" ? "side2" : "side1";
+}
+
+function getDictionaryEntrySideText(
+  entry: DictionaryEntry,
+  side: DictionaryPromptSide
+): string {
+  return side === "side1" ? entry.side1 : entry.side2;
+}
+
+function getDictionaryEntrySideNote(
+  entry: DictionaryEntry,
+  side: DictionaryPromptSide
+): string {
+  return side === "side1" ? entry.side1Note : entry.side2Note;
+}
+
+function toDictionaryPromptSideLabel(
+  side: DictionaryPromptSide,
+  labels: DictionaryFieldLabels = DEFAULT_DICTIONARY_FIELD_LABELS
+): string {
+  const normalizedLabels = normalizeDictionaryLabels(labels);
+  return side === "side1" ? normalizedLabels.side1 : normalizedLabels.side2;
+}
+
+function toDictionaryNoteSideLabel(
+  side: DictionaryPromptSide,
+  labels: DictionaryFieldLabels = DEFAULT_DICTIONARY_FIELD_LABELS
+): string {
+  const normalizedLabels = normalizeDictionaryLabels(labels);
+  return side === "side1"
+    ? normalizedLabels.side1Note
+    : normalizedLabels.side2Note;
+}
+
+function shuffleDictionaryEntries(entries: DictionaryEntry[]): DictionaryEntry[] {
+  const shuffled = [...entries];
+
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]];
+  }
+
+  return shuffled;
 }
 
 function reorderIdListByTarget(source: string[], dragId: string, targetId: string): string[] {
@@ -12292,6 +15316,31 @@ function makeCategoryExportFileName(title: string): string {
   return `${base}-tree-${stamp}.json`;
 }
 
+function makeDictionaryExportFileName(title: string, extension: "json" | "tsv"): string {
+  const normalized = title
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9а-яё_-]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 42);
+
+  const base = normalized.length > 0 ? normalized : "dict";
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+  return `${base}-dict-${stamp}.${extension}`;
+}
+
+function downloadTextFile(fileName: string, content: string, type: string) {
+  const blob = new Blob([content], { type });
+  const blobUrl = URL.createObjectURL(blob);
+
+  const link = document.createElement("a");
+  link.href = blobUrl;
+  link.download = fileName;
+  link.click();
+
+  URL.revokeObjectURL(blobUrl);
+}
+
 function isMainRootCategory(node: CategoryRow | null): boolean {
   if (!node) {
     return false;
@@ -12314,6 +15363,25 @@ function SearchIcon() {
     >
       <circle cx="11" cy="11" r="7" />
       <line x1="16.2" y1="16.2" x2="21" y2="21" />
+    </svg>
+  );
+}
+
+function SpeakerIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-5 w-5"
+      aria-hidden="true"
+    >
+      <path d="M4 9v6h4l5 4V5L8 9H4Z" />
+      <path d="M16 8.5a4 4 0 0 1 0 7" />
+      <path d="M18.5 6a7 7 0 0 1 0 12" />
     </svg>
   );
 }
