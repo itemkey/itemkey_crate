@@ -6,6 +6,8 @@ import {
 } from "@/lib/project-store";
 import { toErrorMessage } from "@/lib/errors";
 import { getRequestUser } from "@/lib/request-user";
+import { publishRealtimeEvent } from "@/lib/realtime";
+import { getOriginClientId } from "@/lib/realtime-targets";
 
 export const dynamic = "force-dynamic";
 
@@ -76,6 +78,12 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
 
     const store = await getProjectStore(user.id);
     const updated = await store.update(id, patch);
+    await publishRealtimeEvent({
+      kind: "projects",
+      action: "project_update",
+      userIds: [user.id],
+      originClientId: getOriginClientId(request),
+    });
     return Response.json({ data: updated, source: store.source });
   } catch (error) {
     return Response.json(
@@ -99,6 +107,12 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
 
     const store = await getProjectStore(user.id);
     await store.remove(id);
+    await publishRealtimeEvent({
+      kind: "projects",
+      action: "project_delete",
+      userIds: [user.id],
+      originClientId: getOriginClientId(request),
+    });
     return Response.json({ ok: true, source: store.source });
   } catch (error) {
     return Response.json(

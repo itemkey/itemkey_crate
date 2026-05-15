@@ -1,8 +1,11 @@
 import { NextRequest } from "next/server";
 
 import { getCategoryStore } from "@/lib/category-store";
+import { getPostgresPool } from "@/lib/db/postgres";
 import { toErrorMessage } from "@/lib/errors";
 import { getRequestUser } from "@/lib/request-user";
+import { publishRealtimeEvent } from "@/lib/realtime";
+import { getCategoryRealtimeUserIds, getOriginClientId } from "@/lib/realtime-targets";
 
 export const dynamic = "force-dynamic";
 
@@ -65,6 +68,13 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
 
     const store = await getCategoryStore(user.id);
     const updated = await store.updateMessage(id, patch);
+    await publishRealtimeEvent({
+      kind: "messages",
+      action: "message_update",
+      userIds: await getCategoryRealtimeUserIds(user.id, updated.category_id),
+      categoryIds: [updated.category_id],
+      originClientId: getOriginClientId(request),
+    });
     return Response.json({ data: updated, source: store.source });
   } catch (error) {
     return Response.json(
@@ -86,8 +96,29 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
       return Response.json({ error: "Missing message id." }, { status: 400 });
     }
 
+    const { rows: messageRows } = await getPostgresPool().query<{
+      category_id: string;
+    }>(
+      `
+        select category_id
+        from public.category_messages
+        where id = $1::uuid
+        limit 1
+      `,
+      [id]
+    );
+    const categoryId = messageRows[0]?.category_id ?? null;
     const store = await getCategoryStore(user.id);
     await store.removeMessage(id);
+    await publishRealtimeEvent({
+      kind: "messages",
+      action: "message_delete",
+      userIds: categoryId
+        ? await getCategoryRealtimeUserIds(user.id, categoryId)
+        : [user.id],
+      categoryIds: categoryId ? [categoryId] : undefined,
+      originClientId: getOriginClientId(request),
+    });
     return Response.json({ ok: true, source: store.source });
   } catch (error) {
     return Response.json(

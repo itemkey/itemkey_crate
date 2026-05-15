@@ -2,6 +2,7 @@
 
 import {
   type ChangeEvent,
+  type ClipboardEvent,
   type CSSProperties,
   type DragEvent,
   type FormEvent,
@@ -9,6 +10,7 @@ import {
   useCallback,
   useDeferredValue,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -20,6 +22,7 @@ import {
   collectDescendantIds,
   getChildren,
   getInitialCategoryId,
+  sortByPosition,
 } from "@/lib/categories";
 import {
   CATEGORY_TREE_SCHEMA_VERSION,
@@ -31,9 +34,13 @@ import type {
   CategoryFormat,
   CategoryRow,
   CategoryType,
+  FriendRow,
+  InboxItemRow,
   MessageRow,
   MessageType,
   ProjectRow,
+  PublicCategoryMemberRole,
+  PublicCategoryPanel,
 } from "@/lib/types";
 
 type DataSource = "postgres";
@@ -83,6 +90,16 @@ type MessagePayload = {
 
 type CategoryTreePayload = {
   data?: CategoryTreeDocument;
+  source?: DataSource;
+  error?: string;
+};
+
+type CategoryRestorePayload = {
+  data?: {
+    categories: CategoryRow[];
+    messages: MessageRow[];
+  };
+  projects?: ProjectRow[];
   source?: DataSource;
   error?: string;
 };
@@ -177,6 +194,65 @@ type CsrfPayload = {
   data?: {
     token: string;
   };
+  error?: string;
+};
+
+type FriendsPayload = {
+  data?: FriendRow[];
+  source?: DataSource;
+  error?: string;
+};
+
+type FriendPayload = {
+  data?: FriendRow;
+  source?: DataSource;
+  error?: string;
+};
+
+type InboxPayload = {
+  data?: InboxItemRow[];
+  source?: DataSource;
+  error?: string;
+};
+
+type InboxAcceptPayload = {
+  data?: {
+    item: InboxItemRow;
+    categories: CategoryRow[];
+    messages: MessageRow[];
+  };
+  source?: DataSource;
+  error?: string;
+};
+
+type InboxItemPayload = {
+  data?: InboxItemRow;
+  source?: DataSource;
+  error?: string;
+};
+
+type PublicPanelPayload = {
+  data?: PublicCategoryPanel;
+  source?: DataSource;
+  error?: string;
+};
+
+type WorkspaceBootstrapPayload = {
+  data?: {
+    authUser: {
+      id: string;
+      email: string | null;
+      emailVerifiedAt?: string | null;
+    } | null;
+    account?: AccountPayload["data"];
+    categories?: CategoryRow[];
+    projects?: ProjectRow[];
+    friends?: FriendRow[];
+    initialCategoryId?: string | null;
+    initialMessages?: MessageRow[];
+    publicPanel?: PublicCategoryPanel | null;
+  };
+  source?: DataSource;
   error?: string;
 };
 
@@ -278,6 +354,9 @@ type DictionaryBlock = {
   tags: string[];
   promptSide: DictionaryPromptSide;
   shuffle: boolean;
+  autoSpeak: boolean;
+  autoSpeakFields: DictionaryEntryField[];
+  manualSpeakFields: DictionaryEntryField[];
   labels: DictionaryFieldLabels;
   entries: DictionaryEntry[];
 };
@@ -287,6 +366,9 @@ type MessageDictionaryPayload = {
   tags: string[];
   promptSide: DictionaryPromptSide;
   shuffle: boolean;
+  autoSpeak: boolean;
+  autoSpeakFields: DictionaryEntryField[];
+  manualSpeakFields: DictionaryEntryField[];
   labels: DictionaryFieldLabels;
   entries: DictionaryEntry[];
 };
@@ -301,6 +383,9 @@ type DictionaryEditorState = {
   tagsDraft: string;
   promptSide: DictionaryPromptSide;
   shuffle: boolean;
+  autoSpeak: boolean;
+  autoSpeakFields: DictionaryEntryField[];
+  manualSpeakFields: DictionaryEntryField[];
   labels: DictionaryFieldLabels;
   entries: DictionaryEntry[];
 };
@@ -312,15 +397,36 @@ type DictionaryStudyState = {
   title: string;
   promptSide: DictionaryPromptSide;
   labels: DictionaryFieldLabels;
+  baseCards: DictionaryEntry[];
   cards: DictionaryEntry[];
+  shuffle: boolean;
+  autoSpeak: boolean;
+  autoSpeakFields: DictionaryEntryField[];
+  manualSpeakFields: DictionaryEntryField[];
+  progressKey: string;
   currentIndex: number;
   isAnswerRevealed: boolean;
   transitionKey: number;
 };
 
+type DictionaryStudyProgress = {
+  currentIndex: number;
+  isAnswerRevealed: boolean;
+  cardIds: string[];
+  shuffle: boolean;
+};
+
 type DictionaryEntryField = Exclude<keyof DictionaryEntry, "id">;
 type DictionaryLabelField = keyof DictionaryFieldLabels;
 type DictionaryEditorTab = "entries" | "transfer" | "general";
+
+type DictionaryEditorSearchMatch = {
+  entryId: string;
+  field: DictionaryEntryField;
+  start: number;
+  end: number;
+  isFuzzy: boolean;
+};
 
 type CategoryFormState = {
   title: string;
@@ -357,6 +463,11 @@ type RichFileSelection = {
 type DraggedRichImage = {
   scope: RichEditorScope;
   imageId: string;
+};
+
+type DraggedRichFile = {
+  scope: RichEditorScope;
+  fileId: string;
 };
 
 type RichImageResizeEdge = "left" | "right" | "top" | "bottom";
@@ -410,6 +521,12 @@ type WorkspaceUndoEntry =
         categoryId: string | null;
         html: string;
       }>;
+    }
+  | {
+      kind: "category-delete";
+      snapshot: WorkspaceUiUndoSnapshot;
+      document: CategoryTreeDocument;
+      projects: ProjectRow[];
     };
 
 type ConfirmDialogTone = "neutral" | "danger";
@@ -422,7 +539,11 @@ type ConfirmDialogState = {
   tone: ConfirmDialogTone;
 };
 
-type MenuPanel = "main" | "account" | "settings";
+type MenuPanel = "main" | "account" | "settings" | "friends";
+type MobilePanel = "categories" | "projects" | "settings" | "tools" | null;
+type OpenCategoryOptions = {
+  keepMobilePanel?: boolean;
+};
 type AuthTab = "login" | "register";
 
 const DEFAULT_CATEGORY_FORM: CategoryFormState = {
@@ -459,6 +580,10 @@ const RICH_IMAGE_DELETE_LINE_ACTIVE_CLASS_NAME = "rich-image-delete-line-active"
 const RICH_IMAGE_DRAGGING_CLASS_NAME = "rich-image-dragging";
 const RICH_IMAGE_RESIZING_CLASS_NAME = "rich-image-resizing";
 const RICH_FILE_DELETE_CONFIRM_CLASS_NAME = "rich-file-delete-confirm";
+const RICH_FILE_ZONE_CLASS_NAME = "rich-file-zone";
+const RICH_FILE_ROW_CLASS_NAME = "rich-file-row";
+const RICH_FILE_LINE_CLASS_NAME = "rich-file-line";
+const RICH_FILE_DRAGGING_CLASS_NAME = "rich-file-dragging";
 const DEFAULT_RICH_IMAGE_WIDTH = 320;
 const MIN_RICH_IMAGE_WIDTH = 92;
 const MAX_RICH_IMAGE_WIDTH = 1400;
@@ -485,6 +610,7 @@ export default function CategoryWorkspace() {
   const [dragChecklistItem, setDragChecklistItem] = useState<ChecklistDragItem | null>(
     null
   );
+  const [dragDictionaryId, setDragDictionaryId] = useState<string | null>(null);
   const [categoryForm, setCategoryForm] =
     useState<CategoryFormState>(DEFAULT_CATEGORY_FORM);
   const [messageTitleDraft, setMessageTitleDraft] = useState("");
@@ -511,6 +637,7 @@ export default function CategoryWorkspace() {
   const [showSearch, setShowSearch] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [menuPanel, setMenuPanel] = useState<MenuPanel>("main");
+  const [mobilePanel, setMobilePanel] = useState<MobilePanel>(null);
   const [showCategoryTagSuggestions, setShowCategoryTagSuggestions] =
     useState(false);
   const [showCategoryTagLibrary, setShowCategoryTagLibrary] = useState(false);
@@ -529,6 +656,15 @@ export default function CategoryWorkspace() {
     () => parseDictionaryImportDraft(dictionaryImportDraft, dictionaryEditor?.labels),
     [dictionaryImportDraft, dictionaryEditor?.labels]
   );
+  const [dictionarySearchQuery, setDictionarySearchQuery] = useState("");
+  const [dictionarySearchActiveIndex, setDictionarySearchActiveIndex] =
+    useState(0);
+  const [dictionaryMobileSearchOpen, setDictionaryMobileSearchOpen] =
+    useState(false);
+  const [
+    dictionarySearchNavigationVersion,
+    setDictionarySearchNavigationVersion,
+  ] = useState(0);
   const [checklistTagSearchQuery, setChecklistTagSearchQuery] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const normalizedSearchQuery = searchQuery.trim().toLowerCase();
@@ -614,11 +750,34 @@ export default function CategoryWorkspace() {
   const [isSavingAccountPassword, setIsSavingAccountPassword] = useState(false);
   const [isCreatingProject, setIsCreatingProject] = useState(false);
   const [isSavingProject, setIsSavingProject] = useState(false);
+  const [friends, setFriends] = useState<FriendRow[]>([]);
+  const [friendRequestUserIdDraft, setFriendRequestUserIdDraft] = useState("");
+  const [selectedFriendInboxId, setSelectedFriendInboxId] = useState<string | null>(
+    null
+  );
+  const [friendInboxItems, setFriendInboxItems] = useState<
+    Record<string, InboxItemRow[]>
+  >({});
+  const [inboxImportTargetIds, setInboxImportTargetIds] = useState<
+    Record<string, string>
+  >({});
+  const [shareFriendId, setShareFriendId] = useState("");
+  const [publicInviteFriendId, setPublicInviteFriendId] = useState("");
+  const [publicPanel, setPublicPanel] = useState<PublicCategoryPanel | null>(null);
+  const [isSavingFriendAction, setIsSavingFriendAction] = useState(false);
+  const [isSavingInboxAction, setIsSavingInboxAction] = useState(false);
+  const [isSavingPublicAction, setIsSavingPublicAction] = useState(false);
 
   const importFileRef = useRef<HTMLInputElement | null>(null);
   const dictionaryImportFileRef = useRef<HTMLInputElement | null>(null);
   const dictionaryStudyCardShellRef = useRef<HTMLDivElement | null>(null);
   const dictionaryStudyCardContentRef = useRef<HTMLDivElement | null>(null);
+  const dictionaryStudyCardFitRef = useRef<HTMLDivElement | null>(null);
+  const dictionaryEditorCellRefsRef = useRef<
+    Record<string, HTMLTextAreaElement | null>
+  >({});
+  const dictionarySearchShouldFocusRef = useRef(false);
+  const dictionaryAutoSpeechTimerRef = useRef<number | null>(null);
   const richImageFileRef = useRef<HTMLInputElement | null>(null);
   const richFileRef = useRef<HTMLInputElement | null>(null);
   const categoryTagInputRef = useRef<HTMLInputElement | null>(null);
@@ -626,14 +785,18 @@ export default function CategoryWorkspace() {
   const blockEditorRefsRef = useRef<Record<string, HTMLDivElement | null>>({});
   const savedRichSelectionRef = useRef<SavedRichSelection | null>(null);
   const draggedRichImageRef = useRef<DraggedRichImage | null>(null);
+  const draggedRichFileRef = useRef<DraggedRichFile | null>(null);
   const richImageResizeStateRef = useRef<RichImageResizeState | null>(null);
   const workspaceUndoStackRef = useRef<WorkspaceUndoEntry[]>([]);
   const isRestoringWorkspaceUndoRef = useRef(false);
   const lastEditorUndoHtmlRef = useRef<Record<string, string>>({});
-  const performWorkspaceUndoRef = useRef<() => void>(() => {
+  const performWorkspaceUndoRef = useRef<() => void | Promise<void>>(() => {
     return;
   });
   const ensureRichImageDeleteLinesRef = useRef<(editor: HTMLDivElement) => void>(() => {
+    return;
+  });
+  const ensureRichFileRowsRef = useRef<(editor: HTMLDivElement) => void>(() => {
     return;
   });
   const deleteRichImageBySelectionRef = useRef<
@@ -662,6 +825,23 @@ export default function CategoryWorkspace() {
   const textColorButtonRef = useRef<HTMLButtonElement | null>(null);
   const textColorPaletteRef = useRef<HTMLDivElement | null>(null);
   const csrfTokenRef = useRef<string | null>(null);
+  const clientIdRef = useRef<string | null>(null);
+  const currentCategoryIdRef = useRef<string | null>(null);
+  const selectedFriendInboxIdRef = useRef<string | null>(null);
+  const realtimeHandlersRef = useRef({
+    loadFriends: async () => {},
+    loadFriendInbox: async (_friendAppUserId: string) => {
+      void _friendAppUserId;
+    },
+    loadProjects: async () => {},
+    refreshCategoriesFromServer: async () => {},
+    loadCategoryMessages: async (_categoryId: string) => {
+      void _categoryId;
+    },
+    loadCurrentPublicPanel: async (_categoryId: string | null) => {
+      void _categoryId;
+    },
+  });
   const confirmResolverRef = useRef<((accepted: boolean) => void) | null>(null);
 
   const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -709,6 +889,7 @@ export default function CategoryWorkspace() {
   const messageAckVersionRef = useRef<Record<string, number>>({});
   const pendingMessageSelectionRef = useRef<string | null>(null);
   const syncedContinuousCategoryIdRef = useRef<string | null>(null);
+  const didAutoOpenMobileCategoriesRef = useRef(false);
   const [, startEditorTransition] = useTransition();
 
   const sortedProjects = useMemo(() => [...projects].sort(sortProjects), [projects]);
@@ -747,10 +928,16 @@ export default function CategoryWorkspace() {
     [visibleCategoriesById, currentCategoryId]
   );
 
+  const currentCategoryCanEdit = currentCategory?.access_role !== "viewer";
+  const currentCategoryCanManagePublic = currentCategory?.access_role === "owner";
+  const currentCategoryVisibilityLabel =
+    currentCategory?.visibility === "public" ? "public" : "local";
+
   const insertionTarget = useMemo(
     () => visibleCategoriesById.get(insertionTargetId ?? "") ?? null,
     [visibleCategoriesById, insertionTargetId]
   );
+  const insertionTargetCanEdit = insertionTarget?.access_role !== "viewer";
 
   const projectRootCategories = useMemo(
     () =>
@@ -797,6 +984,7 @@ export default function CategoryWorkspace() {
 
   const canUseRichToolbar = Boolean(
     currentCategory &&
+      currentCategoryCanEdit &&
       !isMutating &&
       !isLoading &&
       !loadError &&
@@ -855,9 +1043,41 @@ export default function CategoryWorkspace() {
         visibleCategoriesById.has(currentCategory.parent_id)) ||
         (isProjectMode && projectRootIdSet.has(currentCategory.id)))
   );
-  const canCreate = Boolean(insertionTargetId) || isProjectMode;
-  const canDelete = Boolean(insertionTargetId) && !isMainRootCategory(insertionTarget);
+  const canCreate = Boolean(
+    (Boolean(insertionTargetId) || isProjectMode) && insertionTargetCanEdit
+  );
+  const canDeleteCategoryNode = (category: CategoryRow | null | undefined) =>
+    Boolean(
+      category &&
+        !isMainRootCategory(category) &&
+        (category.access_role === "owner" ||
+          (category.access_role === "editor" &&
+            category.visibility === "public" &&
+            category.public_root_id !== category.id))
+    );
+  const canDelete = Boolean(insertionTargetId && canDeleteCategoryNode(insertionTarget));
   const isAuthenticated = Boolean(authUser);
+  const acceptedFriends = useMemo(
+    () => friends.filter((friend) => friend.status === "accepted"),
+    [friends]
+  );
+  const selectedFriendInboxItems = useMemo(
+    () => (selectedFriendInboxId ? friendInboxItems[selectedFriendInboxId] ?? [] : []),
+    [friendInboxItems, selectedFriendInboxId]
+  );
+  const localCategoryOptions = useMemo(
+    () =>
+      categories
+        .filter((category) => category.visibility !== "public")
+        .map((category) => ({
+          id: category.id,
+          label: buildCategoryPath(categories, category.id)
+            .map((node) => node.title)
+            .join(" / "),
+        }))
+        .sort((a, b) => a.label.localeCompare(b.label, "ru-RU")),
+    [categories]
+  );
   const currentCategoryTags = useMemo(
     () => parseCategoryTags(currentCategory?.tag ?? ""),
     [currentCategory?.tag]
@@ -1375,6 +1595,44 @@ export default function CategoryWorkspace() {
     visibleCategoriesById,
   ]);
 
+  const dictionarySearchMatches = useMemo(() => {
+    if (!dictionaryEditor) {
+      return [] as DictionaryEditorSearchMatch[];
+    }
+
+    const query = dictionarySearchQuery.trim();
+    if (!query) {
+      return [] as DictionaryEditorSearchMatch[];
+    }
+
+    const queryTokens = getDictionarySearchTokens(query).map((token) => token.text);
+    const matches: DictionaryEditorSearchMatch[] = [];
+
+    for (const entry of dictionaryEditor.entries) {
+      for (const field of DICTIONARY_EDITOR_SEARCH_FIELDS) {
+        const match = findDictionaryEditorSearchMatch(
+          entry[field],
+          query,
+          queryTokens
+        );
+
+        if (!match) {
+          continue;
+        }
+
+        matches.push({
+          entryId: entry.id,
+          field,
+          start: match.start,
+          end: match.end,
+          isFuzzy: match.isFuzzy,
+        });
+      }
+    }
+
+    return matches;
+  }, [dictionaryEditor, dictionarySearchQuery]);
+
   const statusText = useMemo(() => {
     if (notice?.text) {
       return notice.text;
@@ -1471,6 +1729,7 @@ export default function CategoryWorkspace() {
     syncedContinuousCategoryIdRef.current = null;
     savedRichSelectionRef.current = null;
     draggedRichImageRef.current = null;
+    draggedRichFileRef.current = null;
     richImageResizeStateRef.current = null;
     blockEditorRefsRef.current = {};
 
@@ -1487,8 +1746,10 @@ export default function CategoryWorkspace() {
     setActiveProjectId(null);
     setSelectedMessageId(null);
     setDragChecklistItem(null);
+    setDragDictionaryId(null);
     setShowSearch(false);
     setShowMenu(false);
+    setMobilePanel(null);
     setShowCategoryTagLibrary(false);
     setShowCategoryTagSuggestions(false);
     setShowProjectCreateModal(false);
@@ -1556,6 +1817,17 @@ export default function CategoryWorkspace() {
     setIsSavingAccountPassword(false);
     setIsCreatingProject(false);
     setIsSavingProject(false);
+    setFriends([]);
+    setFriendRequestUserIdDraft("");
+    setSelectedFriendInboxId(null);
+    setFriendInboxItems({});
+    setInboxImportTargetIds({});
+    setShareFriendId("");
+    setPublicInviteFriendId("");
+    setPublicPanel(null);
+    setIsSavingFriendAction(false);
+    setIsSavingInboxAction(false);
+    setIsSavingPublicAction(false);
     setMenuPanel("main");
   }, []);
 
@@ -1583,10 +1855,21 @@ export default function CategoryWorkspace() {
     return payload.data.token;
   }, []);
 
+  const getClientId = useCallback(() => {
+    if (!clientIdRef.current) {
+      clientIdRef.current =
+        globalThis.crypto?.randomUUID?.() ??
+        `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    }
+
+    return clientIdRef.current;
+  }, []);
+
   const fetchWithCsrf = useCallback(
     async (input: RequestInfo | URL, init?: RequestInit) => {
       const method = (init?.method ?? "GET").toUpperCase();
       const headers = new Headers(init?.headers ?? undefined);
+      headers.set("x-client-id", getClientId());
 
       if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
         const token = await ensureCsrfToken();
@@ -1599,7 +1882,7 @@ export default function CategoryWorkspace() {
         credentials: "same-origin",
       });
     },
-    [ensureCsrfToken]
+    [ensureCsrfToken, getClientId]
   );
 
   const authorizedFetch = useCallback(
@@ -1654,6 +1937,141 @@ export default function CategoryWorkspace() {
       setIsAuthReady(true);
     }
   }, []);
+
+  void loadAuthSession;
+
+  const loadWorkspaceBootstrap = useCallback(async (): Promise<boolean> => {
+    setIsAuthReady(false);
+    setIsLoading(true);
+    setLoadError(null);
+
+    try {
+      const response = await fetch("/api/workspace/bootstrap", {
+        cache: "no-store",
+        credentials: "same-origin",
+      });
+      const payload = (await response.json()) as WorkspaceBootstrapPayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Unable to bootstrap workspace.");
+      }
+
+      if (!payload.data.authUser) {
+        setAuthUser(null);
+        resetWorkspaceState();
+        setAuthError(null);
+        return true;
+      }
+
+      const rows = (payload.data.categories ?? []).map(normalizeCategoryRow);
+      const initialId =
+        payload.data.initialCategoryId ?? getInitialCategoryId(rows) ?? rows[0]?.id ?? null;
+      const initialMessages = (payload.data.initialMessages ?? [])
+        .map(normalizeMessageRow)
+        .sort(sortMessages);
+
+      for (const timer of Object.values(categorySaveTimersRef.current)) {
+        clearTimeout(timer);
+      }
+      for (const timer of Object.values(messageSaveTimersRef.current)) {
+        clearTimeout(timer);
+      }
+
+      categorySaveTimersRef.current = {};
+      categorySaveInFlightRef.current = {};
+      pendingCategorySaveRef.current = {};
+      categoryRequestCountRef.current = 0;
+
+      messageSaveTimersRef.current = {};
+      messageSaveInFlightRef.current = {};
+      pendingMessageSaveRef.current = {};
+      messageRequestCountRef.current = 0;
+
+      savedMessageContentRef.current = {};
+      messageDraftVersionRef.current = {};
+      messageAckVersionRef.current = {};
+      pendingMessageSelectionRef.current = null;
+      syncedContinuousCategoryIdRef.current = null;
+      draggedRichImageRef.current = null;
+      draggedRichFileRef.current = null;
+      richImageResizeStateRef.current = null;
+      savedRichSelectionRef.current = null;
+
+      const savedCategoryMap: Record<string, string> = {};
+      const categoryDraftMap: Record<string, number> = {};
+      const categoryAckMap: Record<string, number> = {};
+      for (const row of rows) {
+        savedCategoryMap[row.id] = row.content;
+        categoryDraftMap[row.id] = 0;
+        categoryAckMap[row.id] = 0;
+      }
+      savedCategoryContentRef.current = savedCategoryMap;
+      categoryDraftVersionRef.current = categoryDraftMap;
+      categoryAckVersionRef.current = categoryAckMap;
+
+      const savedMessageMap: Record<string, string> = {};
+      const messageDraftMap: Record<string, number> = {};
+      const messageAckMap: Record<string, number> = {};
+      for (const row of initialMessages) {
+        savedMessageMap[row.id] = row.content;
+        messageDraftMap[row.id] = 0;
+        messageAckMap[row.id] = 0;
+      }
+      savedMessageContentRef.current = savedMessageMap;
+      messageDraftVersionRef.current = messageDraftMap;
+      messageAckVersionRef.current = messageAckMap;
+
+      setAuthUser({
+        id: payload.data.authUser.id,
+        email: payload.data.authUser.email,
+      });
+      setAuthError(null);
+      setCategories(rows);
+      setProjects((payload.data.projects ?? []).map(normalizeProjectRow));
+      setFriends(payload.data.friends ?? []);
+      setCurrentCategoryId(initialId);
+      setInsertionTargetId(initialId);
+      setSelectedMessageId(null);
+      setSelectedRichImage(null);
+      setRichImageDeleteConfirm(null);
+      setRichImageDeleteConfirmRect(null);
+      setRichFileDeleteConfirm(null);
+      setRichFileDeleteConfirmRect(null);
+      setMessagesByCategory(initialId ? { [initialId]: initialMessages } : {});
+      setPublicPanel(payload.data.publicPanel ?? null);
+      setSource(payload.source ?? "unknown");
+
+      if (payload.data.account) {
+        setAccountUserId(payload.data.account.userId ?? null);
+        setAccountUserIdDraft(payload.data.account.userId ?? "");
+        setAccountNicknameDraft(payload.data.account.nickname);
+        setAccountProfileDescriptionDraft(payload.data.account.profileDescription);
+        setAccountAvatarUrlDraft(payload.data.account.avatarUrl ?? "");
+        setAccountAvatarUrl(payload.data.account.avatarUrl ?? null);
+        setAccountCanChangeUserIdNow(
+          Boolean(payload.data.account.canChangeUserIdNow)
+        );
+        setAccountNextUserIdChangeAt(
+          payload.data.account.nextUserIdChangeAt ?? null
+        );
+        setActiveMigrationCodeMeta(
+          payload.data.account.activeMigrationCode ?? null
+        );
+      }
+
+      setIsSavingCategory(false);
+      setIsSavingMessages(false);
+      return true;
+    } catch (error) {
+      const message = toErrorMessage(error, "Unable to bootstrap workspace.");
+      setAuthUser(null);
+      setLoadError(message);
+      setAuthError(message);
+      return false;
+    } finally {
+      setIsLoading(false);
+      setIsAuthReady(true);
+    }
+  }, [resetWorkspaceState]);
 
   function syncCategorySavingState() {
     const hasTimers = Object.keys(categorySaveTimersRef.current).length > 0;
@@ -1732,6 +2150,7 @@ export default function CategoryWorkspace() {
       pendingMessageSelectionRef.current = null;
       syncedContinuousCategoryIdRef.current = null;
       draggedRichImageRef.current = null;
+      draggedRichFileRef.current = null;
       richImageResizeStateRef.current = null;
       savedRichSelectionRef.current = null;
 
@@ -1767,6 +2186,62 @@ export default function CategoryWorkspace() {
       setIsLoading(false);
     }
   }, [authorizedFetch]);
+
+  const refreshCategoriesFromServer = useCallback(async () => {
+    try {
+      const response = await authorizedFetch("/api/categories", { cache: "no-store" });
+      const payload = (await response.json()) as CategoriesPayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Не удалось обновить категории.");
+      }
+
+      const rows = payload.data.map(normalizeCategoryRow);
+      const hasPendingDraft = (categoryId: string) => {
+        const draftVersion = categoryDraftVersionRef.current[categoryId] ?? 0;
+        const ackVersion = categoryAckVersionRef.current[categoryId] ?? 0;
+
+        return (
+          draftVersion > ackVersion ||
+          Boolean(categorySaveTimersRef.current[categoryId]) ||
+          Boolean(categorySaveInFlightRef.current[categoryId]) ||
+          Boolean(pendingCategorySaveRef.current[categoryId])
+        );
+      };
+
+      setCategories((prev) => {
+        const localById = new Map(prev.map((category) => [category.id, category]));
+        return rows.map((row) => {
+          const local = localById.get(row.id);
+          if (!local || !hasPendingDraft(row.id)) {
+            return row;
+          }
+
+          return {
+            ...row,
+            content: local.content,
+            updated_at: local.updated_at,
+          };
+        });
+      });
+
+      for (const row of rows) {
+        if (!hasPendingDraft(row.id)) {
+          savedCategoryContentRef.current[row.id] = row.content;
+        }
+
+        if (typeof categoryDraftVersionRef.current[row.id] !== "number") {
+          categoryDraftVersionRef.current[row.id] = 0;
+        }
+        if (typeof categoryAckVersionRef.current[row.id] !== "number") {
+          categoryAckVersionRef.current[row.id] = 0;
+        }
+      }
+
+      setSource((prev) => payload.source ?? prev);
+    } catch (error) {
+      pushNotice(toErrorMessage(error, "Не удалось обновить категории."), "error");
+    }
+  }, [authorizedFetch, pushNotice]);
 
   const loadProjects = useCallback(async () => {
     try {
@@ -1806,6 +2281,73 @@ export default function CategoryWorkspace() {
       pushNotice(toErrorMessage(error, "Не удалось загрузить профиль аккаунта."), "error");
     }
   }, [authorizedFetch, pushNotice]);
+
+  void loadAccountProfile;
+
+  const loadFriends = useCallback(async () => {
+    try {
+      const response = await authorizedFetch("/api/friends", { cache: "no-store" });
+      const payload = (await response.json()) as FriendsPayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Не удалось загрузить друзей.");
+      }
+
+      setFriends(payload.data);
+      setSource((prev) => payload.source ?? prev);
+    } catch (error) {
+      pushNotice(toErrorMessage(error, "Не удалось загрузить друзей."), "error");
+    }
+  }, [authorizedFetch, pushNotice]);
+
+  const loadFriendInbox = useCallback(
+    async (friendAppUserId: string) => {
+      try {
+        const response = await authorizedFetch(
+          `/api/friends/${friendAppUserId}/inbox`,
+          { cache: "no-store" }
+        );
+        const payload = (await response.json()) as InboxPayload;
+        if (!response.ok || !payload.data) {
+          throw new Error(payload.error ?? "Не удалось загрузить inbox.");
+        }
+
+        setFriendInboxItems((prev) => ({
+          ...prev,
+          [friendAppUserId]: payload.data ?? [],
+        }));
+        setSource((prev) => payload.source ?? prev);
+      } catch (error) {
+        pushNotice(toErrorMessage(error, "Не удалось загрузить inbox."), "error");
+      }
+    },
+    [authorizedFetch, pushNotice]
+  );
+
+  const loadCurrentPublicPanel = useCallback(
+    async (categoryId: string | null) => {
+      if (!categoryId) {
+        setPublicPanel(null);
+        return;
+      }
+
+      try {
+        const response = await authorizedFetch(`/api/categories/${categoryId}/public`, {
+          cache: "no-store",
+        });
+        const payload = (await response.json()) as PublicPanelPayload;
+        if (!response.ok || !payload.data) {
+          throw new Error(payload.error ?? "Не удалось загрузить public-настройки.");
+        }
+
+        setPublicPanel(payload.data);
+        setSource((prev) => payload.source ?? prev);
+      } catch (error) {
+        setPublicPanel(null);
+        pushNotice(toErrorMessage(error, "Не удалось загрузить public-настройки."), "error");
+      }
+    },
+    [authorizedFetch, pushNotice]
+  );
 
   const loadCategoryMessages = useCallback(
     async (categoryId: string) => {
@@ -1883,37 +2425,193 @@ export default function CategoryWorkspace() {
     [authorizedFetch, pushNotice]
   );
 
-  useEffect(() => {
-    void loadAuthSession();
-  }, [loadAuthSession]);
+  useLayoutEffect(() => {
+    void loadWorkspaceBootstrap();
+  }, [loadWorkspaceBootstrap]);
 
   useEffect(() => {
-    void ensureCsrfToken().catch(() => {
-      return;
-    });
-  }, [ensureCsrfToken]);
-
-  useEffect(() => {
-    if (!isAuthReady) {
-      return;
-    }
-
     if (!isAuthenticated) {
-      resetWorkspaceState();
       return;
     }
 
-    void loadCategories();
-    void loadProjects();
-    void loadAccountProfile();
+    void loadCurrentPublicPanel(currentCategoryId);
+  }, [currentCategoryId, isAuthenticated, loadCurrentPublicPanel]);
+
+  useEffect(() => {
+    currentCategoryIdRef.current = currentCategoryId;
+  }, [currentCategoryId]);
+
+  useEffect(() => {
+    selectedFriendInboxIdRef.current = selectedFriendInboxId;
+  }, [selectedFriendInboxId]);
+
+  useEffect(() => {
+    realtimeHandlersRef.current = {
+      loadFriends,
+      loadFriendInbox,
+      loadProjects,
+      refreshCategoriesFromServer,
+      loadCategoryMessages,
+      loadCurrentPublicPanel,
+    };
   }, [
-    isAuthReady,
-    isAuthenticated,
-    loadAccountProfile,
-    loadCategories,
+    loadCategoryMessages,
+    loadCurrentPublicPanel,
+    loadFriendInbox,
+    loadFriends,
     loadProjects,
-    resetWorkspaceState,
+    refreshCategoriesFromServer,
   ]);
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      return;
+    }
+
+    let eventSource: EventSource | null = null;
+    let stopped = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconnectAttempt = 0;
+
+    const clearReconnectTimer = () => {
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+    };
+
+    const closeEventSource = () => {
+      eventSource?.close();
+      eventSource = null;
+    };
+
+    const handleItemKeyEvent = (event: Event) => {
+      let payload: {
+        kind?: string;
+        categoryIds?: string[];
+      };
+
+      try {
+        payload = JSON.parse((event as MessageEvent).data) as {
+          kind?: string;
+          categoryIds?: string[];
+        };
+      } catch {
+        return;
+      }
+
+      if (payload.kind === "friends" || payload.kind === "inbox") {
+        void realtimeHandlersRef.current.loadFriends();
+        const selectedInboxId = selectedFriendInboxIdRef.current;
+        if (selectedInboxId) {
+          void realtimeHandlersRef.current.loadFriendInbox(selectedInboxId);
+        }
+      }
+
+      if (
+        payload.kind === "workspace" ||
+        payload.kind === "messages" ||
+        payload.kind === "public"
+      ) {
+        void realtimeHandlersRef.current.refreshCategoriesFromServer();
+        void realtimeHandlersRef.current.loadProjects();
+        const activeCategoryId = currentCategoryIdRef.current;
+        if (activeCategoryId) {
+          void realtimeHandlersRef.current.loadCategoryMessages(activeCategoryId);
+          void realtimeHandlersRef.current.loadCurrentPublicPanel(activeCategoryId);
+        }
+      }
+    };
+
+    const scheduleReconnect = () => {
+      if (stopped || document.visibilityState === "hidden") {
+        return;
+      }
+
+      closeEventSource();
+      const delay = Math.min(30000, 1000 * 2 ** reconnectAttempt);
+      reconnectAttempt = Math.min(reconnectAttempt + 1, 5);
+      clearReconnectTimer();
+      reconnectTimer = setTimeout(connect, delay);
+    };
+
+    function connect() {
+      if (stopped || document.visibilityState === "hidden" || eventSource) {
+        return;
+      }
+
+      eventSource = new EventSource(
+        `/api/sync/events?clientId=${encodeURIComponent(getClientId())}`
+      );
+      eventSource.addEventListener("open", () => {
+        reconnectAttempt = 0;
+      });
+      eventSource.addEventListener("itemkey", handleItemKeyEvent);
+      eventSource.onerror = scheduleReconnect;
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        clearReconnectTimer();
+        closeEventSource();
+        return;
+      }
+
+      reconnectAttempt = 0;
+      connect();
+    };
+
+    const startTimer = setTimeout(connect, 650);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      stopped = true;
+      clearTimeout(startTimer);
+      clearReconnectTimer();
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      closeEventSource();
+    };
+  }, [getClientId, isAuthenticated]);
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      return;
+    }
+
+    const refreshCollaboration = () => {
+      if (document.visibilityState === "hidden") {
+        return;
+      }
+
+      void loadFriends();
+      const selectedInboxId = selectedFriendInboxIdRef.current;
+      if (selectedInboxId) {
+        void loadFriendInbox(selectedInboxId);
+      }
+    };
+
+    if (showMenu && menuPanel === "friends") {
+      refreshCollaboration();
+    }
+
+    const interval = window.setInterval(
+      refreshCollaboration,
+      showMenu && menuPanel === "friends" ? 2500 : 8000
+    );
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refreshCollaboration();
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [isAuthenticated, loadFriendInbox, loadFriends, menuPanel, showMenu]);
 
   useEffect(() => {
     if (!isAuthenticated || !currentCategoryId) {
@@ -1922,6 +2620,24 @@ export default function CategoryWorkspace() {
 
     void loadCategoryMessages(currentCategoryId);
   }, [currentCategoryId, isAuthenticated, loadCategoryMessages]);
+
+  useEffect(() => {
+    if (
+      didAutoOpenMobileCategoriesRef.current ||
+      !isAuthenticated ||
+      isLoading ||
+      loadError ||
+      visibleCategories.length === 0 ||
+      typeof window === "undefined" ||
+      !window.matchMedia("(max-width: 900px)").matches
+    ) {
+      return;
+    }
+
+    didAutoOpenMobileCategoriesRef.current = true;
+    setShowMenu(false);
+    setMobilePanel((currentPanel) => currentPanel ?? "categories");
+  }, [isAuthenticated, isLoading, loadError, visibleCategories.length]);
 
   useEffect(() => {
     if (!selectedMessageId) {
@@ -1936,6 +2652,65 @@ export default function CategoryWorkspace() {
   useEffect(() => {
     setMessageTitleDraft(selectedMessage?.title ?? "");
   }, [selectedMessage?.id, selectedMessage?.title]);
+
+  useEffect(() => {
+    if (!dictionarySearchQuery.trim() || dictionarySearchMatches.length === 0) {
+      if (dictionarySearchActiveIndex !== 0) {
+        setDictionarySearchActiveIndex(0);
+      }
+      return;
+    }
+
+    if (dictionarySearchActiveIndex >= dictionarySearchMatches.length) {
+      setDictionarySearchActiveIndex(dictionarySearchMatches.length - 1);
+    }
+  }, [
+    dictionarySearchActiveIndex,
+    dictionarySearchMatches.length,
+    dictionarySearchQuery,
+  ]);
+
+  useEffect(() => {
+    if (!dictionarySearchShouldFocusRef.current) {
+      return;
+    }
+
+    if (dictionaryEditorTab !== "entries") {
+      return;
+    }
+
+    const activeMatch = dictionarySearchMatches[dictionarySearchActiveIndex];
+    if (!activeMatch) {
+      return;
+    }
+
+    const cellKey = makeDictionaryEditorCellKey(
+      activeMatch.entryId,
+      activeMatch.field
+    );
+    const textarea = dictionaryEditorCellRefsRef.current[cellKey];
+    if (!textarea) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      textarea.focus({ preventScroll: true });
+      textarea.setSelectionRange(activeMatch.start, activeMatch.end);
+      textarea.scrollIntoView({
+        block: "center",
+        inline: "center",
+        behavior: "smooth",
+      });
+      dictionarySearchShouldFocusRef.current = false;
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [
+    dictionaryEditorTab,
+    dictionarySearchActiveIndex,
+    dictionarySearchMatches,
+    dictionarySearchNavigationVersion,
+  ]);
 
   useEffect(() => {
     setShowCategoryTagSuggestions(false);
@@ -2128,6 +2903,7 @@ export default function CategoryWorkspace() {
 
     for (const editor of editors) {
       ensureRichImageDeleteLinesRef.current(editor);
+      ensureRichFileRowsRef.current(editor);
 
       for (const node of Array.from(
         editor.querySelectorAll<HTMLElement>(
@@ -2136,6 +2912,8 @@ export default function CategoryWorkspace() {
             `.${RICH_IMAGE_CLASS_NAME}.${RICH_IMAGE_DELETE_CONFIRM_CLASS_NAME}`,
             `.${RICH_IMAGE_DELETE_LINE_CLASS_NAME}.${RICH_IMAGE_DELETE_LINE_ACTIVE_CLASS_NAME}`,
             `.${RICH_FILE_CLASS_NAME}.${RICH_FILE_DELETE_CONFIRM_CLASS_NAME}`,
+            `.${RICH_FILE_CLASS_NAME}.${RICH_FILE_DRAGGING_CLASS_NAME}`,
+            `.${RICH_FILE_ROW_CLASS_NAME}.${RICH_FILE_DRAGGING_CLASS_NAME}`,
           ].join(",")
         )
       )) {
@@ -2143,6 +2921,7 @@ export default function CategoryWorkspace() {
         node.classList.remove(RICH_IMAGE_DELETE_CONFIRM_CLASS_NAME);
         node.classList.remove(RICH_IMAGE_DELETE_LINE_ACTIVE_CLASS_NAME);
         node.classList.remove(RICH_FILE_DELETE_CONFIRM_CLASS_NAME);
+        node.classList.remove(RICH_FILE_DRAGGING_CLASS_NAME);
       }
     }
 
@@ -2499,12 +3278,14 @@ export default function CategoryWorkspace() {
     const nextValue = sanitizeRichTextHtml(continuousDraft);
     if (sanitizeRichTextHtml(editor.innerHTML) === nextValue) {
       ensureRichImageDeleteLinesRef.current(editor);
+      ensureRichFileRowsRef.current(editor);
       applyRichImageDisplayScaleToEditor(editor, editorDisplayScale);
       return;
     }
 
     editor.innerHTML = nextValue;
     ensureRichImageDeleteLinesRef.current(editor);
+    ensureRichFileRowsRef.current(editor);
     applyRichImageDisplayScaleToEditor(editor, editorDisplayScale);
   }, [
     applyRichImageDisplayScaleToEditor,
@@ -2532,12 +3313,14 @@ export default function CategoryWorkspace() {
       const nextValue = normalizePersistedMessageContent(message.content);
       if (sanitizeRichTextHtml(editor.innerHTML) === nextValue) {
         ensureRichImageDeleteLinesRef.current(editor);
+        ensureRichFileRowsRef.current(editor);
         applyRichImageDisplayScaleToEditor(editor, editorDisplayScale);
         continue;
       }
 
       editor.innerHTML = nextValue;
       ensureRichImageDeleteLinesRef.current(editor);
+      ensureRichFileRowsRef.current(editor);
       applyRichImageDisplayScaleToEditor(editor, editorDisplayScale);
     }
   }, [
@@ -2578,6 +3361,7 @@ export default function CategoryWorkspace() {
         setConfirmDialog(null);
         setShowSearch(false);
         setShowMenu(false);
+        setMobilePanel(null);
         setShowCategoryTagLibrary(false);
         setShowProjectCreateModal(false);
         setShowTextColorPalette(false);
@@ -2620,7 +3404,7 @@ export default function CategoryWorkspace() {
       }
 
       event.preventDefault();
-      performWorkspaceUndoRef.current();
+      void performWorkspaceUndoRef.current();
     }
 
     window.addEventListener("keydown", handleWorkspaceUndoKey);
@@ -2637,108 +3421,155 @@ export default function CategoryWorkspace() {
 
     const shell = dictionaryStudyCardShellRef.current;
     const content = dictionaryStudyCardContentRef.current;
-    if (!shell || !content) {
+    const fit = dictionaryStudyCardFitRef.current;
+    if (!shell || !content || !fit) {
       return;
     }
 
     let animationFrameId = 0;
-    let secondAnimationFrameId = 0;
-
     const applyFit = () => {
-      const shellWidth = Math.max(1, shell.clientWidth - 4);
-      const shellHeight = Math.max(1, shell.clientHeight - 4);
       const rootFontSize =
         Number.parseFloat(window.getComputedStyle(document.documentElement).fontSize) ||
         16;
       const clampPx = (min: number, value: number, max: number) =>
         Math.max(min, Math.min(value, max));
+      const shellRect = shell.getBoundingClientRect();
+      const shellWidth = Math.max(1, shellRect.width);
+      const shellHeight = Math.max(1, shellRect.height);
       const baseWordSize = clampPx(
-        2 * rootFontSize,
-        window.innerWidth * 0.07,
-        5.1 * rootFontSize
+        2.25 * rootFontSize,
+        Math.min(shellWidth * 0.24, shellHeight * 0.54),
+        12 * rootFontSize
       );
       const baseNoteSize = clampPx(
-        0.95 * rootFontSize,
-        window.innerWidth * 0.022,
-        1.35 * rootFontSize
+        0.92 * rootFontSize,
+        Math.min(shellWidth * 0.028, shellHeight * 0.085),
+        1.45 * rootFontSize
       );
       const basePadding = clampPx(
-        0.9 * rootFontSize,
-        window.innerWidth * 0.03,
-        1.5 * rootFontSize
+        0.78 * rootFontSize,
+        Math.min(shellWidth * 0.035, shellHeight * 0.065),
+        1.45 * rootFontSize
       );
-      const baseGap = 0.75 * rootFontSize;
-      const baseNotePaddingY = 0.48 * rootFontSize;
-      const baseNotePaddingX = 0.65 * rootFontSize;
-      const applyScale = (scale: number) => {
-        content.style.setProperty("--dictionary-study-scale", String(scale));
+      const baseGap = clampPx(0.5 * rootFontSize, shellHeight * 0.025, 0.95 * rootFontSize);
+      const baseNotePaddingY = 0.46 * rootFontSize;
+      const baseNotePaddingX = 0.64 * rootFontSize;
+      const getScaleMetrics = (wordScale: number, noteScale: number) => {
+        const layoutScale = Math.min(wordScale, noteScale);
+        const nextPadding = Math.max(0.32 * rootFontSize, basePadding * layoutScale);
+        return {
+          layoutScale,
+          padding: nextPadding,
+          wordSize: Math.max(0.42 * rootFontSize, baseWordSize * wordScale),
+          noteSize: Math.max(0.55 * rootFontSize, baseNoteSize * noteScale),
+          gap: Math.max(
+            0.45 * rootFontSize,
+            baseGap * layoutScale,
+            baseWordSize * wordScale * 0.08
+          ),
+          notePaddingY: Math.max(0.18 * rootFontSize, baseNotePaddingY * noteScale),
+          notePaddingX: Math.max(0.26 * rootFontSize, baseNotePaddingX * noteScale),
+        };
+      };
+      const applyScale = (wordScale: number, noteScale: number) => {
+        const metrics = getScaleMetrics(wordScale, noteScale);
+        content.style.setProperty(
+          "--dictionary-study-scale",
+          String(metrics.layoutScale)
+        );
         content.style.setProperty(
           "--dictionary-study-word-size",
-          `${Math.max(0.9 * rootFontSize, baseWordSize * scale)}px`
+          `${metrics.wordSize}px`
         );
         content.style.setProperty(
           "--dictionary-study-note-size",
-          `${Math.max(0.62 * rootFontSize, baseNoteSize * scale)}px`
+          `${metrics.noteSize}px`
         );
-        content.style.setProperty(
-          "--dictionary-study-padding",
-          `${Math.max(0.42 * rootFontSize, basePadding * scale)}px`
-        );
-        content.style.setProperty(
-          "--dictionary-study-gap",
-          `${Math.max(0.22 * rootFontSize, baseGap * scale)}px`
-        );
+        content.style.setProperty("--dictionary-study-padding", `${metrics.padding}px`);
+        content.style.setProperty("--dictionary-study-gap", `${metrics.gap}px`);
         content.style.setProperty(
           "--dictionary-study-note-padding",
-          `${Math.max(0.24 * rootFontSize, baseNotePaddingY * scale)}px ${Math.max(
-            0.34 * rootFontSize,
-            baseNotePaddingX * scale
-          )}px`
+          `${metrics.notePaddingY}px ${metrics.notePaddingX}px`
         );
       };
-      let low = 0.32;
-      let high = 1;
-      let best = low;
 
-      for (let index = 0; index < 10; index += 1) {
-        const scale = (low + high) / 2;
-        applyScale(scale);
+      const fitsAtScale = (wordScale: number, noteScale: number) => {
+        const metrics = getScaleMetrics(wordScale, noteScale);
+        applyScale(wordScale, noteScale);
+        const availableWidth = shellWidth - metrics.padding * 2;
+        const availableHeight = shellHeight - metrics.padding * 2 - 8;
 
-        const fits =
-          content.scrollWidth <= shellWidth && content.scrollHeight <= shellHeight;
-        if (fits) {
-          best = scale;
-          low = scale;
-        } else {
-          high = scale;
+        return (
+          fit.scrollWidth <= Math.max(1, availableWidth) + 2 &&
+          fit.scrollHeight <= Math.max(1, availableHeight)
+        );
+      };
+
+      const findBestScale = (
+        minScale: number,
+        maxScale: number,
+        fits: (scale: number) => boolean
+      ) => {
+        let low = minScale;
+        let high = maxScale;
+        let best = fits(low) ? low : minScale;
+        if (fits(high)) {
+          return high;
         }
+
+        for (let index = 0; index < 12; index += 1) {
+          const scale = (low + high) / 2;
+
+          if (fits(scale)) {
+            best = scale;
+            low = scale;
+          } else {
+            high = scale;
+          }
+        }
+
+        if (!fits(best)) {
+          return minScale;
+        }
+
+        return best;
+      };
+
+      let wordScale = findBestScale(0.1, 1, (scale) =>
+        fitsAtScale(scale, 1)
+      );
+      let noteScale = 1;
+      if (!fitsAtScale(wordScale, noteScale)) {
+        noteScale = findBestScale(0.18, 1, (scale) =>
+          fitsAtScale(wordScale, scale)
+        );
+      }
+      if (!fitsAtScale(wordScale, noteScale)) {
+        wordScale = findBestScale(0.06, wordScale, (scale) =>
+          fitsAtScale(scale, noteScale)
+        );
       }
 
-      applyScale(best);
+      applyScale(wordScale, noteScale);
+      const cardScale = Math.min(wordScale, noteScale);
       setDictionaryStudyCardScale((prev) =>
-        Math.abs(prev - best) < 0.01 ? prev : best
+        Math.abs(prev - cardScale) < 0.01 ? prev : cardScale
       );
     };
 
     const scheduleFit = () => {
       window.cancelAnimationFrame(animationFrameId);
-      window.cancelAnimationFrame(secondAnimationFrameId);
-      animationFrameId = window.requestAnimationFrame(() => {
-        content.style.setProperty("--dictionary-study-scale", "1");
-        content.style.removeProperty("--dictionary-study-word-size");
-        content.style.removeProperty("--dictionary-study-note-size");
-        content.style.removeProperty("--dictionary-study-padding");
-        content.style.removeProperty("--dictionary-study-gap");
-        content.style.removeProperty("--dictionary-study-note-padding");
-        secondAnimationFrameId = window.requestAnimationFrame(applyFit);
-      });
+      animationFrameId = window.requestAnimationFrame(applyFit);
     };
 
-    scheduleFit();
+    applyFit();
+    const resizeObserver =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(scheduleFit);
+    resizeObserver?.observe(shell);
     window.addEventListener("resize", scheduleFit);
     return () => {
       window.cancelAnimationFrame(animationFrameId);
-      window.cancelAnimationFrame(secondAnimationFrameId);
+      resizeObserver?.disconnect();
       window.removeEventListener("resize", scheduleFit);
     };
   }, [
@@ -2785,6 +3616,7 @@ export default function CategoryWorkspace() {
       );
       richImageResizeStateRef.current = null;
       draggedRichImageRef.current = null;
+      draggedRichFileRef.current = null;
     };
   }, []);
 
@@ -2878,6 +3710,7 @@ export default function CategoryWorkspace() {
     const editor = getEditorElement(scope);
     if (editor) {
       ensureRichImageDeleteLinesIfNeeded(editor);
+      ensureRichFileRows(editor);
       return sanitizeRichTextHtml(editor.innerHTML);
     }
 
@@ -3069,7 +3902,87 @@ export default function CategoryWorkspace() {
     }
   }
 
-  function performWorkspaceUndo() {
+  async function restoreCategoryDeleteUndoEntry(
+    entry: Extract<WorkspaceUndoEntry, { kind: "category-delete" }>
+  ) {
+    setIsMutating(true);
+    try {
+      const response = await authorizedFetch("/api/categories/restore", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          document: entry.document,
+          projects: entry.projects.map((project) => ({
+            id: project.id,
+            containerCategoryIds: parsePlainList(project.container_category_ids),
+          })),
+        }),
+      });
+
+      const payload = (await response.json()) as CategoryRestorePayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Не удалось восстановить категорию.");
+      }
+
+      const restoredCategories = payload.data.categories.map(normalizeCategoryRow);
+      const restoredCategoryIds = new Set(
+        restoredCategories.map((category) => category.id)
+      );
+      const restoredMessagesByCategory: Record<string, MessageRow[]> = {};
+      for (const message of payload.data.messages.map(normalizeMessageRow)) {
+        const list = restoredMessagesByCategory[message.category_id] ?? [];
+        list.push(message);
+        restoredMessagesByCategory[message.category_id] = list;
+      }
+
+      setCategories((prev) =>
+        [
+          ...prev.filter((category) => !restoredCategoryIds.has(category.id)),
+          ...restoredCategories,
+        ].sort(sortByPosition)
+      );
+      setMessagesByCategory((prev) => ({
+        ...prev,
+        ...Object.fromEntries(
+          Object.entries(restoredMessagesByCategory).map(([categoryId, messages]) => [
+            categoryId,
+            messages.sort(sortMessages),
+          ])
+        ),
+      }));
+
+      for (const category of restoredCategories) {
+        savedCategoryContentRef.current[category.id] = category.content;
+        categoryDraftVersionRef.current[category.id] = 0;
+        categoryAckVersionRef.current[category.id] = 0;
+        clearCategorySaveState(category.id);
+      }
+
+      for (const messages of Object.values(restoredMessagesByCategory)) {
+        for (const message of messages) {
+          savedMessageContentRef.current[message.id] = message.content;
+          messageDraftVersionRef.current[message.id] = 0;
+          messageAckVersionRef.current[message.id] = 0;
+          clearMessageSaveState(message.id);
+        }
+      }
+
+      setProjects(
+        (payload.projects?.map(normalizeProjectRow) ?? entry.projects).sort(sortProjects)
+      );
+      setSource((prev) => payload.source ?? prev);
+      applyWorkspaceUiUndoSnapshot(entry.snapshot);
+      pushNotice(`Категория восстановлена: ${entry.document.categories[0]?.title ?? "#"}.`);
+    } catch (error) {
+      pushNotice(toErrorMessage(error, "Не удалось восстановить удалённую категорию."), "error");
+    } finally {
+      syncCategorySavingState();
+      syncMessageSavingState();
+      setIsMutating(false);
+    }
+  }
+
+  async function performWorkspaceUndo() {
     const entry = workspaceUndoStackRef.current.pop();
     refreshWorkspaceUndoAvailability();
     if (!entry) {
@@ -3082,8 +3995,10 @@ export default function CategoryWorkspace() {
         applyWorkspaceUiUndoSnapshot(entry.snapshot);
       } else if (entry.kind === "editor") {
         restoreEditorUndoEntry(entry);
-      } else {
+      } else if (entry.kind === "editors") {
         restoreEditorsUndoEntry(entry);
+      } else {
+        await restoreCategoryDeleteUndoEntry(entry);
       }
     } finally {
       window.setTimeout(() => {
@@ -3913,6 +4828,102 @@ export default function CategoryWorkspace() {
     }
   }
 
+  function ensureRichFileRows(editor: HTMLDivElement) {
+    const fileNodes = Array.from(
+      editor.querySelectorAll<HTMLAnchorElement>(`a.${RICH_FILE_CLASS_NAME}`)
+    );
+    const expectedRows = new Set<HTMLElement>();
+
+    for (const fileNode of fileNodes) {
+      const fileId = fileNode.getAttribute("data-rich-file-id")?.trim() ?? "";
+      if (!fileId) {
+        continue;
+      }
+
+      fileNode.setAttribute("contenteditable", "false");
+      fileNode.setAttribute("draggable", "true");
+
+      let row = getRichFileRowElementByChild(fileNode);
+      if (!row) {
+        row = createRichFileRowElement(editor.ownerDocument);
+        fileNode.insertAdjacentElement("beforebegin", row);
+      } else {
+        normalizeRichFileRowElement(row);
+      }
+
+      row.setAttribute("data-rich-file-id", fileId);
+
+      if (!row.contains(fileNode)) {
+        row.appendChild(fileNode);
+      }
+
+      let beforeLine =
+        getRichFileLineElementsFromRow(row).find(
+          (line) => line.getAttribute("data-rich-file-buffer-position") === "before"
+        ) ?? null;
+      let afterLine =
+        getRichFileLineElementsFromRow(row).find(
+          (line) => line.getAttribute("data-rich-file-buffer-position") === "after"
+        ) ?? null;
+
+      if (!beforeLine) {
+        beforeLine = createRichFileLineElement(editor.ownerDocument, fileId, "before");
+      }
+      if (!afterLine) {
+        afterLine = createRichFileLineElement(editor.ownerDocument, fileId, "after");
+      }
+
+      normalizeRichFileLineElement(beforeLine, fileId, "before");
+      normalizeRichFileLineElement(afterLine, fileId, "after");
+
+      for (const childNode of Array.from(row.childNodes)) {
+        if (childNode !== beforeLine && childNode !== fileNode && childNode !== afterLine) {
+          childNode.remove();
+        }
+      }
+
+      if (row.firstChild !== beforeLine) {
+        row.insertBefore(beforeLine, row.firstChild);
+      }
+      if (beforeLine.nextSibling !== fileNode) {
+        row.insertBefore(fileNode, beforeLine.nextSibling);
+      }
+      if (fileNode.nextSibling !== afterLine) {
+        row.insertBefore(afterLine, fileNode.nextSibling);
+      }
+
+      expectedRows.add(row);
+    }
+
+    for (const line of Array.from(
+      editor.querySelectorAll<HTMLElement>(`.${RICH_FILE_LINE_CLASS_NAME}`)
+    )) {
+      const parentRow = getRichFileRowElementFromNode(line);
+      if (!parentRow || !expectedRows.has(parentRow)) {
+        line.remove();
+      }
+    }
+
+    for (const row of Array.from(
+      editor.querySelectorAll<HTMLElement>(`.${RICH_FILE_ROW_CLASS_NAME}`)
+    )) {
+      if (expectedRows.has(row)) {
+        continue;
+      }
+
+      const fileNode = row.querySelector(`a.${RICH_FILE_CLASS_NAME}`);
+      if (fileNode && row.parentNode) {
+        while (row.firstChild) {
+          row.parentNode.insertBefore(row.firstChild, row);
+        }
+        row.remove();
+        continue;
+      }
+
+      row.remove();
+    }
+  }
+
   function hasRichImageArtifacts(editor: HTMLDivElement): boolean {
     return Boolean(
       editor.querySelector(
@@ -3986,12 +4997,140 @@ export default function CategoryWorkspace() {
     }
 
     if (node instanceof Element) {
-      return node.closest<HTMLAnchorElement>(`a.${RICH_FILE_CLASS_NAME}`);
+      return (
+        node.closest<HTMLAnchorElement>(`a.${RICH_FILE_CLASS_NAME}`) ??
+        node.querySelector<HTMLAnchorElement>(`a.${RICH_FILE_CLASS_NAME}`)
+      );
     }
 
     return (
       node.parentElement?.closest<HTMLAnchorElement>(`a.${RICH_FILE_CLASS_NAME}`) ?? null
     );
+  }
+
+  function createRichFileLineElement(
+    ownerDocument: Document,
+    fileId: string,
+    position: "before" | "after"
+  ): HTMLElement {
+    const line = ownerDocument.createElement("span");
+    line.className = RICH_FILE_LINE_CLASS_NAME;
+    line.setAttribute("data-rich-file-id", fileId);
+    line.setAttribute("data-rich-file-buffer-position", position);
+    line.setAttribute("contenteditable", "false");
+    line.setAttribute("draggable", "false");
+    line.setAttribute("aria-hidden", "true");
+    return line;
+  }
+
+  function normalizeRichFileLineElement(
+    line: HTMLElement,
+    fileId: string,
+    position: "before" | "after"
+  ) {
+    line.classList.add(RICH_FILE_LINE_CLASS_NAME);
+    line.setAttribute("data-rich-file-id", fileId);
+    line.setAttribute("data-rich-file-buffer-position", position);
+    line.setAttribute("contenteditable", "false");
+    line.setAttribute("draggable", "false");
+    line.setAttribute("aria-hidden", "true");
+    line.textContent = "";
+  }
+
+  function createRichFileRowElement(ownerDocument: Document): HTMLElement {
+    const row = ownerDocument.createElement("span");
+    row.className = `${RICH_FILE_ZONE_CLASS_NAME} ${RICH_FILE_ROW_CLASS_NAME}`;
+    row.setAttribute("data-rich-file-row", "true");
+    row.setAttribute("contenteditable", "false");
+    row.setAttribute("draggable", "false");
+    return row;
+  }
+
+  function normalizeRichFileRowElement(row: HTMLElement) {
+    row.classList.add(RICH_FILE_ZONE_CLASS_NAME);
+    row.classList.add(RICH_FILE_ROW_CLASS_NAME);
+    row.setAttribute("data-rich-file-row", "true");
+    row.setAttribute("contenteditable", "false");
+    row.setAttribute("draggable", "false");
+  }
+
+  function getRichFileRowElementByChild(child: Node | null): HTMLElement | null {
+    if (!(child instanceof Node)) {
+      return null;
+    }
+
+    const parent = child.parentElement;
+    if (!parent || !parent.classList.contains(RICH_FILE_ROW_CLASS_NAME)) {
+      return null;
+    }
+
+    return parent;
+  }
+
+  function getRichFileRowElementFromNode(node: Node | null): HTMLElement | null {
+    if (!node) {
+      return null;
+    }
+
+    if (
+      node instanceof HTMLElement &&
+      node.classList.contains(RICH_FILE_ROW_CLASS_NAME)
+    ) {
+      return node;
+    }
+
+    if (node instanceof Element) {
+      return node.closest<HTMLElement>(`.${RICH_FILE_ROW_CLASS_NAME}`);
+    }
+
+    return node.parentElement?.closest<HTMLElement>(`.${RICH_FILE_ROW_CLASS_NAME}`) ?? null;
+  }
+
+  function getRichFileLineElementsFromRow(row: HTMLElement): HTMLElement[] {
+    return Array.from(row.querySelectorAll<HTMLElement>(`.${RICH_FILE_LINE_CLASS_NAME}`));
+  }
+
+  function getRichFileLineElementFromEventTarget(
+    target: EventTarget | null
+  ): HTMLElement | null {
+    if (!(target instanceof Element)) {
+      return null;
+    }
+
+    return target.closest<HTMLElement>(`.${RICH_FILE_LINE_CLASS_NAME}`);
+  }
+
+  function placeCaretOutsideRichFileLine(line: HTMLElement): boolean {
+    const selection = window.getSelection();
+    const row = getRichFileRowElementFromNode(line);
+    if (!selection || !row) {
+      return false;
+    }
+
+    const range = document.createRange();
+    if (line.getAttribute("data-rich-file-buffer-position") === "before") {
+      range.setStartBefore(row);
+    } else {
+      range.setStartAfter(row);
+    }
+
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return true;
+  }
+
+  function createRichFileRowWithFile(
+    ownerDocument: Document,
+    fileNode: HTMLAnchorElement,
+    fileId: string
+  ): HTMLElement {
+    const row = createRichFileRowElement(ownerDocument);
+    row.appendChild(createRichFileLineElement(ownerDocument, fileId, "before"));
+    row.appendChild(fileNode);
+    row.appendChild(createRichFileLineElement(ownerDocument, fileId, "after"));
+    row.setAttribute("data-rich-file-id", fileId);
+    return row;
   }
 
   function getRichFileElementFromNodeOrBreakNeighbor(
@@ -4083,13 +5222,17 @@ export default function CategoryWorkspace() {
       return false;
     }
 
+    const fileRow = getRichFileRowElementByChild(fileNode);
+    const removableNode = fileRow ?? fileNode;
     const trailingBreak =
-      fileNode.nextSibling instanceof HTMLBRElement ? fileNode.nextSibling : null;
-    const previousSibling = fileNode.previousSibling;
+      !fileRow && fileNode.nextSibling instanceof HTMLBRElement
+        ? fileNode.nextSibling
+        : null;
+    const previousSibling = removableNode.previousSibling;
     const selectionApi = window.getSelection();
 
     pushEditorUndoSnapshot(selection.scope);
-    fileNode.remove();
+    removableNode.remove();
     trailingBreak?.remove();
 
     if (selectionApi) {
@@ -4348,6 +5491,12 @@ export default function CategoryWorkspace() {
       mimeType: fileMeta.mimeType,
       sizeBytes: fileMeta.sizeBytes,
     });
+    const fileId = fileNode.getAttribute("data-rich-file-id") ?? "";
+    const fileRowNode = createRichFileRowWithFile(
+      editor.ownerDocument,
+      fileNode,
+      fileId
+    );
 
     const selection = window.getSelection();
     if (selection) {
@@ -4355,22 +5504,11 @@ export default function CategoryWorkspace() {
       selection.addRange(range);
     }
 
-    range.insertNode(fileNode);
-    if (fileNode.previousSibling && !(fileNode.previousSibling instanceof HTMLBRElement)) {
-      fileNode.insertAdjacentElement("beforebegin", editor.ownerDocument.createElement("br"));
-    }
-
-    const trailingBreak =
-      fileNode.nextSibling instanceof HTMLBRElement
-        ? fileNode.nextSibling
-        : editor.ownerDocument.createElement("br");
-    if (!(fileNode.nextSibling instanceof HTMLBRElement)) {
-      fileNode.insertAdjacentElement("afterend", trailingBreak);
-    }
+    range.insertNode(fileRowNode);
 
     if (selection) {
       const nextRange = document.createRange();
-      nextRange.setStartAfter(trailingBreak);
+      nextRange.setStartAfter(fileRowNode);
       nextRange.collapse(true);
       selection.removeAllRanges();
       selection.addRange(nextRange);
@@ -4379,7 +5517,7 @@ export default function CategoryWorkspace() {
     setSelectedRichImage(null);
     setActiveRichImageDeleteLine(null);
     setActiveRichEditor(scope);
-    return fileNode.getAttribute("data-rich-file-id") ?? null;
+    return fileId || null;
   }
 
   async function insertRichImagesFromFiles(
@@ -5000,6 +6138,103 @@ export default function CategoryWorkspace() {
     return true;
   }
 
+  function moveDraggedRichFileToDropTarget(
+    targetScope: RichEditorScope,
+    targetEditor: HTMLDivElement
+  ): boolean {
+    const draggedFile = draggedRichFileRef.current;
+    if (!draggedFile) {
+      return false;
+    }
+
+    const sourceEditor = getEditorElement(draggedFile.scope);
+    if (!sourceEditor) {
+      draggedRichFileRef.current = null;
+      return false;
+    }
+
+    const sourceFileNode = getRichFileElementById(sourceEditor, draggedFile.fileId);
+    if (!sourceFileNode) {
+      draggedRichFileRef.current = null;
+      return false;
+    }
+
+    const selectionRange = ensureSelectionRangeInEditor(targetEditor);
+    if (!selectionRange) {
+      draggedRichFileRef.current = null;
+      return false;
+    }
+
+    const sourceRow = getRichFileRowElementByChild(sourceFileNode);
+    if (
+      sourceFileNode.contains(selectionRange.startContainer) ||
+      sourceRow?.contains(selectionRange.startContainer)
+    ) {
+      draggedRichFileRef.current = null;
+      sourceFileNode.classList.remove(RICH_FILE_DRAGGING_CLASS_NAME);
+      sourceRow?.classList.remove(RICH_FILE_DRAGGING_CLASS_NAME);
+      return false;
+    }
+
+    pushEditorUndoSnapshots(
+      isSameRichEditorScope(draggedFile.scope, targetScope)
+        ? [targetScope]
+        : [draggedFile.scope, targetScope]
+    );
+
+    if (sourceRow) {
+      sourceRow.remove();
+    } else {
+      sourceFileNode.remove();
+    }
+    sourceFileNode.classList.remove(RICH_FILE_DRAGGING_CLASS_NAME);
+    sourceRow?.classList.remove(RICH_FILE_DRAGGING_CLASS_NAME);
+
+    const targetRange = ensureSelectionRangeInEditor(targetEditor);
+    if (!targetRange) {
+      draggedRichFileRef.current = null;
+      return false;
+    }
+
+    const insertionRange = normalizeRichImageInsertionRange(targetEditor, targetRange);
+    const fileRowNode = createRichFileRowWithFile(
+      targetEditor.ownerDocument,
+      sourceFileNode,
+      draggedFile.fileId
+    );
+    const selection = window.getSelection();
+    if (selection) {
+      selection.removeAllRanges();
+      selection.addRange(insertionRange);
+    }
+
+    insertionRange.insertNode(fileRowNode);
+    ensureRichFileRows(sourceEditor);
+    ensureRichFileRows(targetEditor);
+
+    if (selection) {
+      const nextRange = document.createRange();
+      nextRange.setStartAfter(fileRowNode);
+      nextRange.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(nextRange);
+    }
+
+    if (isSameRichEditorScope(draggedFile.scope, targetScope)) {
+      applyEditorDomValue(targetScope, targetEditor);
+    } else {
+      applyEditorDomValue(draggedFile.scope, sourceEditor);
+      applyEditorDomValue(targetScope, targetEditor);
+    }
+
+    setSelectedRichImage(null);
+    setActiveRichImageDeleteLine(null);
+    rememberRichSelection(targetScope);
+    syncRichToolbarState(targetScope);
+    draggedRichFileRef.current = null;
+    return true;
+  }
+
   function handleRichEditorPointerDown(
     scope: RichEditorScope,
     event: React.PointerEvent<HTMLDivElement>
@@ -5010,6 +6245,19 @@ export default function CategoryWorkspace() {
 
     const editor = getEditorElement(scope);
     if (!editor) {
+      return;
+    }
+
+    const fileLineNode = getRichFileLineElementFromEventTarget(event.target);
+    if (fileLineNode && editor.contains(fileLineNode)) {
+      editor.focus();
+      if (placeCaretOutsideRichFileLine(fileLineNode)) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      setSelectedRichImage(null);
+      setActiveRichImageDeleteLine(null);
+      clearActiveRichImageResize(event.pointerId);
       return;
     }
 
@@ -5110,42 +6358,76 @@ export default function CategoryWorkspace() {
     }
 
     const imageNode = getRichImageElementFromEventTarget(event.target);
-    if (!imageNode || !editor.contains(imageNode)) {
+    if (imageNode && editor.contains(imageNode)) {
+      const imageId = imageNode.getAttribute("data-rich-image-id")?.trim();
+      const isDeleteConfirmTarget = Boolean(
+        richImageDeleteConfirm &&
+          richImageDeleteConfirm.imageId === imageId &&
+          isSameRichEditorScope(richImageDeleteConfirm.scope, scope)
+      );
+      if (!imageId || richImageResizeStateRef.current || isDeleteConfirmTarget) {
+        event.preventDefault();
+        return;
+      }
+
+      draggedRichImageRef.current = {
+        scope,
+        imageId,
+      };
+
+      imageNode.classList.add(RICH_IMAGE_DRAGGING_CLASS_NAME);
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", `rich-image:${imageId}`);
+      }
+
+      setSelectedRichImageInScope(scope, imageId);
       return;
     }
 
-    const imageId = imageNode.getAttribute("data-rich-image-id")?.trim();
-    const isDeleteConfirmTarget = Boolean(
-      richImageDeleteConfirm &&
-        richImageDeleteConfirm.imageId === imageId &&
-        isSameRichEditorScope(richImageDeleteConfirm.scope, scope)
+    const fileNode = getRichFileElementFromEventTarget(event.target);
+    if (!fileNode || !editor.contains(fileNode)) {
+      return;
+    }
+
+    const fileId = fileNode.getAttribute("data-rich-file-id")?.trim();
+    const isFileDeleteConfirmTarget = Boolean(
+      richFileDeleteConfirm &&
+        richFileDeleteConfirm.fileId === fileId &&
+        isSameRichEditorScope(richFileDeleteConfirm.scope, scope)
     );
-    if (!imageId || richImageResizeStateRef.current || isDeleteConfirmTarget) {
+    if (!fileId || isFileDeleteConfirmTarget) {
       event.preventDefault();
       return;
     }
 
-    draggedRichImageRef.current = {
+    draggedRichFileRef.current = {
       scope,
-      imageId,
+      fileId,
     };
 
-    imageNode.classList.add(RICH_IMAGE_DRAGGING_CLASS_NAME);
+    fileNode.classList.add(RICH_FILE_DRAGGING_CLASS_NAME);
+    getRichFileRowElementByChild(fileNode)?.classList.add(RICH_FILE_DRAGGING_CLASS_NAME);
     if (event.dataTransfer) {
       event.dataTransfer.effectAllowed = "move";
-      event.dataTransfer.setData("text/plain", `rich-image:${imageId}`);
+      event.dataTransfer.setData("text/plain", `rich-file:${fileId}`);
     }
 
-    setSelectedRichImageInScope(scope, imageId);
+    setSelectedRichImage(null);
+    setActiveRichImageDeleteLine(null);
   }
 
   function handleRichEditorDragEnd(event: DragEvent<HTMLElement>) {
     draggedRichImageRef.current = null;
+    draggedRichFileRef.current = null;
 
     for (const node of Array.from(
-      event.currentTarget.querySelectorAll<HTMLElement>(`.${RICH_IMAGE_DRAGGING_CLASS_NAME}`)
+      event.currentTarget.querySelectorAll<HTMLElement>(
+        `.${RICH_IMAGE_DRAGGING_CLASS_NAME}, .${RICH_FILE_DRAGGING_CLASS_NAME}`
+      )
     )) {
       node.classList.remove(RICH_IMAGE_DRAGGING_CLASS_NAME);
+      node.classList.remove(RICH_FILE_DRAGGING_CLASS_NAME);
     }
   }
 
@@ -5192,13 +6474,14 @@ export default function CategoryWorkspace() {
     }
 
     const hasDraggedRichImage = Boolean(draggedRichImageRef.current);
+    const hasDraggedRichFile = Boolean(draggedRichFileRef.current);
     const hasFilePayload = Array.from(transfer.types ?? []).includes("Files");
     const hasSupportedFile =
       hasFilePayload &&
       (Array.from(transfer.items ?? []).some((item) => item.kind === "file") ||
         transfer.items.length === 0);
 
-    if (!hasDraggedRichImage && !hasSupportedFile) {
+    if (!hasDraggedRichImage && !hasDraggedRichFile && !hasSupportedFile) {
       return;
     }
 
@@ -5219,8 +6502,9 @@ export default function CategoryWorkspace() {
     const droppedImageFiles = collectImageFilesFromTransfer(transfer);
     const droppedAttachmentFiles = collectAttachmentFilesFromTransfer(transfer);
     const hasDraggedRichImage = Boolean(draggedRichImageRef.current);
+    const hasDraggedRichFile = Boolean(draggedRichFileRef.current);
     const hasFilePayload = Array.from(transfer.types ?? []).includes("Files");
-    if (!hasDraggedRichImage && !hasFilePayload) {
+    if (!hasDraggedRichImage && !hasDraggedRichFile && !hasFilePayload) {
       return;
     }
 
@@ -5229,6 +6513,7 @@ export default function CategoryWorkspace() {
 
     if (
       !hasDraggedRichImage &&
+      !hasDraggedRichFile &&
       droppedImageFiles.length === 0 &&
       droppedAttachmentFiles.length === 0
     ) {
@@ -5242,10 +6527,12 @@ export default function CategoryWorkspace() {
     const editor = getEditorElement(scope);
     if (!editor) {
       draggedRichImageRef.current = null;
+      draggedRichFileRef.current = null;
       return;
     }
 
     ensureRichImageDeleteLines(editor);
+    ensureRichFileRows(editor);
 
     if (scope.kind === "block") {
       setSelectedMessageId(scope.messageId);
@@ -5259,6 +6546,9 @@ export default function CategoryWorkspace() {
 
     if (hasDraggedRichImage) {
       moveDraggedRichImageToDropTarget(scope, editor);
+    }
+    if (hasDraggedRichFile) {
+      moveDraggedRichFileToDropTarget(scope, editor);
     }
 
     let insertedImages = 0;
@@ -5281,6 +6571,7 @@ export default function CategoryWorkspace() {
     }
 
     ensureRichImageDeleteLines(editor);
+    ensureRichFileRows(editor);
   }
 
   function cancelRichImageDeleteConfirmation() {
@@ -5436,10 +6727,6 @@ export default function CategoryWorkspace() {
     setActiveRichImageDeleteLine(null);
   }
 
-  function handleRichEditorBeforeInput(scope: RichEditorScope) {
-    void scope;
-  }
-
   function handleRichEditorKeyDown(
     scope: RichEditorScope,
     event: React.KeyboardEvent<HTMLDivElement>
@@ -5459,6 +6746,7 @@ export default function CategoryWorkspace() {
         event.key === "ArrowDown")
     ) {
       ensureRichImageDeleteLinesIfNeeded(editor);
+      ensureRichFileRows(editor);
     }
 
     const fileDeleteSelection =
@@ -5729,12 +7017,8 @@ export default function CategoryWorkspace() {
   }
 
   function handleRichEditorInputActivity(scope: RichEditorScope) {
-    const editor = getEditorElement(scope);
-    applyRichImageDisplayScaleToEditor(editor, editorDisplayScale);
     setActiveRichEditorIfChanged(scope);
-    rememberCurrentEditorUndoHtml(scope, editor);
     rememberRichSelection(scope);
-    syncRichToolbarState(scope);
   }
 
   function handleRichEditorMouseUp(
@@ -5789,7 +7073,8 @@ export default function CategoryWorkspace() {
     }
 
     if (event.key === "Enter" || isPlainCharacterKey(event)) {
-      handleRichEditorInputActivity(scope);
+      setActiveRichEditorIfChanged(scope);
+      rememberRichSelection(scope);
       return;
     }
 
@@ -5851,7 +7136,7 @@ export default function CategoryWorkspace() {
     messageId: string,
     event: FormEvent<HTMLDivElement>
   ) {
-    if (!currentCategoryId) {
+    if (!currentCategoryId || !currentCategoryCanEdit) {
       return;
     }
 
@@ -5867,7 +7152,11 @@ export default function CategoryWorkspace() {
   }
 
   function handleContinuousEditorInput(event: FormEvent<HTMLDivElement>) {
-    if (!currentCategory || currentCategory.format !== "continuous") {
+    if (
+      !currentCategory ||
+      currentCategory.format !== "continuous" ||
+      !currentCategoryCanEdit
+    ) {
       return;
     }
 
@@ -5881,7 +7170,11 @@ export default function CategoryWorkspace() {
     handleRichEditorInputActivity(scope);
   }
 
-  function openCategory(categoryId: string, messageId?: string) {
+  function openCategory(
+    categoryId: string,
+    messageId?: string,
+    options?: OpenCategoryOptions
+  ) {
     if (currentCategoryId !== categoryId || selectedMessageId !== (messageId ?? null)) {
       pushUiUndoSnapshot();
     }
@@ -5893,6 +7186,7 @@ export default function CategoryWorkspace() {
     setDragChecklistItem(null);
     savedRichSelectionRef.current = null;
     draggedRichImageRef.current = null;
+    draggedRichFileRef.current = null;
     richImageResizeStateRef.current = null;
     setShowTextColorPalette(false);
     setShowLinkPlaceholderModal(false);
@@ -5904,12 +7198,24 @@ export default function CategoryWorkspace() {
       setSelectedMessageId(null);
     }
     setShowSearch(false);
+    if (!options?.keepMobilePanel) {
+      setMobilePanel(null);
+    }
     setShowCategoryTagLibrary(false);
     setShowProjectCreateModal(false);
     setChecklistEditor(null);
     setDictionaryEditor(null);
     setDictionaryStudy(null);
     setChecklistTagSearchQuery("");
+  }
+
+  function openMobilePanel(panel: Exclude<MobilePanel, null>) {
+    setMobilePanel(panel);
+    setShowMenu(false);
+  }
+
+  function closeMobilePanel() {
+    setMobilePanel(null);
   }
 
   function closeMenu() {
@@ -5919,6 +7225,9 @@ export default function CategoryWorkspace() {
 
   function openMenuPanel(panel: Exclude<MenuPanel, "main">) {
     setMenuPanel(panel);
+    if (panel === "friends") {
+      void loadFriends();
+    }
     pushNotice(
       panel === "account"
         ? "Открыт раздел «Аккаунт»."
@@ -5932,6 +7241,7 @@ export default function CategoryWorkspace() {
   }
 
   function toggleMenu() {
+    setMobilePanel(null);
     setShowMenu((prev) => {
       const next = !prev;
       if (next) {
@@ -5965,12 +7275,14 @@ export default function CategoryWorkspace() {
     setSelectedRichImage(null);
     savedRichSelectionRef.current = null;
     draggedRichImageRef.current = null;
+    draggedRichFileRef.current = null;
     richImageResizeStateRef.current = null;
     setShowTextColorPalette(false);
     setShowLinkPlaceholderModal(false);
     setLinkSelectionPreview("");
     setShowCategoryTagSuggestions(false);
     setShowCategoryTagLibrary(false);
+    setMobilePanel(null);
     setChecklistEditor(null);
     setDictionaryEditor(null);
     setDictionaryStudy(null);
@@ -5988,6 +7300,7 @@ export default function CategoryWorkspace() {
     setProjectTitleDraftsById((prev) =>
       mergeProjectTitleDraftMap(prev, sortedProjects)
     );
+    setMobilePanel(null);
     setShowProjectCreateModal(true);
   }
 
@@ -6427,9 +7740,12 @@ export default function CategoryWorkspace() {
       return;
     }
 
+    const shouldKeepMobileCategoriesOpen = mobilePanel === "categories";
     const parentId = currentCategory.parent_id;
     if (parentId && visibleCategoriesById.has(parentId)) {
-      openCategory(parentId);
+      openCategory(parentId, undefined, {
+        keepMobilePanel: shouldKeepMobileCategoriesOpen,
+      });
       return;
     }
 
@@ -6438,11 +7754,15 @@ export default function CategoryWorkspace() {
       setCurrentCategoryId(null);
       setInsertionTargetId(null);
       setSelectedMessageId(null);
+      if (!shouldKeepMobileCategoriesOpen) {
+        setMobilePanel(null);
+      }
     }
   }
 
   async function handleAddCategory() {
     const parentId = insertionTargetId ?? null;
+    const shouldKeepMobileCategoriesOpen = mobilePanel === "categories";
 
     if (!parentId && !isProjectMode) {
       pushNotice("Нажми на категорию, куда нужно добавить новую.", "warn");
@@ -6493,6 +7813,9 @@ export default function CategoryWorkspace() {
       categoryAckVersionRef.current[created.id] = 0;
       clearCategorySaveState(created.id);
       setSource((prev) => payload.source ?? prev);
+      openCategory(created.id, undefined, {
+        keepMobilePanel: shouldKeepMobileCategoriesOpen,
+      });
       pushNotice(`Создана категория: ${created.title}.`);
     } catch (error) {
       pushNotice(toErrorMessage(error, "Не удалось создать категорию."), "error");
@@ -6501,15 +7824,17 @@ export default function CategoryWorkspace() {
     }
   }
 
-  async function handleDeleteCategory() {
-    if (!insertionTargetId) {
+  async function deleteCategoryById(categoryId: string) {
+    if (!categoryId) {
       pushNotice("Выбери категорию для удаления.", "warn");
       return;
     }
 
-    const target = categories.find((node) => node.id === insertionTargetId);
+    const target = categories.find((node) => node.id === categoryId);
     if (!target) {
-      setInsertionTargetId(null);
+      if (insertionTargetId === categoryId) {
+        setInsertionTargetId(null);
+      }
       return;
     }
 
@@ -6520,6 +7845,31 @@ export default function CategoryWorkspace() {
 
     setIsMutating(true);
     try {
+      const shouldCreateDeleteUndo = target.access_role === "owner";
+      const undoSnapshot = shouldCreateDeleteUndo
+        ? captureWorkspaceUiUndoSnapshot()
+        : null;
+      const projectsBeforeDelete = shouldCreateDeleteUndo
+        ? projects.map(normalizeProjectRow)
+        : [];
+      let exportDocument: CategoryTreeDocument | null = null;
+
+      if (shouldCreateDeleteUndo) {
+        const exportResponse = await authorizedFetch(
+          `/api/categories/${target.id}/export`,
+          {
+            cache: "no-store",
+          }
+        );
+        const exportPayload = (await exportResponse.json()) as CategoryTreePayload;
+        if (!exportResponse.ok || !exportPayload.data) {
+          throw new Error(
+            exportPayload.error ?? "Не удалось подготовить восстановление категории."
+          );
+        }
+        exportDocument = exportPayload.data;
+      }
+
       const response = await authorizedFetch(`/api/categories/${target.id}`, {
         method: "DELETE",
       });
@@ -6599,6 +7949,14 @@ export default function CategoryWorkspace() {
       setCurrentCategoryId(nextCurrent);
       setSelectedMessageId(null);
       setInsertionTargetId(nextCurrent);
+      if (undoSnapshot && exportDocument) {
+        pushWorkspaceUndoEntry({
+          kind: "category-delete",
+          snapshot: undoSnapshot,
+          document: exportDocument,
+          projects: projectsBeforeDelete,
+        });
+      }
       setSource((prev) => payload.source ?? prev);
       pushNotice(`Удалена категория: ${target.title}.`);
     } catch (error) {
@@ -6606,6 +7964,48 @@ export default function CategoryWorkspace() {
     } finally {
       setIsMutating(false);
     }
+  }
+
+  async function confirmCategoryDeletion(target: CategoryRow): Promise<boolean> {
+    return requestConfirmation({
+      title: "Delete category",
+      message: `Delete "${target.title}" and all nested subcategories?`,
+      confirmLabel: "delete",
+      cancelLabel: "cancel",
+      tone: "danger",
+    });
+  }
+
+  async function handleDeleteCategory() {
+    if (!insertionTargetId) {
+      pushNotice("Select a category to delete.", "warn");
+      return;
+    }
+
+    const target = categories.find((node) => node.id === insertionTargetId);
+    if (!target) {
+      setInsertionTargetId(null);
+      return;
+    }
+
+    if (!(await confirmCategoryDeletion(target))) {
+      return;
+    }
+
+    await deleteCategoryById(target.id);
+  }
+
+  async function handleDeleteCategoryFromPanel(categoryId: string) {
+    const target = categories.find((node) => node.id === categoryId);
+    if (!target) {
+      return;
+    }
+
+    if (!(await confirmCategoryDeletion(target))) {
+      return;
+    }
+
+    await deleteCategoryById(target.id);
   }
 
   async function createMessageRequest(
@@ -7596,6 +8996,7 @@ export default function CategoryWorkspace() {
     setChecklistTagSearchQuery("");
     setDictionaryStudy(null);
     setDictionaryImportDraft("");
+    resetDictionaryEditorSearch();
     setDictionaryEditorTab("entries");
     setDictionaryEditor({
       source: currentCategory.format === "block" ? "block-message" : "continuous",
@@ -7607,6 +9008,9 @@ export default function CategoryWorkspace() {
       tagsDraft: "",
       promptSide: "side1",
       shuffle: false,
+      autoSpeak: false,
+      autoSpeakFields: [...DEFAULT_DICTIONARY_AUTO_SPEAK_FIELDS],
+      manualSpeakFields: [...DEFAULT_DICTIONARY_MANUAL_SPEAK_FIELDS],
       labels: createDefaultDictionaryLabels(),
       entries: [createEmptyDictionaryEntry()],
     });
@@ -7624,6 +9028,7 @@ export default function CategoryWorkspace() {
     setChecklistTagSearchQuery("");
     setDictionaryStudy(null);
     setDictionaryImportDraft("");
+    resetDictionaryEditorSearch();
     setDictionaryEditorTab("entries");
     setDictionaryEditor({
       source: "block-message",
@@ -7635,6 +9040,11 @@ export default function CategoryWorkspace() {
       tagsDraft: serializeDictionaryTags(payload.tags),
       promptSide: payload.promptSide,
       shuffle: payload.shuffle,
+      autoSpeak: payload.autoSpeak,
+      autoSpeakFields: normalizeDictionaryAutoSpeakFields(payload.autoSpeakFields),
+      manualSpeakFields: normalizeDictionaryManualSpeakFields(
+        payload.manualSpeakFields
+      ),
       labels: normalizeDictionaryLabels(payload.labels),
       entries: makeDictionaryEditorEntries(payload),
     });
@@ -7654,6 +9064,7 @@ export default function CategoryWorkspace() {
     setChecklistTagSearchQuery("");
     setDictionaryStudy(null);
     setDictionaryImportDraft("");
+    resetDictionaryEditorSearch();
     setDictionaryEditorTab("entries");
     setDictionaryEditor({
       source: "continuous",
@@ -7665,15 +9076,158 @@ export default function CategoryWorkspace() {
       tagsDraft: serializeDictionaryTags(dictionary.tags),
       promptSide: dictionary.promptSide,
       shuffle: dictionary.shuffle,
+      autoSpeak: dictionary.autoSpeak,
+      autoSpeakFields: normalizeDictionaryAutoSpeakFields(dictionary.autoSpeakFields),
+      manualSpeakFields: normalizeDictionaryManualSpeakFields(
+        dictionary.manualSpeakFields
+      ),
       labels: normalizeDictionaryLabels(dictionary.labels),
       entries: makeDictionaryEditorEntries(dictionary),
     });
   }
 
+  function moveContinuousDictionary(dictionaryId: string, offset: number) {
+    if (
+      !currentCategory ||
+      currentCategory.format !== "continuous" ||
+      !currentCategoryCanEdit
+    ) {
+      return;
+    }
+
+    const sourceDocument = getContinuousDocumentForCategory(currentCategory.id);
+    if (!sourceDocument || sourceDocument.dictionaries.length < 2) {
+      return;
+    }
+
+    const fromIndex = sourceDocument.dictionaries.findIndex(
+      (dictionary) => dictionary.id === dictionaryId
+    );
+    const toIndex = fromIndex + offset;
+    if (
+      fromIndex < 0 ||
+      toIndex < 0 ||
+      toIndex >= sourceDocument.dictionaries.length
+    ) {
+      return;
+    }
+
+    const nextDictionaries = [...sourceDocument.dictionaries];
+    const [moved] = nextDictionaries.splice(fromIndex, 1);
+    nextDictionaries.splice(toIndex, 0, moved);
+
+    commitContinuousDocumentForCategory(currentCategory.id, {
+      text: sourceDocument.text,
+      checklists: sourceDocument.checklists,
+      dictionaries: nextDictionaries,
+    });
+  }
+
+  function handleContinuousDictionaryDragStart(
+    event: DragEvent<HTMLButtonElement>,
+    dictionaryId: string
+  ) {
+    if (!currentCategoryCanEdit || continuousDictionaryCards.length < 2) {
+      event.preventDefault();
+      return;
+    }
+
+    event.stopPropagation();
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", dictionaryId);
+    }
+    setDragDictionaryId(dictionaryId);
+  }
+
+  function handleDropOnContinuousDictionary(targetDictionaryId: string) {
+    if (
+      !currentCategory ||
+      currentCategory.format !== "continuous" ||
+      !currentCategoryCanEdit ||
+      !dragDictionaryId ||
+      dragDictionaryId === targetDictionaryId
+    ) {
+      setDragDictionaryId(null);
+      return;
+    }
+
+    const sourceDocument = getContinuousDocumentForCategory(currentCategory.id);
+    if (!sourceDocument) {
+      setDragDictionaryId(null);
+      return;
+    }
+
+    const orderedIds = reorderIdListByTarget(
+      sourceDocument.dictionaries.map((dictionary) => dictionary.id),
+      dragDictionaryId,
+      targetDictionaryId
+    );
+    if (orderedIds.length !== sourceDocument.dictionaries.length) {
+      setDragDictionaryId(null);
+      return;
+    }
+
+    const byId = new Map(
+      sourceDocument.dictionaries.map((dictionary) => [dictionary.id, dictionary])
+    );
+    const nextDictionaries = orderedIds
+      .map((id) => byId.get(id))
+      .filter((dictionary): dictionary is DictionaryBlock => Boolean(dictionary));
+
+    commitContinuousDocumentForCategory(currentCategory.id, {
+      text: sourceDocument.text,
+      checklists: sourceDocument.checklists,
+      dictionaries: nextDictionaries,
+    });
+    setDragDictionaryId(null);
+  }
+
   function closeDictionaryEditor() {
     setDictionaryImportDraft("");
+    resetDictionaryEditorSearch();
     setDictionaryEditorTab("entries");
     setDictionaryEditor(null);
+  }
+
+  function resetDictionaryEditorSearch() {
+    dictionarySearchShouldFocusRef.current = false;
+    setDictionarySearchQuery("");
+    setDictionarySearchActiveIndex(0);
+    setDictionaryMobileSearchOpen(false);
+  }
+
+  function updateDictionaryEditorSearchQuery(value: string) {
+    dictionarySearchShouldFocusRef.current = false;
+    setDictionarySearchQuery(value);
+    setDictionarySearchActiveIndex(0);
+  }
+
+  function moveDictionaryEditorSearch(delta: number) {
+    if (dictionarySearchMatches.length === 0) {
+      return;
+    }
+
+    dictionarySearchShouldFocusRef.current = true;
+    setDictionarySearchActiveIndex((prev) =>
+      wrapIndex(prev + delta, dictionarySearchMatches.length)
+    );
+    setDictionarySearchNavigationVersion((prev) => prev + 1);
+  }
+
+  function handleDictionaryEditorSearchKeyDown(
+    event: React.KeyboardEvent<HTMLInputElement>
+  ) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      moveDictionaryEditorSearch(event.shiftKey ? -1 : 1);
+      return;
+    }
+
+    if (event.key === "Escape") {
+      event.preventDefault();
+      resetDictionaryEditorSearch();
+    }
   }
 
   function updateDictionaryEditorTitle(value: string) {
@@ -7698,6 +9252,101 @@ export default function CategoryWorkspace() {
 
   function updateDictionaryEditorShuffle(shuffle: boolean) {
     setDictionaryEditor((prev) => (prev ? { ...prev, shuffle } : prev));
+  }
+
+  function updateDictionaryEditorAutoSpeak(autoSpeak: boolean) {
+    setDictionaryEditor((prev) => {
+      if (!prev) {
+        return prev;
+      }
+
+      const autoSpeakFields =
+        autoSpeak && prev.autoSpeakFields.length === 0
+          ? [...DEFAULT_DICTIONARY_AUTO_SPEAK_FIELDS]
+          : prev.autoSpeakFields;
+
+      return { ...prev, autoSpeak, autoSpeakFields };
+    });
+  }
+
+  function toggleDictionaryEditorAutoSpeakField(field: DictionaryEntryField) {
+    if (!dictionaryEditor) {
+      return;
+    }
+
+    const visibleFields = normalizeDictionaryAutoSpeakFields(
+      dictionaryEditor.autoSpeakFields,
+      []
+    );
+    if (
+      dictionaryEditor.autoSpeak &&
+      visibleFields.includes(field) &&
+      visibleFields.length <= 1
+    ) {
+      pushNotice("Для автоозвучки нужна хотя бы одна выбранная сторона.", "warn");
+      return;
+    }
+
+    setDictionaryEditor((prev) => {
+      if (!prev) {
+        return prev;
+      }
+
+      const currentFields = normalizeDictionaryAutoSpeakFields(
+        prev.autoSpeakFields,
+        []
+      );
+      const isSelected = currentFields.includes(field);
+      if (isSelected) {
+        return {
+          ...prev,
+          autoSpeakFields: currentFields.filter((item) => item !== field),
+        };
+      }
+
+      return {
+        ...prev,
+        autoSpeakFields: [...currentFields, field],
+      };
+    });
+  }
+
+  function toggleDictionaryEditorManualSpeakField(field: DictionaryEntryField) {
+    if (!dictionaryEditor) {
+      return;
+    }
+
+    const visibleFields = normalizeDictionaryManualSpeakFields(
+      dictionaryEditor.manualSpeakFields,
+      []
+    );
+    if (visibleFields.includes(field) && visibleFields.length <= 1) {
+      pushNotice("Для кнопки озвучки нужно хотя бы одно выбранное поле.", "warn");
+      return;
+    }
+
+    setDictionaryEditor((prev) => {
+      if (!prev) {
+        return prev;
+      }
+
+      const currentFields = normalizeDictionaryManualSpeakFields(
+        prev.manualSpeakFields,
+        []
+      );
+      const isSelected = currentFields.includes(field);
+      if (isSelected) {
+        return {
+          ...prev,
+          manualSpeakFields: currentFields.filter((item) => item !== field),
+        };
+      }
+
+      return {
+        ...prev,
+        manualSpeakFields: [...currentFields, field],
+      };
+    });
   }
 
   function updateDictionaryEditorLabel(
@@ -7780,6 +9429,24 @@ export default function CategoryWorkspace() {
       return null;
     }
 
+    const autoSpeakFields = normalizeDictionaryAutoSpeakFields(
+      dictionaryEditor.autoSpeakFields,
+      []
+    );
+    if (dictionaryEditor.autoSpeak && autoSpeakFields.length === 0) {
+      pushNotice("Выбери хотя бы одно поле для автоозвучки.", "warn");
+      return null;
+    }
+
+    const manualSpeakFields = normalizeDictionaryManualSpeakFields(
+      dictionaryEditor.manualSpeakFields,
+      []
+    );
+    if (manualSpeakFields.length === 0) {
+      pushNotice("Выбери хотя бы одно поле для кнопки озвучки.", "warn");
+      return null;
+    }
+
     return {
       title: normalizeDictionaryTitle(dictionaryEditor.titleDraft),
       payload: {
@@ -7789,6 +9456,9 @@ export default function CategoryWorkspace() {
         tags: parseDictionaryTags(dictionaryEditor.tagsDraft),
         promptSide: dictionaryEditor.promptSide,
         shuffle: dictionaryEditor.shuffle,
+        autoSpeak: dictionaryEditor.autoSpeak,
+        autoSpeakFields,
+        manualSpeakFields,
         labels: normalizeDictionaryLabels(dictionaryEditor.labels),
         entries: validation.entries,
       },
@@ -7852,6 +9522,88 @@ export default function CategoryWorkspace() {
     }
   }
 
+  async function readInsertedDictionaryImportFile(file: File | null) {
+    if (!file) {
+      return;
+    }
+
+    try {
+      const text = await file.text();
+      setDictionaryImportDraft(text);
+      const parsed = parseDictionaryImportDraft(text, dictionaryEditor?.labels);
+      if (parsed.ok) {
+        pushNotice(`Файл прочитан: ${parsed.entries.length} пар.`);
+      } else {
+        pushNotice(parsed.error, "warn");
+      }
+    } catch (error) {
+      pushNotice(
+        toErrorMessage(error, "Не удалось прочитать файл импорта."),
+        "error"
+      );
+    }
+  }
+
+  function getDictionaryImportClipboardFile(
+    event: ClipboardEvent<HTMLTextAreaElement>
+  ): File | null {
+    const directFile = event.clipboardData.files?.[0] ?? null;
+    if (directFile) {
+      return directFile;
+    }
+
+    for (const item of Array.from(event.clipboardData.items ?? [])) {
+      if (item.kind !== "file") {
+        continue;
+      }
+
+      const file = item.getAsFile();
+      if (file) {
+        return file;
+      }
+    }
+
+    return null;
+  }
+
+  function handleDictionaryImportPaste(
+    event: ClipboardEvent<HTMLTextAreaElement>
+  ) {
+    const file = getDictionaryImportClipboardFile(event);
+    if (!file) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    void readInsertedDictionaryImportFile(file);
+  }
+
+  function handleDictionaryImportDragOver(
+    event: DragEvent<HTMLDivElement | HTMLTextAreaElement>
+  ) {
+    if (!Array.from(event.dataTransfer.types).includes("Files")) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "copy";
+  }
+
+  function handleDictionaryImportDrop(
+    event: DragEvent<HTMLDivElement | HTMLTextAreaElement>
+  ) {
+    const file = event.dataTransfer.files?.[0] ?? null;
+    if (!file) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    void readInsertedDictionaryImportFile(file);
+  }
+
   async function handleApplyDictionaryImport() {
     if (!dictionaryEditor) {
       return;
@@ -7888,6 +9640,13 @@ export default function CategoryWorkspace() {
               tagsDraft: serializeDictionaryTags(dictionaryImportPreview.payload.tags),
               promptSide: dictionaryImportPreview.payload.promptSide,
               shuffle: dictionaryImportPreview.payload.shuffle,
+              autoSpeak: dictionaryImportPreview.payload.autoSpeak,
+              autoSpeakFields: normalizeDictionaryAutoSpeakFields(
+                dictionaryImportPreview.payload.autoSpeakFields
+              ),
+              manualSpeakFields: normalizeDictionaryManualSpeakFields(
+                dictionaryImportPreview.payload.manualSpeakFields
+              ),
               labels: normalizeDictionaryLabels(dictionaryImportPreview.payload.labels),
               entries: makeDictionaryEditorEntries(dictionaryImportPreview.payload),
             }
@@ -7910,7 +9669,9 @@ export default function CategoryWorkspace() {
     pushNotice("Строки #DICT заменены импортом.");
   }
 
-  async function handleSaveDictionaryEditor() {
+  async function handleSaveDictionaryEditor(
+    options: { openStudyAfterSave?: boolean } = {}
+  ) {
     if (!dictionaryEditor) {
       return;
     }
@@ -7922,6 +9683,24 @@ export default function CategoryWorkspace() {
       return;
     }
 
+    const autoSpeakFields = normalizeDictionaryAutoSpeakFields(
+      dictionaryEditor.autoSpeakFields,
+      []
+    );
+    if (dictionaryEditor.autoSpeak && autoSpeakFields.length === 0) {
+      pushNotice("Выбери хотя бы одно поле для автоозвучки.", "warn");
+      return;
+    }
+
+    const manualSpeakFields = normalizeDictionaryManualSpeakFields(
+      dictionaryEditor.manualSpeakFields,
+      []
+    );
+    if (manualSpeakFields.length === 0) {
+      pushNotice("Выбери хотя бы одно поле для кнопки озвучки.", "warn");
+      return;
+    }
+
     const nextTitle = normalizeDictionaryTitle(dictionaryEditor.titleDraft);
     const nextPayload: MessageDictionaryPayload = {
       description: normalizeDictionaryDescription(
@@ -7930,10 +9709,27 @@ export default function CategoryWorkspace() {
       tags: parseDictionaryTags(dictionaryEditor.tagsDraft),
       promptSide: dictionaryEditor.promptSide,
       shuffle: dictionaryEditor.shuffle,
+      autoSpeak: dictionaryEditor.autoSpeak,
+      autoSpeakFields,
+      manualSpeakFields,
       labels: normalizeDictionaryLabels(dictionaryEditor.labels),
       entries: validation.entries,
     };
     const serializedContent = serializeMessageDictionaryContent(nextPayload);
+    const finishDictionarySave = (studyOptions: {
+      sourceCategoryId: string;
+      sourceMessageId: string | null;
+      dictionaryId: string | null;
+      title: string;
+      payload: MessageDictionaryPayload;
+    }) => {
+      if (options.openStudyAfterSave) {
+        openDictionaryStudy(studyOptions);
+        return;
+      }
+
+      closeDictionaryEditor();
+    };
 
     if (dictionaryEditor.source === "continuous") {
       const sourceDocument = getContinuousDocumentForCategory(sourceCategoryId);
@@ -7969,7 +9765,13 @@ export default function CategoryWorkspace() {
           dictionaries: nextDictionaries,
         });
         pushNotice("#DICT обновлен.");
-        closeDictionaryEditor();
+        finishDictionarySave({
+          sourceCategoryId,
+          sourceMessageId: null,
+          dictionaryId: dictionaryEditor.dictionaryId,
+          title: nextTitle,
+          payload: nextPayload,
+        });
         return;
       }
 
@@ -7985,11 +9787,18 @@ export default function CategoryWorkspace() {
         dictionaries: [...sourceDocument.dictionaries, createdDictionary],
       });
       pushNotice("#DICT добавлен.");
-      closeDictionaryEditor();
+      finishDictionarySave({
+        sourceCategoryId,
+        sourceMessageId: null,
+        dictionaryId: createdDictionary.id,
+        title: nextTitle,
+        payload: nextPayload,
+      });
       return;
     }
 
     if (!dictionaryEditor.sourceMessageId) {
+      let shouldCloseEditor = true;
       setIsMutating(true);
       try {
         const created = await createMessageRequest(
@@ -8010,11 +9819,23 @@ export default function CategoryWorkspace() {
         }));
         setSelectedMessageId(created.id);
         pushNotice("#DICT добавлен.");
+        if (options.openStudyAfterSave) {
+          shouldCloseEditor = false;
+          openDictionaryStudy({
+            sourceCategoryId,
+            sourceMessageId: created.id,
+            dictionaryId: null,
+            title: nextTitle,
+            payload: nextPayload,
+          });
+        }
       } catch (error) {
         pushNotice(toErrorMessage(error, "Не удалось добавить #DICT."), "error");
       } finally {
         setIsMutating(false);
-        closeDictionaryEditor();
+        if (shouldCloseEditor) {
+          closeDictionaryEditor();
+        }
       }
       return;
     }
@@ -8051,12 +9872,23 @@ export default function CategoryWorkspace() {
       ),
     }));
 
+    let shouldCloseEditor = true;
     try {
       await patchMessage(targetMessage.id, sourceCategoryId, {
         title: nextTitle,
         content: serializedContent,
       });
       pushNotice("#DICT обновлен.");
+      if (options.openStudyAfterSave) {
+        shouldCloseEditor = false;
+        openDictionaryStudy({
+          sourceCategoryId,
+          sourceMessageId: targetMessage.id,
+          dictionaryId: null,
+          title: nextTitle,
+          payload: nextPayload,
+        });
+      }
     } catch (error) {
       setMessagesByCategory((prev) => ({
         ...prev,
@@ -8072,7 +9904,9 @@ export default function CategoryWorkspace() {
       }));
       pushNotice(toErrorMessage(error, "Не удалось обновить #DICT."), "error");
     } finally {
-      closeDictionaryEditor();
+      if (shouldCloseEditor) {
+        closeDictionaryEditor();
+      }
     }
   }
 
@@ -8167,11 +10001,48 @@ export default function CategoryWorkspace() {
   }
 
   function cancelDictionarySpeech() {
+    if (dictionaryAutoSpeechTimerRef.current) {
+      clearTimeout(dictionaryAutoSpeechTimerRef.current);
+      dictionaryAutoSpeechTimerRef.current = null;
+    }
+
     if (typeof window === "undefined" || !("speechSynthesis" in window)) {
       return;
     }
 
     window.speechSynthesis.cancel();
+  }
+
+  function commitDictionaryStudyState(
+    nextStudy: DictionaryStudyState,
+    options: { autoSpeak?: boolean } = {}
+  ) {
+    saveDictionaryStudyProgress(nextStudy);
+    setDictionaryStudy(nextStudy);
+
+    if (options.autoSpeak) {
+      queueDictionaryAutoSpeech(nextStudy);
+    }
+  }
+
+  function queueDictionaryAutoSpeech(study: DictionaryStudyState) {
+    if (!study.autoSpeak || typeof window === "undefined") {
+      return;
+    }
+
+    if (dictionaryAutoSpeechTimerRef.current) {
+      clearTimeout(dictionaryAutoSpeechTimerRef.current);
+    }
+
+    dictionaryAutoSpeechTimerRef.current = window.setTimeout(() => {
+      dictionaryAutoSpeechTimerRef.current = null;
+      speakDictionaryStudyTextSegments(
+        getDictionaryStudyActiveTextSegments(study, "auto"),
+        {
+          warn: false,
+        }
+      );
+    }, 120);
   }
 
   function openDictionaryStudy(options: {
@@ -8182,32 +10053,50 @@ export default function CategoryWorkspace() {
     payload: MessageDictionaryPayload;
   }) {
     const payload = options.payload;
-    const cards =
-      payload.shuffle && payload.entries.length > 1
-        ? shuffleDictionaryEntries(payload.entries)
-        : [...payload.entries];
+    const baseCards = [...payload.entries];
+    const defaultCards =
+      payload.shuffle && baseCards.length > 1
+        ? shuffleDictionaryEntries(baseCards)
+        : baseCards;
 
-    if (cards.length === 0) {
+    if (defaultCards.length === 0) {
       pushNotice("Добавь пары в словарь перед заучиванием.", "warn");
       return;
     }
 
-    cancelDictionarySpeech();
-    setChecklistEditor(null);
-    setDictionaryEditor(null);
-    setDictionaryImportDraft("");
-    setDictionaryStudy({
+    const progressKey = makeDictionaryStudyProgressKey(options);
+    const restoredProgress = restoreDictionaryStudyProgress(
+      readDictionaryStudyProgress(progressKey),
+      baseCards,
+      defaultCards,
+      payload.shuffle
+    );
+    const nextStudy: DictionaryStudyState = {
       sourceCategoryId: options.sourceCategoryId,
       sourceMessageId: options.sourceMessageId,
       dictionaryId: options.dictionaryId,
       title: options.title,
       promptSide: payload.promptSide,
       labels: normalizeDictionaryLabels(payload.labels),
-      cards,
-      currentIndex: 0,
-      isAnswerRevealed: false,
+      baseCards,
+      cards: restoredProgress.cards,
+      shuffle: payload.shuffle,
+      autoSpeak: payload.autoSpeak,
+      autoSpeakFields: normalizeDictionaryAutoSpeakFields(payload.autoSpeakFields),
+      manualSpeakFields: normalizeDictionaryManualSpeakFields(
+        payload.manualSpeakFields
+      ),
+      progressKey,
+      currentIndex: restoredProgress.currentIndex,
+      isAnswerRevealed: restoredProgress.isAnswerRevealed,
       transitionKey: 0,
-    });
+    };
+
+    cancelDictionarySpeech();
+    setChecklistEditor(null);
+    setDictionaryEditor(null);
+    setDictionaryImportDraft("");
+    commitDictionaryStudyState(nextStudy, { autoSpeak: true });
   }
 
   function closeDictionaryStudy() {
@@ -8215,36 +10104,213 @@ export default function CategoryWorkspace() {
     setDictionaryStudy(null);
   }
 
-  function toggleDictionaryStudySide() {
+  function openDictionaryEditorFromStudy() {
+    if (!dictionaryStudy) {
+      return;
+    }
+
     cancelDictionarySpeech();
-    setDictionaryStudy((prev) =>
-      prev
-        ? {
-            ...prev,
-            isAnswerRevealed: !prev.isAnswerRevealed,
-            transitionKey: prev.transitionKey + 1,
-          }
-        : prev
+    setChecklistEditor(null);
+    setChecklistTagSearchQuery("");
+    setDictionaryImportDraft("");
+    resetDictionaryEditorSearch();
+    setDictionaryEditorTab("entries");
+
+    if (dictionaryStudy.dictionaryId) {
+      const sourceDocument = getContinuousDocumentForCategory(
+        dictionaryStudy.sourceCategoryId
+      );
+      const dictionary = sourceDocument?.dictionaries.find(
+        (item) => item.id === dictionaryStudy.dictionaryId
+      );
+      if (!dictionary) {
+        pushNotice("Не удалось открыть настройки словаря.", "warn");
+        return;
+      }
+
+      setDictionaryStudy(null);
+      setDictionaryEditor({
+        source: "continuous",
+        sourceCategoryId: dictionaryStudy.sourceCategoryId,
+        sourceMessageId: null,
+        dictionaryId: dictionary.id,
+        titleDraft: dictionary.title,
+        descriptionDraft: dictionary.description,
+        tagsDraft: serializeDictionaryTags(dictionary.tags),
+        promptSide: dictionary.promptSide,
+        shuffle: dictionary.shuffle,
+        autoSpeak: dictionary.autoSpeak,
+        autoSpeakFields: normalizeDictionaryAutoSpeakFields(
+          dictionary.autoSpeakFields
+        ),
+        manualSpeakFields: normalizeDictionaryManualSpeakFields(
+          dictionary.manualSpeakFields
+        ),
+        labels: normalizeDictionaryLabels(dictionary.labels),
+        entries: makeDictionaryEditorEntries(dictionary),
+      });
+      return;
+    }
+
+    if (!dictionaryStudy.sourceMessageId) {
+      pushNotice("Не удалось найти словарь для настроек.", "warn");
+      return;
+    }
+
+    const message = (messagesByCategory[dictionaryStudy.sourceCategoryId] ?? []).find(
+      (item) => item.id === dictionaryStudy.sourceMessageId
+    );
+    const payload = parseMessageDictionaryContent(message?.content ?? "");
+    if (!message || !payload) {
+      pushNotice("Не удалось открыть настройки словаря.", "warn");
+      return;
+    }
+
+    setSelectedMessageId(message.id);
+    setDictionaryStudy(null);
+    setDictionaryEditor({
+      source: "block-message",
+      sourceCategoryId: dictionaryStudy.sourceCategoryId,
+      sourceMessageId: message.id,
+      dictionaryId: null,
+      titleDraft: message.title,
+      descriptionDraft: payload.description,
+      tagsDraft: serializeDictionaryTags(payload.tags),
+      promptSide: payload.promptSide,
+      shuffle: payload.shuffle,
+      autoSpeak: payload.autoSpeak,
+      autoSpeakFields: normalizeDictionaryAutoSpeakFields(payload.autoSpeakFields),
+      manualSpeakFields: normalizeDictionaryManualSpeakFields(
+        payload.manualSpeakFields
+      ),
+      labels: normalizeDictionaryLabels(payload.labels),
+      entries: makeDictionaryEditorEntries(payload),
+    });
+  }
+
+  function toggleDictionaryStudySide() {
+    if (!dictionaryStudy) {
+      return;
+    }
+
+    cancelDictionarySpeech();
+    commitDictionaryStudyState(
+      {
+        ...dictionaryStudy,
+        isAnswerRevealed: !dictionaryStudy.isAnswerRevealed,
+        transitionKey: dictionaryStudy.transitionKey + 1,
+      },
+      { autoSpeak: true }
     );
   }
 
   function moveDictionaryStudy(offset: number) {
+    if (!dictionaryStudy || dictionaryStudy.cards.length === 0) {
+      return;
+    }
+
     cancelDictionarySpeech();
-    setDictionaryStudy((prev) => {
-      if (!prev || prev.cards.length === 0) {
-        return prev;
-      }
+    const nextIndex =
+      (dictionaryStudy.currentIndex + offset + dictionaryStudy.cards.length) %
+      dictionaryStudy.cards.length;
 
-      const nextIndex =
-        (prev.currentIndex + offset + prev.cards.length) % prev.cards.length;
-
-      return {
-        ...prev,
+    commitDictionaryStudyState(
+      {
+        ...dictionaryStudy,
         currentIndex: nextIndex,
         isAnswerRevealed: false,
-        transitionKey: prev.transitionKey + 1,
-      };
-    });
+        transitionKey: dictionaryStudy.transitionKey + 1,
+      },
+      { autoSpeak: true }
+    );
+  }
+
+  function setDictionaryStudyShuffle(shuffle: boolean) {
+    if (!dictionaryStudy) {
+      return;
+    }
+
+    cancelDictionarySpeech();
+    const nextCards =
+      shuffle && dictionaryStudy.baseCards.length > 1
+        ? shuffleDictionaryEntries(dictionaryStudy.baseCards)
+        : [...dictionaryStudy.baseCards];
+
+    commitDictionaryStudyState(
+      {
+        ...dictionaryStudy,
+        cards: nextCards,
+        shuffle,
+        currentIndex: 0,
+        isAnswerRevealed: false,
+        transitionKey: dictionaryStudy.transitionKey + 1,
+      },
+      { autoSpeak: true }
+    );
+  }
+
+  function resetDictionaryStudyProgress() {
+    if (!dictionaryStudy) {
+      return;
+    }
+
+    cancelDictionarySpeech();
+    const nextCards =
+      dictionaryStudy.shuffle && dictionaryStudy.baseCards.length > 1
+        ? shuffleDictionaryEntries(dictionaryStudy.baseCards)
+        : [...dictionaryStudy.baseCards];
+
+    commitDictionaryStudyState(
+      {
+        ...dictionaryStudy,
+        cards: nextCards,
+        currentIndex: 0,
+        isAnswerRevealed: false,
+        transitionKey: dictionaryStudy.transitionKey + 1,
+      },
+      { autoSpeak: true }
+    );
+  }
+
+  function resolveDictionarySpeechLanguage(text: string): string {
+    const latinCount = text.match(/[A-Za-z]/g)?.length ?? 0;
+    const cyrillicCount = text.match(/[А-Яа-яЁё]/g)?.length ?? 0;
+    const startsWithLatin = /^[^A-Za-zА-Яа-яЁё]*[A-Za-z]/.test(text);
+
+    if (latinCount > 0 && (startsWithLatin || latinCount >= cyrillicCount)) {
+      return "en-US";
+    }
+
+    if (cyrillicCount > 0) {
+      return "ru-RU";
+    }
+
+    return window.navigator.language || "ru-RU";
+  }
+
+  function getDictionarySpeechVoice(lang: string): SpeechSynthesisVoice | null {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      return null;
+    }
+
+    const voices = window.speechSynthesis.getVoices();
+    if (voices.length === 0) {
+      return null;
+    }
+
+    const exact = voices.find(
+      (voice) => voice.lang.toLocaleLowerCase() === lang.toLocaleLowerCase()
+    );
+    if (exact) {
+      return exact;
+    }
+
+    const languagePrefix = lang.split("-")[0]?.toLocaleLowerCase() ?? "";
+    return (
+      voices.find((voice) =>
+        voice.lang.toLocaleLowerCase().startsWith(`${languagePrefix}-`)
+      ) ?? null
+    );
   }
 
   function speakDictionaryStudyCurrentCard() {
@@ -8252,19 +10318,24 @@ export default function CategoryWorkspace() {
       return;
     }
 
-    const currentEntry = dictionaryStudy.cards[dictionaryStudy.currentIndex] ?? null;
-    if (!currentEntry) {
-      return;
-    }
+    speakDictionaryStudyTextSegments(
+      getDictionaryStudyActiveTextSegments(dictionaryStudy, "manual"),
+      {
+        warn: true,
+      }
+    );
+  }
 
-    const activeSide = dictionaryStudy.isAnswerRevealed
-      ? oppositeDictionaryPromptSide(dictionaryStudy.promptSide)
-      : dictionaryStudy.promptSide;
-    const activeText = getDictionaryEntrySideText(currentEntry, activeSide);
-    const textToSpeak = activeText.trim();
+  function speakDictionaryStudyTextSegments(
+    segments: string[],
+    options: { warn: boolean }
+  ) {
+    const textSegments = segments.map((text) => text.trim()).filter(Boolean);
 
-    if (!textToSpeak) {
-      pushNotice("На карточке нечего озвучить.", "warn");
+    if (textSegments.length === 0) {
+      if (options.warn) {
+        pushNotice("На карточке нечего озвучить.", "warn");
+      }
       return;
     }
 
@@ -8273,15 +10344,23 @@ export default function CategoryWorkspace() {
       !("speechSynthesis" in window) ||
       typeof SpeechSynthesisUtterance === "undefined"
     ) {
-      pushNotice("Браузер не поддерживает озвучку.", "warn");
+      if (options.warn) {
+        pushNotice("Браузер не поддерживает озвучку.", "warn");
+      }
       return;
     }
 
     window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(textToSpeak);
-    utterance.lang =
-      document.documentElement.lang || window.navigator.language || "ru-RU";
-    window.speechSynthesis.speak(utterance);
+    for (const textToSpeak of textSegments) {
+      const speechLanguage = resolveDictionarySpeechLanguage(textToSpeak);
+      const utterance = new SpeechSynthesisUtterance(textToSpeak);
+      utterance.lang = speechLanguage;
+      const voice = getDictionarySpeechVoice(speechLanguage);
+      if (voice) {
+        utterance.voice = voice;
+      }
+      window.speechSynthesis.speak(utterance);
+    }
   }
 
   function toggleChecklistMessageCategoryCheckState(
@@ -9156,6 +11235,10 @@ export default function CategoryWorkspace() {
 
       setAuthLoginPassword("");
       setShowAuthLoginPassword(false);
+      const workspaceReady = await loadWorkspaceBootstrap();
+      if (!workspaceReady) {
+        return;
+      }
       pushNotice("Вход выполнен.");
     } catch (error) {
       setAuthError(toErrorMessage(error, "Не удалось войти в аккаунт."));
@@ -9253,6 +11336,10 @@ export default function CategoryWorkspace() {
       setAuthRegisterPasswordRepeat("");
       setShowAuthRegisterPassword(false);
       setAuthInfo(null);
+      const workspaceReady = await loadWorkspaceBootstrap();
+      if (!workspaceReady) {
+        return;
+      }
       pushNotice("Аккаунт создан и вход выполнен.");
     } catch (error) {
       setAuthError(toErrorMessage(error, "Не удалось создать аккаунт."));
@@ -9490,6 +11577,379 @@ export default function CategoryWorkspace() {
     }
   }
 
+  async function handleSendFriendRequest() {
+    const normalized = normalizeUserId(friendRequestUserIdDraft);
+    const validation = validateUserId(normalized);
+    if (validation) {
+      pushNotice(validation, "warn");
+      return;
+    }
+
+    setIsSavingFriendAction(true);
+    try {
+      const response = await authorizedFetch("/api/friends/request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: normalized }),
+      });
+      const payload = (await response.json()) as FriendPayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Не удалось отправить приглашение.");
+      }
+
+      setFriendRequestUserIdDraft("");
+      await loadFriends();
+      pushNotice("Приглашение в друзья отправлено.");
+    } catch (error) {
+      pushNotice(toErrorMessage(error, "Не удалось отправить приглашение."), "error");
+    } finally {
+      setIsSavingFriendAction(false);
+    }
+  }
+
+  async function handleAcceptFriendRequest(friend: FriendRow) {
+    if (friend.direction !== "incoming" || friend.status !== "pending") {
+      return;
+    }
+
+    setIsSavingFriendAction(true);
+    try {
+      const response = await authorizedFetch("/api/friends/accept", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ friendAppUserId: friend.friendAppUserId }),
+      });
+      const payload = (await response.json()) as FriendPayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Не удалось принять приглашение.");
+      }
+
+      await loadFriends();
+      pushNotice("Друг добавлен.");
+    } catch (error) {
+      pushNotice(toErrorMessage(error, "Не удалось принять приглашение."), "error");
+    } finally {
+      setIsSavingFriendAction(false);
+    }
+  }
+
+  async function handleDeclineFriendRequest(friend: FriendRow) {
+    if (friend.direction !== "incoming" || friend.status !== "pending") {
+      return;
+    }
+
+    setIsSavingFriendAction(true);
+    try {
+      const response = await authorizedFetch("/api/friends/decline", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ friendAppUserId: friend.friendAppUserId }),
+      });
+      const payload = (await response.json()) as FriendPayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Не удалось отклонить приглашение.");
+      }
+
+      await loadFriends();
+      pushNotice("Приглашение отклонено.");
+    } catch (error) {
+      pushNotice(toErrorMessage(error, "Не удалось отклонить приглашение."), "error");
+    } finally {
+      setIsSavingFriendAction(false);
+    }
+  }
+
+  function handleToggleFriendInbox(friendAppUserId: string) {
+    setSelectedFriendInboxId((prev) => {
+      const next = prev === friendAppUserId ? null : friendAppUserId;
+      if (next) {
+        void loadFriendInbox(next);
+      }
+      return next;
+    });
+  }
+
+  async function handleShareCurrentCategory() {
+    if (!currentCategory) {
+      return;
+    }
+
+    if (!currentCategoryCanEdit) {
+      pushNotice("Категорию в режиме просмотра нельзя отправить.", "warn");
+      return;
+    }
+
+    if (!shareFriendId) {
+      pushNotice("Выбери друга для отправки категории.", "warn");
+      return;
+    }
+
+    setIsSavingInboxAction(true);
+    try {
+      const response = await authorizedFetch(`/api/categories/${currentCategory.id}/share`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ friendAppUserId: shareFriendId }),
+      });
+      const payload = (await response.json()) as InboxItemPayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Не удалось отправить категорию.");
+      }
+
+      setShareFriendId("");
+      await loadFriends();
+      pushNotice("Категория отправлена в inbox друга.");
+    } catch (error) {
+      pushNotice(toErrorMessage(error, "Не удалось отправить категорию."), "error");
+    } finally {
+      setIsSavingInboxAction(false);
+    }
+  }
+
+  async function handleAcceptInboxItem(item: InboxItemRow) {
+    let targetParentId: string | null = null;
+    if (item.type === "category_share" || item.type === "public_invite") {
+      if (localCategoryOptions.length === 0) {
+        pushNotice("Нет локальной категории для импорта.", "warn");
+        return;
+      }
+
+      targetParentId = inboxImportTargetIds[item.id] ?? "";
+      if (!targetParentId) {
+        pushNotice("Выбери локальную категорию для импорта.", "warn");
+        return;
+      }
+    }
+
+    setIsSavingInboxAction(true);
+    try {
+      const response = await authorizedFetch(`/api/inbox/${item.id}/accept`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ targetParentId }),
+      });
+      const payload = (await response.json()) as InboxAcceptPayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Не удалось принять inbox-сообщение.");
+      }
+
+      if (selectedFriendInboxId) {
+        await loadFriendInbox(selectedFriendInboxId);
+      }
+      await loadFriends();
+      await refreshCategoriesFromServer();
+      setInboxImportTargetIds((prev) => {
+        const next = { ...prev };
+        delete next[item.id];
+        return next;
+      });
+      if (payload.data.categories[0]) {
+        openCategory(payload.data.categories[0].id);
+      }
+      pushNotice(item.type === "public_invite" ? "Public-приглашение принято." : "Категория импортирована.");
+    } catch (error) {
+      pushNotice(toErrorMessage(error, "Не удалось принять inbox-сообщение."), "error");
+    } finally {
+      setIsSavingInboxAction(false);
+    }
+  }
+
+  async function handleDeclineInboxItem(item: InboxItemRow) {
+    const confirmed = await requestConfirmation({
+      title: "Отклонить inbox",
+      message: `Отклонить «${item.title}»? Это действие просто уберет приглашение из inbox.`,
+      confirmLabel: "отклонить",
+      tone: "danger",
+    });
+
+    if (!confirmed) {
+      return;
+    }
+
+    setIsSavingInboxAction(true);
+    try {
+      const response = await authorizedFetch(`/api/inbox/${item.id}/decline`, {
+        method: "POST",
+      });
+      const payload = (await response.json()) as InboxItemPayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Не удалось отклонить inbox-сообщение.");
+      }
+
+      if (selectedFriendInboxId) {
+        await loadFriendInbox(selectedFriendInboxId);
+      }
+      await loadFriends();
+      pushNotice("Inbox-сообщение отклонено.");
+    } catch (error) {
+      pushNotice(toErrorMessage(error, "Не удалось отклонить inbox-сообщение."), "error");
+    } finally {
+      setIsSavingInboxAction(false);
+    }
+  }
+
+  async function handleEnablePublicCategory() {
+    if (!currentCategory) {
+      return;
+    }
+
+    setIsSavingPublicAction(true);
+    try {
+      const response = await authorizedFetch(`/api/categories/${currentCategory.id}/public`, {
+        method: "POST",
+      });
+      const payload = (await response.json()) as PublicPanelPayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Не удалось включить public-категорию.");
+      }
+
+      setPublicPanel(payload.data);
+      await refreshCategoriesFromServer();
+      pushNotice("Public-категория включена.");
+    } catch (error) {
+      pushNotice(toErrorMessage(error, "Не удалось включить public-категорию."), "error");
+    } finally {
+      setIsSavingPublicAction(false);
+    }
+  }
+
+  async function handleDisablePublicCategory() {
+    if (!currentCategory) {
+      return;
+    }
+
+    const confirmed = await requestConfirmation({
+      title: "Выключить public",
+      message: "Доступ у всех участников будет удален. Продолжить?",
+      confirmLabel: "выключить",
+      tone: "danger",
+    });
+    if (!confirmed) {
+      return;
+    }
+
+    setIsSavingPublicAction(true);
+    try {
+      const response = await authorizedFetch(`/api/categories/${currentCategory.id}/public`, {
+        method: "DELETE",
+      });
+      const payload = (await response.json()) as PublicPanelPayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Не удалось выключить public-категорию.");
+      }
+
+      setPublicPanel(payload.data);
+      await refreshCategoriesFromServer();
+      pushNotice("Public-категория выключена.");
+    } catch (error) {
+      pushNotice(toErrorMessage(error, "Не удалось выключить public-категорию."), "error");
+    } finally {
+      setIsSavingPublicAction(false);
+    }
+  }
+
+  async function handleInviteFriendToPublicCategory() {
+    if (!currentCategory) {
+      return;
+    }
+
+    if (!publicInviteFriendId) {
+      pushNotice("Выбери друга для public-приглашения.", "warn");
+      return;
+    }
+
+    setIsSavingPublicAction(true);
+    try {
+      const response = await authorizedFetch(
+        `/api/categories/${currentCategory.id}/public/invite`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ friendAppUserId: publicInviteFriendId }),
+        }
+      );
+      const payload = (await response.json()) as InboxItemPayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Не удалось отправить public-приглашение.");
+      }
+
+      setPublicInviteFriendId("");
+      await loadCurrentPublicPanel(currentCategory.id);
+      pushNotice("Public-приглашение отправлено.");
+    } catch (error) {
+      pushNotice(toErrorMessage(error, "Не удалось отправить public-приглашение."), "error");
+    } finally {
+      setIsSavingPublicAction(false);
+    }
+  }
+
+  async function handleUpdatePublicMemberRole(
+    memberId: string,
+    role: PublicCategoryMemberRole
+  ) {
+    if (!currentCategory) {
+      return;
+    }
+
+    setIsSavingPublicAction(true);
+    try {
+      const response = await authorizedFetch(
+        `/api/categories/${currentCategory.id}/public/members/${memberId}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ role }),
+        }
+      );
+      const payload = (await response.json()) as PublicPanelPayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Не удалось обновить права.");
+      }
+
+      setPublicPanel(payload.data);
+      pushNotice("Права участника обновлены.");
+    } catch (error) {
+      pushNotice(toErrorMessage(error, "Не удалось обновить права."), "error");
+    } finally {
+      setIsSavingPublicAction(false);
+    }
+  }
+
+  async function handleRemovePublicMember(memberId: string) {
+    if (!currentCategory) {
+      return;
+    }
+
+    const confirmed = await requestConfirmation({
+      title: "Удалить доступ",
+      message: "Участник потеряет доступ к public-категории.",
+      confirmLabel: "удалить",
+      tone: "danger",
+    });
+    if (!confirmed) {
+      return;
+    }
+
+    setIsSavingPublicAction(true);
+    try {
+      const response = await authorizedFetch(
+        `/api/categories/${currentCategory.id}/public/members/${memberId}`,
+        { method: "DELETE" }
+      );
+      const payload = (await response.json()) as PublicPanelPayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Не удалось удалить участника.");
+      }
+
+      setPublicPanel(payload.data);
+      pushNotice("Доступ удален.");
+    } catch (error) {
+      pushNotice(toErrorMessage(error, "Не удалось удалить участника."), "error");
+    } finally {
+      setIsSavingPublicAction(false);
+    }
+  }
+
   async function handleExportCategoryTree() {
     if (!currentCategory) {
       pushNotice("Сначала выбери категорию для экспорта.", "warn");
@@ -9607,6 +12067,7 @@ export default function CategoryWorkspace() {
 
   applyEditorDomValueRef.current = applyEditorDomValue;
   ensureRichImageDeleteLinesRef.current = ensureRichImageDeleteLines;
+  ensureRichFileRowsRef.current = ensureRichFileRows;
   deleteRichImageBySelectionRef.current = deleteRichImageBySelection;
   deleteRichFileBySelectionRef.current = deleteRichFileBySelection;
   rememberRichSelectionRef.current = rememberRichSelection;
@@ -9694,7 +12155,7 @@ export default function CategoryWorkspace() {
   }
 
   function handleWorkspaceUndoButtonClick() {
-    performWorkspaceUndo();
+    void performWorkspaceUndo();
   }
 
   function renderEditorTextScaleControls() {
@@ -10072,7 +12533,11 @@ export default function CategoryWorkspace() {
 
   return (
     <main className="workspace-root flex w-full items-stretch p-0">
-      <div className="frame-shell relative flex h-full w-full flex-col overflow-hidden">
+      <div
+        className={`frame-shell relative flex h-full w-full flex-col overflow-hidden ${
+          mobilePanel ? `mobile-panel-${mobilePanel}-open` : ""
+        }`}
+      >
         <header className="top-strip bevel-panel flex h-[4.7rem] flex-none items-center gap-2 px-2 py-2 sm:gap-3 sm:px-3">
           <button
             type="button"
@@ -10084,6 +12549,18 @@ export default function CategoryWorkspace() {
             <span className="font-display text-[1.6rem] leading-none sm:text-[1.95rem]">
               :{(currentCategory?.title ?? "no category").toUpperCase()}
             </span>
+            <span className="visibility-badge ml-2">
+              {currentCategoryVisibilityLabel}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            className="mobile-header-action mobile-project-trigger mobile-only"
+            onClick={() => openMobilePanel("projects")}
+            aria-label="Open projects"
+          >
+            #{activeProject?.title ?? "HUB"}
           </button>
 
           <div className="project-topbar-group">
@@ -10134,19 +12611,56 @@ export default function CategoryWorkspace() {
 
         <div className="content-bay flex min-h-0 flex-1">
           <aside className="sidebar-rail flex flex-col p-0">
+            <div className="mobile-panel-head mobile-only">
+              <span className="font-display">categories</span>
+              <button
+                type="button"
+                className="menu-action h-9 w-9 text-xl"
+                onClick={closeMobilePanel}
+                aria-label="Close categories"
+              >
+                x
+              </button>
+            </div>
             <div className="sidebar-scroll flex-1">
-              {childCategories.map((node) => (
-                <button
-                  key={node.id}
-                  type="button"
-                  className={`sidebar-item w-full border-x-0 border-t-0 text-left font-display text-[1.7rem] leading-none sm:text-[1.95rem] ${
-                    insertionTargetId === node.id ? "sidebar-item-active" : ""
-                  }`}
-                  onClick={() => openCategory(node.id)}
-                >
-                  {node.title}
-                </button>
-              ))}
+              {childCategories.map((node) => {
+                const isActive = insertionTargetId === node.id;
+                const canDeleteNode = canDeleteCategoryNode(node);
+
+                return (
+                  <div
+                    key={node.id}
+                    className={`sidebar-item-row ${isActive ? "sidebar-item-row-active" : ""}`}
+                  >
+                    <button
+                      type="button"
+                      className={`sidebar-item sidebar-item-main w-full border-x-0 border-t-0 text-left font-display text-[1.7rem] leading-none sm:text-[1.95rem] ${
+                        isActive ? "sidebar-item-active" : ""
+                      }`}
+                      onClick={() =>
+                        openCategory(node.id, undefined, {
+                          keepMobilePanel: mobilePanel === "categories",
+                        })
+                      }
+                    >
+                      <span className="sidebar-item-title">{node.title}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      className="sidebar-delete mobile-only"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void handleDeleteCategoryFromPanel(node.id);
+                      }}
+                      disabled={!canDeleteNode || isMutating || isLoading}
+                      aria-label={`Delete category ${node.title}`}
+                    >
+                      -
+                    </button>
+                  </div>
+                );
+              })}
 
               {Array.from({ length: sidebarFillerCount }).map((_, index) => (
                 <div
@@ -10166,7 +12680,7 @@ export default function CategoryWorkspace() {
                     type="button"
                     className="mini-action"
                     onClick={handleAddMessage}
-                    disabled={!currentCategoryId || isMutating}
+                    disabled={!currentCategoryId || !currentCategoryCanEdit || isMutating}
                   >
                     + сообщение
                   </button>
@@ -10181,7 +12695,7 @@ export default function CategoryWorkspace() {
                     type="button"
                     className="mini-action"
                     onClick={openChecklistEditorForCreate}
-                    disabled={!currentCategoryId || isMutating || isLoading}
+                    disabled={!currentCategoryId || !currentCategoryCanEdit || isMutating || isLoading}
                   >
                     #CL
                   </button>
@@ -10189,7 +12703,7 @@ export default function CategoryWorkspace() {
                     type="button"
                     className="mini-action"
                     onClick={() => void handleAddDictionaryBlock()}
-                    disabled={!currentCategoryId || isMutating || isLoading}
+                    disabled={!currentCategoryId || !currentCategoryCanEdit || isMutating || isLoading}
                   >
                     #DICT
                   </button>
@@ -10473,6 +12987,9 @@ export default function CategoryWorkspace() {
                                   {dictionaryCard.payload.shuffle && (
                                     <span>перемешивание</span>
                                   )}
+                                  {dictionaryCard.payload.autoSpeak && (
+                                    <span>автоозвучка</span>
+                                  )}
                                 </div>
 
                                 <p className="dictionary-block-name">{message.title}</p>
@@ -10532,14 +13049,10 @@ export default function CategoryWorkspace() {
                           ) : (
                             <div
                               ref={(element) => setBlockEditorElement(message.id, element)}
-                              contentEditable={!isMutating && !isLoading}
-                              suppressContentEditableWarning
-                              onBeforeInput={() =>
-                                handleRichEditorBeforeInput({
-                                  kind: "block",
-                                  messageId: message.id,
-                                })
+                              contentEditable={
+                                currentCategoryCanEdit && !isMutating && !isLoading
                               }
+                              suppressContentEditableWarning
                               onInput={(event) => handleBlockEditorInput(message.id, event)}
                               onBlur={(event) => {
                                 if (!currentCategoryId) {
@@ -10657,7 +13170,7 @@ export default function CategoryWorkspace() {
                     type="button"
                     className="mini-action"
                     onClick={openChecklistEditorForCreate}
-                    disabled={!currentCategoryId || isMutating || isLoading}
+                    disabled={!currentCategoryId || !currentCategoryCanEdit || isMutating || isLoading}
                   >
                     #CL
                   </button>
@@ -10665,7 +13178,7 @@ export default function CategoryWorkspace() {
                     type="button"
                     className="mini-action"
                     onClick={handleAddDictionaryBlock}
-                    disabled={!currentCategoryId || isMutating || isLoading}
+                    disabled={!currentCategoryId || !currentCategoryCanEdit || isMutating || isLoading}
                   >
                     #DICT
                   </button>
@@ -10828,10 +13341,35 @@ export default function CategoryWorkspace() {
                       className="continuous-dictionary-board"
                       style={editorTextScaleStyle}
                     >
-                      {continuousDictionaryCards.map((dictionary) => (
+                      {continuousDictionaryCards.map((dictionary, dictionaryIndex) => (
                         <article
                           key={`continuous-dictionary-${dictionary.id}`}
-                          className="continuous-dictionary-card"
+                          className={`continuous-dictionary-card ${
+                            dragDictionaryId === dictionary.id
+                              ? "continuous-dictionary-card-dragging"
+                              : ""
+                          }`}
+                          onDragOver={(event) => {
+                            if (
+                              !dragDictionaryId ||
+                              dragDictionaryId === dictionary.id ||
+                              !currentCategoryCanEdit
+                            ) {
+                              return;
+                            }
+
+                            event.preventDefault();
+                            event.stopPropagation();
+                          }}
+                          onDrop={(event) => {
+                            if (!dragDictionaryId || !currentCategoryCanEdit) {
+                              return;
+                            }
+
+                            event.preventDefault();
+                            event.stopPropagation();
+                            handleDropOnContinuousDictionary(dictionary.id);
+                          }}
                         >
                           <div className="continuous-checklist-head">
                             <div className="min-w-0">
@@ -10845,7 +13383,66 @@ export default function CategoryWorkspace() {
                                   dictionary.labels
                                 )}
                                 {dictionary.shuffle ? " · перемешивание" : ""}
+                                {dictionary.autoSpeak ? " · автоозвучка" : ""}
                               </p>
+                            </div>
+                            <div className="dictionary-reorder-actions">
+                              <button
+                                type="button"
+                                className="mini-action dictionary-reorder-button"
+                                onClick={() => moveContinuousDictionary(dictionary.id, -1)}
+                                disabled={
+                                  !currentCategoryCanEdit ||
+                                  dictionaryIndex === 0 ||
+                                  isMutating ||
+                                  isLoading
+                                }
+                                aria-label={`Поднять словарь ${dictionary.title}`}
+                              >
+                                ↑
+                              </button>
+                              <button
+                                type="button"
+                                className="mini-action dictionary-reorder-button"
+                                onClick={() => moveContinuousDictionary(dictionary.id, 1)}
+                                disabled={
+                                  !currentCategoryCanEdit ||
+                                  dictionaryIndex === continuousDictionaryCards.length - 1 ||
+                                  isMutating ||
+                                  isLoading
+                                }
+                                aria-label={`Опустить словарь ${dictionary.title}`}
+                              >
+                                ↓
+                              </button>
+                              <button
+                                type="button"
+                                className={`checklist-item-drag ${
+                                  dragDictionaryId === dictionary.id
+                                    ? "checklist-item-drag-active"
+                                    : ""
+                                }`}
+                                draggable={
+                                  currentCategoryCanEdit &&
+                                  continuousDictionaryCards.length > 1 &&
+                                  !isMutating &&
+                                  !isLoading
+                                }
+                                onMouseDown={(event) => event.stopPropagation()}
+                                onDragStart={(event) =>
+                                  handleContinuousDictionaryDragStart(event, dictionary.id)
+                                }
+                                onDragEnd={() => setDragDictionaryId(null)}
+                                disabled={
+                                  !currentCategoryCanEdit ||
+                                  continuousDictionaryCards.length <= 1 ||
+                                  isMutating ||
+                                  isLoading
+                                }
+                                aria-label={`Перетащить словарь ${dictionary.title}`}
+                              >
+                                ::
+                              </button>
                             </div>
                           </div>
 
@@ -10902,13 +13499,11 @@ export default function CategoryWorkspace() {
 
                   <div
                     ref={continuousEditorRef}
-                    contentEditable={!(!currentCategoryId || isLoading || Boolean(loadError))}
-                    suppressContentEditableWarning
-                    onBeforeInput={() =>
-                      handleRichEditorBeforeInput({
-                        kind: "continuous",
-                      })
+                    contentEditable={
+                      currentCategoryCanEdit &&
+                      !(!currentCategoryId || isLoading || Boolean(loadError))
                     }
+                    suppressContentEditableWarning
                     onInput={handleContinuousEditorInput}
                     onBlur={(event) => {
                       if (!currentCategory || currentCategory.format !== "continuous") {
@@ -11007,6 +13602,17 @@ export default function CategoryWorkspace() {
           </section>
 
           <aside className="settings-panel">
+            <div className="mobile-panel-head mobile-only">
+              <span className="font-display">settings</span>
+              <button
+                type="button"
+                className="menu-action h-9 w-9 text-xl"
+                onClick={closeMobilePanel}
+                aria-label="Close settings"
+              >
+                x
+              </button>
+            </div>
             <h2 className="settings-title font-display">settings</h2>
 
             {selectedMessage && currentCategory?.format === "block" ? (
@@ -11021,6 +13627,7 @@ export default function CategoryWorkspace() {
                   onChange={(event) => setMessageTitleDraft(event.target.value)}
                   onBlur={() => void handleMessageTitleBlur()}
                   className="settings-input"
+                  disabled={!currentCategoryCanEdit || isMutating || isLoading}
                 />
 
                 <button
@@ -11040,6 +13647,7 @@ export default function CategoryWorkspace() {
                       onChange={(event) =>
                         void handleMessageTypeChange(event.target.value as MessageType)
                       }
+                      disabled={!currentCategoryCanEdit || isMutating || isLoading}
                     >
                       <option value="info">информация</option>
                       <option value="exercise">упражнение</option>
@@ -11051,7 +13659,7 @@ export default function CategoryWorkspace() {
                   type="button"
                   className="danger-action"
                   onClick={handleDeleteMessage}
-                  disabled={isMutating}
+                  disabled={!currentCategoryCanEdit || isMutating}
                 >
                   удалить сообщение
                 </button>
@@ -11137,6 +13745,7 @@ export default function CategoryWorkspace() {
                   }
                   onBlur={handleCategoryTitleBlur}
                   className="settings-input"
+                  disabled={!currentCategoryCanEdit || isMutating || isLoading}
                 />
 
                 <label className="settings-label">описание категории</label>
@@ -11150,6 +13759,7 @@ export default function CategoryWorkspace() {
                   }
                   onBlur={handleCategoryDescriptionBlur}
                   className="settings-input settings-textarea"
+                  disabled={!currentCategoryCanEdit || isMutating || isLoading}
                 />
 
                 <label className="settings-label">переместить категорию</label>
@@ -11157,6 +13767,7 @@ export default function CategoryWorkspace() {
                   value={categoryMoveParentDraft}
                   className="settings-input"
                   onChange={(event) => setCategoryMoveParentDraft(event.target.value)}
+                  disabled={!currentCategoryCanEdit || isMutating || isLoading}
                 >
                   {moveParentOptions.map((option) => (
                     <option key={option.id ?? "root"} value={option.id ?? ""}>
@@ -11168,7 +13779,7 @@ export default function CategoryWorkspace() {
                   type="button"
                   className="mini-action"
                   onClick={() => void handleMoveCategoryToParent()}
-                  disabled={isMutating || isLoading}
+                  disabled={!currentCategoryCanEdit || isMutating || isLoading}
                 >
                   переместить
                 </button>
@@ -11204,6 +13815,7 @@ export default function CategoryWorkspace() {
                           type="button"
                           className="category-tag-action category-tag-action-library"
                           onClick={openCategoryTagLibrary}
+                          disabled={!currentCategoryCanEdit || isMutating || isLoading}
                           aria-label="Открыть список всех хэштегов"
                         >
                           <TagLibraryIcon />
@@ -11212,7 +13824,7 @@ export default function CategoryWorkspace() {
                           type="button"
                           className="category-tag-action category-tag-action-apply"
                           onClick={() => void handleAddCategoryTag()}
-                          disabled={isMutating || isLoading}
+                          disabled={!currentCategoryCanEdit || isMutating || isLoading}
                           aria-label="Добавить хэштег в категорию"
                         >
                           +
@@ -11235,6 +13847,7 @@ export default function CategoryWorkspace() {
                           }}
                           placeholder="#learning"
                           className="settings-input"
+                          disabled={!currentCategoryCanEdit || isMutating || isLoading}
                         />
                       </div>
 
@@ -11252,7 +13865,7 @@ export default function CategoryWorkspace() {
                                   keepSuggestionsOpen: true,
                                 })
                               }
-                              disabled={isMutating || isLoading}
+                              disabled={!currentCategoryCanEdit || isMutating || isLoading}
                             >
                               {tag}
                             </button>
@@ -11270,7 +13883,7 @@ export default function CategoryWorkspace() {
                                 type="button"
                                 className="category-tag-chip-remove"
                                 onClick={() => void handleRemoveCategoryTag(tag)}
-                                disabled={isMutating || isLoading}
+                                disabled={!currentCategoryCanEdit || isMutating || isLoading}
                                 aria-label={`Удалить ${tag} из категории`}
                               >
                                 ×
@@ -11313,7 +13926,7 @@ export default function CategoryWorkspace() {
                                   event.target.checked
                                 )
                               }
-                              disabled={isMutating || isLoading}
+                              disabled={!currentCategoryCanEdit || isMutating || isLoading}
                             />
                             <span>
                               {entry.checklistTitle}
@@ -11352,6 +13965,7 @@ export default function CategoryWorkspace() {
                   onChange={(event) =>
                     void handleCategoryFormatChange(event.target.value as CategoryFormat)
                   }
+                  disabled={!currentCategoryCanEdit || isMutating || isLoading}
                 >
                   <option value="block">блочный</option>
                   <option value="continuous">сплошной</option>
@@ -11364,6 +13978,7 @@ export default function CategoryWorkspace() {
                   onChange={(event) =>
                     handleCategoryTypeChange(event.target.value as CategoryType)
                   }
+                  disabled={!currentCategoryCanEdit || isMutating || isLoading}
                 >
                   <option value="learning">learning</option>
                 </select>
@@ -11371,6 +13986,146 @@ export default function CategoryWorkspace() {
                 <p className="settings-hint">
                   Для типа learning у сообщений доступно: информация / упражнение.
                 </p>
+
+                <label className="settings-label">поделиться</label>
+                <div className="category-share-panel">
+                  <select
+                    value={shareFriendId}
+                    className="settings-input"
+                    onChange={(event) => setShareFriendId(event.target.value)}
+                    disabled={
+                      !currentCategoryCanEdit ||
+                      acceptedFriends.length === 0 ||
+                      isSavingInboxAction
+                    }
+                  >
+                    <option value="">выбери друга</option>
+                    {acceptedFriends.map((friend) => (
+                      <option key={`share-${friend.friendAppUserId}`} value={friend.friendAppUserId}>
+                        {friend.nickname || friend.friendUserId || friend.friendAppUserId}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="mini-action"
+                    onClick={() => void handleShareCurrentCategory()}
+                    disabled={
+                      !currentCategory ||
+                      !currentCategoryCanEdit ||
+                      !shareFriendId ||
+                      isSavingInboxAction
+                    }
+                  >
+                    отправить копию
+                  </button>
+                </div>
+                <p className="settings-hint">
+                  Друг получит копию дерева категории в inbox и сам выберет, куда ее принять.
+                </p>
+
+                <label className="settings-label">public category</label>
+                <div className="public-category-panel">
+                  <div className="public-category-state">
+                    <span>{publicPanel?.enabled ? "public включен" : "local"}</span>
+                    {publicPanel?.role && <span>роль: {publicPanel.role}</span>}
+                  </div>
+
+                  {currentCategoryCanManagePublic ? (
+                    <div className="flex flex-wrap gap-2">
+                      {publicPanel?.enabled ? (
+                        <button
+                          type="button"
+                          className="danger-action"
+                          onClick={() => void handleDisablePublicCategory()}
+                          disabled={isSavingPublicAction}
+                        >
+                          выключить public
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="mini-action"
+                          onClick={() => void handleEnablePublicCategory()}
+                          disabled={isSavingPublicAction}
+                        >
+                          сделать public
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="settings-hint">
+                      Управление public-доступом доступно только владельцу.
+                    </p>
+                  )}
+
+                  {currentCategoryCanManagePublic && publicPanel?.enabled && (
+                    <>
+                      <div className="category-share-panel mt-2">
+                        <select
+                          value={publicInviteFriendId}
+                          className="settings-input"
+                          onChange={(event) => setPublicInviteFriendId(event.target.value)}
+                          disabled={acceptedFriends.length === 0 || isSavingPublicAction}
+                        >
+                          <option value="">пригласить друга</option>
+                          {acceptedFriends.map((friend) => (
+                            <option
+                              key={`public-invite-${friend.friendAppUserId}`}
+                              value={friend.friendAppUserId}
+                            >
+                              {friend.nickname || friend.friendUserId || friend.friendAppUserId}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          className="mini-action"
+                          onClick={() => void handleInviteFriendToPublicCategory()}
+                          disabled={!publicInviteFriendId || isSavingPublicAction}
+                        >
+                          invite
+                        </button>
+                      </div>
+
+                      <div className="public-member-list">
+                        {publicPanel.members.length === 0 ? (
+                          <p className="settings-hint">В user:panel пока нет участников.</p>
+                        ) : (
+                          publicPanel.members.map((member) => (
+                            <div key={member.id} className="public-member-item">
+                              <span className="public-member-name">
+                                {member.nickname || member.userId || member.appUserId}
+                              </span>
+                              <select
+                                value={member.role}
+                                className="settings-input public-member-role"
+                                onChange={(event) =>
+                                  void handleUpdatePublicMemberRole(
+                                    member.id,
+                                    event.target.value as PublicCategoryMemberRole
+                                  )
+                                }
+                                disabled={isSavingPublicAction}
+                              >
+                                <option value="viewer">просмотр</option>
+                                <option value="editor">редактор</option>
+                              </select>
+                              <button
+                                type="button"
+                                className="danger-action public-member-remove"
+                                onClick={() => void handleRemovePublicMember(member.id)}
+                                disabled={isSavingPublicAction}
+                              >
+                                удалить
+                              </button>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
 
                 <label className="settings-label">экспорт / импорт категории</label>
                 <div className="flex flex-wrap gap-2">
@@ -11386,7 +14141,7 @@ export default function CategoryWorkspace() {
                     type="button"
                     className="mini-action"
                     onClick={handleOpenImportPicker}
-                    disabled={isMutating || isLoading}
+                    disabled={!currentCategoryCanEdit || isMutating || isLoading}
                   >
                     импорт дерева
                   </button>
@@ -11410,12 +14165,144 @@ export default function CategoryWorkspace() {
           </aside>
         </div>
 
+        {mobilePanel && mobilePanel !== "categories" && (
+          <button
+            type="button"
+            className="mobile-panel-backdrop mobile-only"
+            onClick={closeMobilePanel}
+            aria-label="Close mobile panel"
+          />
+        )}
+
+        {mobilePanel === "projects" && (
+          <aside className="mobile-sheet mobile-project-sheet mobile-only">
+            <div className="mobile-panel-head">
+              <span className="font-display">projects</span>
+              <button
+                type="button"
+                className="menu-action h-9 w-9 text-xl"
+                onClick={closeMobilePanel}
+                aria-label="Close projects"
+              >
+                x
+              </button>
+            </div>
+
+            <div className="mobile-project-list" role="tablist" aria-label="Projects">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeProjectId === null}
+                className={`project-tab ${activeProjectId === null ? "project-tab-active" : ""}`}
+                onClick={() => {
+                  handleSelectProjectTab(null);
+                  closeMobilePanel();
+                }}
+              >
+                HUB
+              </button>
+
+              {sortedProjects.map((project) => (
+                <button
+                  key={`mobile-project-${project.id}`}
+                  type="button"
+                  role="tab"
+                  aria-selected={activeProjectId === project.id}
+                  className={`project-tab ${
+                    activeProjectId === project.id ? "project-tab-active" : ""
+                  }`}
+                  onClick={() => {
+                    handleSelectProjectTab(project.id);
+                    closeMobilePanel();
+                  }}
+                >
+                  {project.title}
+                </button>
+              ))}
+            </div>
+
+            <button
+              type="button"
+              className="mini-action mobile-wide-action"
+              onClick={openProjectCreateModal}
+            >
+              manage / create project
+            </button>
+          </aside>
+        )}
+
+        {mobilePanel === "tools" && (
+          <aside className="mobile-sheet mobile-tools-sheet mobile-only">
+            <div className="mobile-panel-head">
+              <span className="font-display">tools</span>
+              <button
+                type="button"
+                className="menu-action h-9 w-9 text-xl"
+                onClick={closeMobilePanel}
+                aria-label="Close tools"
+              >
+                x
+              </button>
+            </div>
+
+            <div className="mobile-tools-actions">
+              {currentCategory?.format === "block" && (
+                <button
+                  type="button"
+                  className="mini-action"
+                  onClick={() => {
+                    closeMobilePanel();
+                    void handleAddMessage();
+                  }}
+                  disabled={!currentCategoryId || !currentCategoryCanEdit || isMutating}
+                >
+                  + message
+                </button>
+              )}
+              <button
+                type="button"
+                className="mini-action"
+                onClick={() => {
+                  closeMobilePanel();
+                  openChecklistEditorForCreate();
+                }}
+                disabled={!currentCategoryId || !currentCategoryCanEdit || isMutating || isLoading}
+              >
+                #CL
+              </button>
+              <button
+                type="button"
+                className="mini-action"
+                onClick={() => {
+                  closeMobilePanel();
+                  void handleAddDictionaryBlock();
+                }}
+                disabled={!currentCategoryId || !currentCategoryCanEdit || isMutating || isLoading}
+              >
+                #DICT
+              </button>
+              {renderEditorTextScaleControls()}
+            </div>
+
+            <div className="mobile-rich-tools">
+              {renderRichTextTools(
+                currentCategory?.format === "block" ? "block" : "continuous"
+              )}
+            </div>
+          </aside>
+        )}
+
         <footer className="bottom-strip bevel-panel flex h-[6rem] flex-none items-end justify-between gap-3 px-2 pb-2 pt-[1.1rem] sm:h-[6.2rem] sm:px-3 sm:pb-3 sm:pt-[1.15rem]">
           <div className="flex items-end gap-2 sm:gap-3">
             <button
               type="button"
               className="tool-button tool-red"
-              onClick={handleBack}
+              onClick={() => {
+                if (mobilePanel !== "categories") {
+                  closeMobilePanel();
+                }
+                void handleBack();
+              }}
               disabled={!canGoBack || isMutating}
               aria-label="Назад"
             >
@@ -11423,8 +14310,22 @@ export default function CategoryWorkspace() {
             </button>
             <button
               type="button"
+              className="tool-button tool-blue mobile-only"
+              onClick={() => openMobilePanel("categories")}
+              disabled={isLoading || Boolean(loadError)}
+              aria-label="Open categories"
+            >
+              cat
+            </button>
+            <button
+              type="button"
               className="tool-button tool-green"
-              onClick={handleAddCategory}
+              onClick={() => {
+                if (mobilePanel !== "categories") {
+                  closeMobilePanel();
+                }
+                void handleAddCategory();
+              }}
               disabled={!canCreate || isMutating || isLoading}
               aria-label="Добавить категорию"
             >
@@ -11432,7 +14333,7 @@ export default function CategoryWorkspace() {
             </button>
             <button
               type="button"
-              className="tool-button tool-yellow"
+              className="tool-button tool-yellow mobile-hide"
               onClick={handleDeleteCategory}
               disabled={!canDelete || isMutating || isLoading}
               aria-label="Удалить категорию"
@@ -11441,13 +14342,16 @@ export default function CategoryWorkspace() {
             </button>
           </div>
 
-          <p className={`hidden text-sm font-semibold sm:block ${statusColor}`}>{statusText}</p>
+          <p className={`mobile-hide hidden text-sm font-semibold sm:block ${statusColor}`}>{statusText}</p>
 
           <div className="flex items-end gap-2 sm:gap-3">
             <button
               type="button"
               className="tool-button tool-blue"
-              onClick={() => setShowSearch(true)}
+              onClick={() => {
+                closeMobilePanel();
+                setShowSearch(true);
+              }}
               disabled={isLoading || Boolean(loadError)}
               aria-label="Открыть поиск"
             >
@@ -11455,7 +14359,25 @@ export default function CategoryWorkspace() {
             </button>
             <button
               type="button"
-              className="tool-button tool-red"
+              className="tool-button tool-red mobile-only"
+              onClick={() => openMobilePanel("tools")}
+              disabled={!currentCategory || isLoading}
+              aria-label="Open tools"
+            >
+              tools
+            </button>
+            <button
+              type="button"
+              className="tool-button tool-yellow mobile-only"
+              onClick={() => openMobilePanel("settings")}
+              disabled={!currentCategory || isLoading}
+              aria-label="Open settings"
+            >
+              set
+            </button>
+            <button
+              type="button"
+              className="tool-button tool-red mobile-hide"
               onClick={() =>
                 pushNotice("Раздел «Больше инструментов» будет добавлен позже.")
               }
@@ -11940,6 +14862,37 @@ export default function CategoryWorkspace() {
                 ? `${dictionaryImportPreview.entries.length} пар готово к замене`
                 : dictionaryImportPreview.error
               : "Поддерживаются JSON экспорта #DICT, TSV и CSV.";
+            const dictionaryTitleBadge = normalizeDictionaryTitle(
+              dictionaryEditor.titleDraft
+            );
+            const dictionarySearchHasQuery =
+              dictionarySearchQuery.trim().length > 0;
+            const dictionarySearchActiveMatch =
+              dictionarySearchMatches[dictionarySearchActiveIndex] ?? null;
+            const dictionarySearchActiveCellKey = dictionarySearchActiveMatch
+              ? makeDictionaryEditorCellKey(
+                  dictionarySearchActiveMatch.entryId,
+                  dictionarySearchActiveMatch.field
+                )
+              : "";
+            const dictionarySearchMatchedCellKeys = new Set(
+              dictionarySearchMatches.map((match) =>
+                makeDictionaryEditorCellKey(match.entryId, match.field)
+              )
+            );
+            const dictionarySearchMatchedRowIds = new Set(
+              dictionarySearchMatches.map((match) => match.entryId)
+            );
+            const dictionarySearchHasFuzzyMatches = dictionarySearchMatches.some(
+              (match) => match.isFuzzy
+            );
+            const dictionarySearchStatus = dictionarySearchHasQuery
+              ? dictionarySearchMatches.length > 0
+                ? `${dictionarySearchActiveIndex + 1} / ${
+                    dictionarySearchMatches.length
+                  }${dictionarySearchHasFuzzyMatches ? " · похожие" : ""}`
+                : "нет совпадений"
+              : "";
 
             return (
           <div className="absolute inset-0 z-50 flex items-center justify-center p-3">
@@ -11951,8 +14904,15 @@ export default function CategoryWorkspace() {
             />
 
             <div className="project-create-modal dictionary-editor-modal popup-3d relative z-10 w-full max-w-5xl p-4 sm:p-5">
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <h2 className="font-display text-4xl leading-none">Настройки #DICT</h2>
+              <div className="dictionary-editor-header mb-3 flex justify-between gap-3">
+                <div className="dictionary-editor-title-wrap">
+                  <h2 className="font-display text-4xl leading-none">
+                    Настройки #DICT
+                  </h2>
+                  <span className="dictionary-editor-title-badge">
+                    {dictionaryTitleBadge}
+                  </span>
+                </div>
                 <button
                   type="button"
                   className="menu-action h-9 w-9 text-xl"
@@ -12059,82 +15019,172 @@ export default function CategoryWorkspace() {
                         </tr>
                       </thead>
                       <tbody>
-                        {dictionaryEditor.entries.map((entry, index) => (
-                          <tr key={entry.id}>
-                            <td>
-                              <textarea
-                                value={entry.side1}
-                                onChange={(event) =>
-                                  updateDictionaryEditorEntry(
-                                    entry.id,
-                                    "side1",
-                                    event.target.value
-                                  )
-                                }
-                                className="settings-input dictionary-editor-cell"
-                                placeholder={`${dictionaryEditorLabels.side1} ${index + 1}`}
-                              />
-                            </td>
-                            <td>
-                              <textarea
-                                value={entry.side1Note}
-                                onChange={(event) =>
-                                  updateDictionaryEditorEntry(
-                                    entry.id,
-                                    "side1Note",
-                                    event.target.value
-                                  )
-                                }
-                                className="settings-input dictionary-editor-cell"
-                                placeholder={dictionaryEditorLabels.side1Note}
-                              />
-                            </td>
-                            <td>
-                              <textarea
-                                value={entry.side2}
-                                onChange={(event) =>
-                                  updateDictionaryEditorEntry(
-                                    entry.id,
-                                    "side2",
-                                    event.target.value
-                                  )
-                                }
-                                className="settings-input dictionary-editor-cell"
-                                placeholder={dictionaryEditorLabels.side2}
-                              />
-                            </td>
-                            <td>
-                              <textarea
-                                value={entry.side2Note}
-                                onChange={(event) =>
-                                  updateDictionaryEditorEntry(
-                                    entry.id,
-                                    "side2Note",
-                                    event.target.value
-                                  )
-                                }
-                                className="settings-input dictionary-editor-cell"
-                                placeholder={dictionaryEditorLabels.side2Note}
-                              />
-                            </td>
-                            <td>
-                              <button
-                                type="button"
-                                className="danger-action dictionary-editor-remove"
-                                onClick={() => removeDictionaryEditorEntry(entry.id)}
-                              >
-                                -
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
+                        {dictionaryEditor.entries.map((entry, index) => {
+                          const side1CellKey = makeDictionaryEditorCellKey(
+                            entry.id,
+                            "side1"
+                          );
+                          const side1NoteCellKey = makeDictionaryEditorCellKey(
+                            entry.id,
+                            "side1Note"
+                          );
+                          const side2CellKey = makeDictionaryEditorCellKey(
+                            entry.id,
+                            "side2"
+                          );
+                          const side2NoteCellKey = makeDictionaryEditorCellKey(
+                            entry.id,
+                            "side2Note"
+                          );
+                          const rowHasSearchMatch =
+                            dictionarySearchMatchedRowIds.has(entry.id);
+
+                          return (
+                            <tr
+                              key={entry.id}
+                              className={
+                                rowHasSearchMatch
+                                  ? "dictionary-editor-row-match"
+                                  : undefined
+                              }
+                            >
+                              <td data-label={dictionaryEditorLabels.side1}>
+                                <textarea
+                                  ref={(node) => {
+                                    dictionaryEditorCellRefsRef.current[
+                                      side1CellKey
+                                    ] = node;
+                                  }}
+                                  value={entry.side1}
+                                  onChange={(event) =>
+                                    updateDictionaryEditorEntry(
+                                      entry.id,
+                                      "side1",
+                                      event.target.value
+                                    )
+                                  }
+                                  className={`settings-input dictionary-editor-cell ${
+                                    dictionarySearchMatchedCellKeys.has(side1CellKey)
+                                      ? "dictionary-editor-cell-match"
+                                      : ""
+                                  } ${
+                                    dictionarySearchActiveCellKey === side1CellKey
+                                      ? "dictionary-editor-cell-active-match"
+                                      : ""
+                                  }`}
+                                  placeholder={`${dictionaryEditorLabels.side1} ${index + 1}`}
+                                />
+                              </td>
+                              <td data-label={dictionaryEditorLabels.side1Note}>
+                                <textarea
+                                  ref={(node) => {
+                                    dictionaryEditorCellRefsRef.current[
+                                      side1NoteCellKey
+                                    ] = node;
+                                  }}
+                                  value={entry.side1Note}
+                                  onChange={(event) =>
+                                    updateDictionaryEditorEntry(
+                                      entry.id,
+                                      "side1Note",
+                                      event.target.value
+                                    )
+                                  }
+                                  className={`settings-input dictionary-editor-cell ${
+                                    dictionarySearchMatchedCellKeys.has(
+                                      side1NoteCellKey
+                                    )
+                                      ? "dictionary-editor-cell-match"
+                                      : ""
+                                  } ${
+                                    dictionarySearchActiveCellKey ===
+                                    side1NoteCellKey
+                                      ? "dictionary-editor-cell-active-match"
+                                      : ""
+                                  }`}
+                                  placeholder={dictionaryEditorLabels.side1Note}
+                                />
+                              </td>
+                              <td data-label={dictionaryEditorLabels.side2}>
+                                <textarea
+                                  ref={(node) => {
+                                    dictionaryEditorCellRefsRef.current[
+                                      side2CellKey
+                                    ] = node;
+                                  }}
+                                  value={entry.side2}
+                                  onChange={(event) =>
+                                    updateDictionaryEditorEntry(
+                                      entry.id,
+                                      "side2",
+                                      event.target.value
+                                    )
+                                  }
+                                  className={`settings-input dictionary-editor-cell ${
+                                    dictionarySearchMatchedCellKeys.has(side2CellKey)
+                                      ? "dictionary-editor-cell-match"
+                                      : ""
+                                  } ${
+                                    dictionarySearchActiveCellKey === side2CellKey
+                                      ? "dictionary-editor-cell-active-match"
+                                      : ""
+                                  }`}
+                                  placeholder={dictionaryEditorLabels.side2}
+                                />
+                              </td>
+                              <td data-label={dictionaryEditorLabels.side2Note}>
+                                <textarea
+                                  ref={(node) => {
+                                    dictionaryEditorCellRefsRef.current[
+                                      side2NoteCellKey
+                                    ] = node;
+                                  }}
+                                  value={entry.side2Note}
+                                  onChange={(event) =>
+                                    updateDictionaryEditorEntry(
+                                      entry.id,
+                                      "side2Note",
+                                      event.target.value
+                                    )
+                                  }
+                                  className={`settings-input dictionary-editor-cell ${
+                                    dictionarySearchMatchedCellKeys.has(
+                                      side2NoteCellKey
+                                    )
+                                      ? "dictionary-editor-cell-match"
+                                      : ""
+                                  } ${
+                                    dictionarySearchActiveCellKey ===
+                                    side2NoteCellKey
+                                      ? "dictionary-editor-cell-active-match"
+                                      : ""
+                                  }`}
+                                  placeholder={dictionaryEditorLabels.side2Note}
+                                />
+                              </td>
+                              <td data-label="actions">
+                                <button
+                                  type="button"
+                                  className="danger-action dictionary-editor-remove"
+                                  onClick={() => removeDictionaryEditorEntry(entry.id)}
+                                >
+                                  -
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
                 )}
 
                 {dictionaryEditorTab === "transfer" && (
-                  <div className="dictionary-editor-transfer">
+                  <div
+                    className="dictionary-editor-transfer"
+                    onDragOver={handleDictionaryImportDragOver}
+                    onDrop={handleDictionaryImportDrop}
+                  >
                     <div className="dictionary-editor-transfer-head">
                       <label className="settings-label" htmlFor="dictionary-import-draft">
                         экспорт / импорт #DICT
@@ -12167,6 +15217,9 @@ export default function CategoryWorkspace() {
                       id="dictionary-import-draft"
                       value={dictionaryImportDraft}
                       onChange={(event) => setDictionaryImportDraft(event.target.value)}
+                      onPaste={handleDictionaryImportPaste}
+                      onDragOver={handleDictionaryImportDragOver}
+                      onDrop={handleDictionaryImportDrop}
                       className="settings-input settings-textarea dictionary-editor-import-textarea"
                       placeholder={`Вставь TSV/CSV: ${dictionaryEditorLabels.side1}\t${dictionaryEditorLabels.side2}`}
                     />
@@ -12184,7 +15237,6 @@ export default function CategoryWorkspace() {
                         type="button"
                         className="danger-action"
                         onClick={() => void handleApplyDictionaryImport()}
-                        disabled={!dictionaryImportPreview.ok}
                       >
                         импорт: заменить
                       </button>
@@ -12252,6 +15304,77 @@ export default function CategoryWorkspace() {
                         />
                         <span>давать слова в перемешку</span>
                       </label>
+
+                      <label className="dictionary-editor-toggle">
+                        <input
+                          type="checkbox"
+                          checked={dictionaryEditor.autoSpeak}
+                          onChange={(event) =>
+                            updateDictionaryEditorAutoSpeak(event.target.checked)
+                          }
+                        />
+                        <span>автоозвучка новой стороны</span>
+                      </label>
+
+                      <div className="dictionary-editor-autospeak-fields">
+                        <span className="settings-label">автоозвучивать</span>
+                        <div className="dictionary-editor-autospeak-grid">
+                          {DICTIONARY_EDITOR_SEARCH_FIELDS.map((field) => {
+                            const checked = normalizeDictionaryAutoSpeakFields(
+                              dictionaryEditor.autoSpeakFields,
+                              []
+                            ).includes(field);
+
+                            return (
+                              <label
+                                key={`dictionary-autospeak-${field}`}
+                                className="dictionary-editor-autospeak-option"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={() =>
+                                    toggleDictionaryEditorAutoSpeakField(field)
+                                  }
+                                />
+                                <span>
+                                  {getDictionaryFieldLabel(field, dictionaryEditorLabels)}
+                                </span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      <div className="dictionary-editor-autospeak-fields">
+                        <span className="settings-label">озвучивать кнопкой</span>
+                        <div className="dictionary-editor-autospeak-grid">
+                          {DICTIONARY_EDITOR_SEARCH_FIELDS.map((field) => {
+                            const checked = normalizeDictionaryManualSpeakFields(
+                              dictionaryEditor.manualSpeakFields,
+                              []
+                            ).includes(field);
+
+                            return (
+                              <label
+                                key={`dictionary-manual-speak-${field}`}
+                                className="dictionary-editor-autospeak-option"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={() =>
+                                    toggleDictionaryEditorManualSpeakField(field)
+                                  }
+                                />
+                                <span>
+                                  {getDictionaryFieldLabel(field, dictionaryEditorLabels)}
+                                </span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </div>
                     </div>
 
                     <label className="dictionary-editor-field">
@@ -12271,13 +15394,102 @@ export default function CategoryWorkspace() {
 
               <div className="dictionary-editor-actions">
                 {dictionaryEditorTab === "entries" && (
+                  <>
                   <button
                     type="button"
-                    className="mini-action"
+                    className="mini-action dictionary-editor-mobile-search-toggle mobile-only"
+                    onClick={() => setDictionaryMobileSearchOpen((open) => !open)}
+                    aria-expanded={dictionaryMobileSearchOpen}
+                  >
+                    search
+                  </button>
+                  <button
+                    type="button"
+                    className="mini-action dictionary-editor-mobile-add-entry mobile-only"
                     onClick={addDictionaryEditorEntry}
                   >
-                    + пара
+                    + pair
                   </button>
+                  <div
+                    className={`dictionary-editor-search-panel ${
+                      dictionaryMobileSearchOpen
+                        ? "dictionary-editor-search-panel-open"
+                        : ""
+                    }`}
+                  >
+                    <label
+                      className="dictionary-editor-search-field"
+                      htmlFor="dictionary-editor-search"
+                    >
+                      <span className="settings-label">поиск</span>
+                      <input
+                        id="dictionary-editor-search"
+                        value={dictionarySearchQuery}
+                        onChange={(event) =>
+                          updateDictionaryEditorSearchQuery(event.target.value)
+                        }
+                        onKeyDown={handleDictionaryEditorSearchKeyDown}
+                        className="settings-input dictionary-editor-search-input"
+                        placeholder="слово или слово с ошибкой..."
+                        aria-label="Поиск по текущему словарю"
+                      />
+                    </label>
+
+                    {dictionarySearchHasQuery && (
+                      <span
+                        className={`dictionary-editor-search-status ${
+                          dictionarySearchMatches.length === 0
+                            ? "dictionary-editor-search-status-empty"
+                            : ""
+                        }`}
+                        aria-live="polite"
+                      >
+                        {dictionarySearchStatus}
+                      </span>
+                    )}
+
+                    <div
+                      className="dictionary-editor-search-controls"
+                      role="group"
+                      aria-label="Навигация по совпадениям"
+                    >
+                      <button
+                        type="button"
+                        className="mini-action dictionary-editor-search-step"
+                        onClick={() => moveDictionaryEditorSearch(-1)}
+                        disabled={dictionarySearchMatches.length === 0}
+                        aria-label="Предыдущее совпадение"
+                      >
+                        &lt;
+                      </button>
+                      <button
+                        type="button"
+                        className="mini-action dictionary-editor-search-step"
+                        onClick={() => moveDictionaryEditorSearch(1)}
+                        disabled={dictionarySearchMatches.length === 0}
+                        aria-label="Следующее совпадение"
+                      >
+                        &gt;
+                      </button>
+                      <button
+                        type="button"
+                        className="mini-action dictionary-editor-search-clear"
+                        onClick={resetDictionaryEditorSearch}
+                        disabled={!dictionarySearchHasQuery}
+                      >
+                        сброс
+                      </button>
+                    </div>
+
+                    <button
+                      type="button"
+                      className="mini-action dictionary-editor-add-entry"
+                      onClick={addDictionaryEditorEntry}
+                    >
+                      + пара
+                    </button>
+                  </div>
+                  </>
                 )}
 
                 {(dictionaryEditor.source === "continuous" &&
@@ -12292,6 +15504,16 @@ export default function CategoryWorkspace() {
                     удалить словарь
                   </button>
                 ) : null}
+
+                <button
+                  type="button"
+                  className="mini-action"
+                  onClick={() =>
+                    void handleSaveDictionaryEditor({ openStudyAfterSave: true })
+                  }
+                >
+                  заучивание
+                </button>
 
                 <button
                   type="button"
@@ -12330,6 +15552,11 @@ export default function CategoryWorkspace() {
               activeSide,
               dictionaryStudy.labels
             );
+            const autoSpeakFieldLabels = normalizeDictionaryAutoSpeakFields(
+              dictionaryStudy.autoSpeakFields
+            )
+              .map((field) => getDictionaryFieldLabel(field, dictionaryStudy.labels))
+              .join(" + ");
             const activeText = getDictionaryEntrySideText(currentEntry, activeSide);
             const activeNote = getDictionaryEntrySideNote(currentEntry, activeSide);
 
@@ -12348,11 +15575,11 @@ export default function CategoryWorkspace() {
                       <button
                         type="button"
                         className="menu-action h-9 w-9"
-                        onClick={speakDictionaryStudyCurrentCard}
-                        aria-label={`Озвучить ${activeSideLabel}`}
-                        title={`Озвучить ${activeSideLabel}`}
+                        onClick={openDictionaryEditorFromStudy}
+                        aria-label="Открыть настройки словаря"
+                        title="Открыть настройки словаря"
                       >
-                        <SpeakerIcon />
+                        gear
                       </button>
                       <button
                         type="button"
@@ -12365,8 +15592,33 @@ export default function CategoryWorkspace() {
                     </div>
                   </header>
 
-                  <div className="dictionary-study-counter">
-                    {dictionaryStudy.currentIndex + 1} / {dictionaryStudy.cards.length}
+                  <div className="dictionary-study-meta-row">
+                    <div className="dictionary-study-counter">
+                      {dictionaryStudy.currentIndex + 1} / {dictionaryStudy.cards.length}
+                    </div>
+                    <label className="dictionary-study-shuffle-toggle">
+                      <input
+                        type="checkbox"
+                        checked={dictionaryStudy.shuffle}
+                        onChange={(event) =>
+                          setDictionaryStudyShuffle(event.target.checked)
+                        }
+                      />
+                      <span>перемешивание</span>
+                    </label>
+                    <button
+                      type="button"
+                      className="mini-action dictionary-study-reset-button"
+                      onClick={resetDictionaryStudyProgress}
+                      disabled={dictionaryStudy.cards.length === 0}
+                    >
+                      {dictionaryStudy.shuffle ? "перемешать" : "сбросить прогресс"}
+                    </button>
+                    {dictionaryStudy.autoSpeak && (
+                      <span className="dictionary-study-autospeak-badge">
+                        автоозвучка: {autoSpeakFieldLabels}
+                      </span>
+                    )}
                   </div>
 
                   <div
@@ -12375,7 +15627,6 @@ export default function CategoryWorkspace() {
                   >
                     <div
                       ref={dictionaryStudyCardContentRef}
-                      key={`${currentEntry.id}-${activeSide}-${dictionaryStudy.transitionKey}`}
                       className="dictionary-study-card-content"
                       style={
                         {
@@ -12383,15 +15634,20 @@ export default function CategoryWorkspace() {
                         } as CSSProperties
                       }
                     >
-                      <p className="dictionary-study-side">{activeSideLabel}</p>
-                      <div className="dictionary-study-word">{activeText}</div>
-                      {activeNote ? (
-                        <div className="dictionary-study-note">{activeNote}</div>
-                      ) : (
-                        <div className="dictionary-study-note dictionary-study-note-empty">
-                          без {activeNoteLabel.toLocaleLowerCase()}
-                        </div>
-                      )}
+                      <div
+                        ref={dictionaryStudyCardFitRef}
+                        className="dictionary-study-card-fit"
+                      >
+                        <p className="dictionary-study-side">{activeSideLabel}</p>
+                        <div className="dictionary-study-word">{activeText}</div>
+                        {activeNote ? (
+                          <div className="dictionary-study-note">{activeNote}</div>
+                        ) : (
+                          <div className="dictionary-study-note dictionary-study-note-empty">
+                            без {activeNoteLabel.toLocaleLowerCase()}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
 
@@ -12413,6 +15669,15 @@ export default function CategoryWorkspace() {
                     </button>
                     <button
                       type="button"
+                      className="tool-button tool-yellow dictionary-study-speak"
+                      onClick={speakDictionaryStudyCurrentCard}
+                      aria-label={`Озвучить ${activeSideLabel}`}
+                      title={`Озвучить ${activeSideLabel}`}
+                    >
+                      <SpeakerIcon />
+                    </button>
+                    <button
+                      type="button"
                       className="tool-button tool-green dictionary-study-arrow"
                       onClick={() => moveDictionaryStudy(1)}
                       aria-label="Следующая карточка"
@@ -12427,7 +15692,7 @@ export default function CategoryWorkspace() {
 
         {showSearch && (
           <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/35 p-3">
-            <div className="popup-3d w-full max-w-3xl p-4 sm:p-5">
+            <div className="search-modal popup-3d w-full max-w-3xl p-4 sm:p-5">
               <div className="mb-3 flex items-center justify-between gap-3">
                 <h2 className="font-display text-4xl leading-none">Search</h2>
                 <button
@@ -12602,6 +15867,14 @@ export default function CategoryWorkspace() {
                   <button
                     type="button"
                     className="menu-action px-4 py-3 text-left text-lg font-semibold"
+                    onClick={() => openMenuPanel("friends")}
+                  >
+                    Друзья
+                  </button>
+
+                  <button
+                    type="button"
+                    className="menu-action px-4 py-3 text-left text-lg font-semibold"
                     onClick={goToEntryMenu}
                   >
                     Главное меню
@@ -12715,6 +15988,207 @@ export default function CategoryWorkspace() {
                       Выйти
                     </button>
                   </div>
+                </div>
+              ) : menuPanel === "friends" ? (
+                <div className="menu-scroll mt-4 flex flex-1 flex-col gap-3 overflow-y-auto pr-1">
+                  <button
+                    type="button"
+                    className="mini-action self-start"
+                    onClick={() => setMenuPanel("main")}
+                  >
+                    &lt; назад
+                  </button>
+
+                  <section className="friends-panel">
+                    <label className="settings-label">пригласить в друзья</label>
+                    <div className="friend-action-row">
+                      <input
+                        value={friendRequestUserIdDraft}
+                        onChange={(event) => setFriendRequestUserIdDraft(event.target.value)}
+                        className="settings-input"
+                        placeholder="user-id друга"
+                        autoComplete="off"
+                        spellCheck={false}
+                      />
+                      <button
+                        type="button"
+                        className="mini-action"
+                        onClick={() => void handleSendFriendRequest()}
+                        disabled={isSavingFriendAction}
+                      >
+                        отправить
+                      </button>
+                    </div>
+                  </section>
+
+                  <section className="friends-panel">
+                    <div className="friends-panel-head">
+                      <span className="settings-label">список друзей</span>
+                      <button
+                        type="button"
+                        className="mini-action"
+                        onClick={() => void loadFriends()}
+                        disabled={isSavingFriendAction}
+                      >
+                        обновить
+                      </button>
+                    </div>
+
+                    {friends.length === 0 ? (
+                      <p className="settings-hint">Друзей и приглашений пока нет.</p>
+                    ) : (
+                      <div className="friend-list">
+                        {friends.map((friend) => {
+                          const friendName =
+                            friend.nickname ||
+                            friend.friendUserId ||
+                            friend.friendAppUserId;
+                          const statusLabel =
+                            friend.status === "accepted" ? "друг" : "приглашение отправлено";
+                          const inboxOpen = selectedFriendInboxId === friend.friendAppUserId;
+                          const inboxItems = inboxOpen
+                            ? selectedFriendInboxItems
+                            : friendInboxItems[friend.friendAppUserId] ?? [];
+
+                          return (
+                            <div key={friend.friendshipId} className="friend-item">
+                              <div className="friend-item-main">
+                                <div>
+                                  <p className="friend-name">{friendName}</p>
+                                  <p className="settings-hint break-all">
+                                    {friend.friendUserId ?? friend.friendAppUserId}
+                                  </p>
+                                </div>
+                                {friend.direction === "incoming" &&
+                                friend.status === "pending" ? (
+                                  <div className="friend-request-actions">
+                                    <button
+                                      type="button"
+                                      className="mini-action"
+                                      onClick={() => void handleAcceptFriendRequest(friend)}
+                                      disabled={isSavingFriendAction}
+                                    >
+                                      принять
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="danger-action"
+                                      onClick={() => void handleDeclineFriendRequest(friend)}
+                                      disabled={isSavingFriendAction}
+                                    >
+                                      отклонить
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <span className="friend-status">{statusLabel}</span>
+                                )}
+                              </div>
+
+                              {friend.status === "accepted" && (
+                                <>
+                                  <button
+                                    type="button"
+                                    className="mini-action friend-inbox-button"
+                                    onClick={() =>
+                                      handleToggleFriendInbox(friend.friendAppUserId)
+                                    }
+                                    disabled={isSavingInboxAction}
+                                  >
+                                    inbox
+                                    {friend.inboxPendingCount > 0
+                                      ? ` (${friend.inboxPendingCount})`
+                                      : ""}
+                                  </button>
+
+                                  {inboxOpen && (
+                                    <div className="friend-inbox-list">
+                                      {inboxItems.length === 0 ? (
+                                        <p className="settings-hint">Inbox пуст.</p>
+                                      ) : (
+                                        inboxItems.map((item) => (
+                                          <div key={item.id} className="friend-inbox-item">
+                                            <div>
+                                              <p className="friend-inbox-title">
+                                                {item.title}
+                                              </p>
+                                              <p className="settings-hint">
+                                                {item.type === "public_invite"
+                                                  ? "public-приглашение"
+                                                  : "копия категории"}
+                                              </p>
+                                            </div>
+
+                                            {(item.type === "category_share" ||
+                                              item.type === "public_invite") && (
+                                              <div className="friend-inbox-placement">
+                                              <select
+                                                value={inboxImportTargetIds[item.id] ?? ""}
+                                                className="settings-input"
+                                                onChange={(event) =>
+                                                  setInboxImportTargetIds((prev) => ({
+                                                    ...prev,
+                                                    [item.id]: event.target.value,
+                                                  }))
+                                                }
+                                                disabled={
+                                                  localCategoryOptions.length === 0 ||
+                                                  isSavingInboxAction
+                                                }
+                                              >
+                                                <option value="">куда добавить</option>
+                                                {localCategoryOptions.map((option) => (
+                                                  <option
+                                                    key={`inbox-target-${item.id}-${option.id}`}
+                                                    value={option.id}
+                                                  >
+                                                    {option.label}
+                                                  </option>
+                                                ))}
+                                              </select>
+                                                {item.type === "public_invite" && (
+                                                  <p className="settings-hint">
+                                                    Это общая public-категория, не копия.
+                                                  </p>
+                                                )}
+                                              </div>
+                                            )}
+
+                                            <div className="friend-inbox-actions">
+                                              <button
+                                                type="button"
+                                                className="mini-action"
+                                                onClick={() => void handleAcceptInboxItem(item)}
+                                                disabled={
+                                                  isSavingInboxAction ||
+                                                  ((item.type === "category_share" ||
+                                                    item.type === "public_invite") &&
+                                                    !inboxImportTargetIds[item.id])
+                                                }
+                                              >
+                                                принять
+                                              </button>
+                                              <button
+                                                type="button"
+                                                className="danger-action"
+                                                onClick={() => void handleDeclineInboxItem(item)}
+                                                disabled={isSavingInboxAction}
+                                              >
+                                                отклонить
+                                              </button>
+                                            </div>
+                                          </div>
+                                        ))
+                                      )}
+                                    </div>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </section>
                 </div>
               ) : (
                 <div className="menu-scroll mt-4 flex flex-1 flex-col gap-2 overflow-y-auto pr-1">
@@ -12838,6 +16312,8 @@ function normalizeCategoryRow(category: CategoryRow): CategoryRow {
 
   return {
     ...category,
+    created_at: normalizeTimestamp(category.created_at),
+    updated_at: normalizeTimestamp(category.updated_at),
     content: normalizedContent,
     description: category.description ?? "",
     tag: category.tag ?? "",
@@ -12849,9 +16325,23 @@ function normalizeCategoryRow(category: CategoryRow): CategoryRow {
 function normalizeProjectRow(project: ProjectRow): ProjectRow {
   return {
     ...project,
+    created_at: normalizeTimestamp(project.created_at),
+    updated_at: normalizeTimestamp(project.updated_at),
     tag_filter: project.tag_filter ?? "",
     container_category_ids: project.container_category_ids ?? "",
   };
+}
+
+function normalizeTimestamp(value: unknown): string {
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  if (typeof value === "string" && value.length > 0) {
+    return value;
+  }
+
+  return new Date(0).toISOString();
 }
 
 function mergeProjectTitleDraftMap(
@@ -13511,7 +17001,7 @@ function createRichFileAttachmentElement(
   link.setAttribute("target", "_blank");
   link.setAttribute("rel", "noopener noreferrer");
   link.setAttribute("contenteditable", "false");
-  link.setAttribute("draggable", "false");
+  link.setAttribute("draggable", "true");
   link.setAttribute("aria-label", `Открыть файл ${fileName}`);
   link.setAttribute("title", `${fileName} (${sizeLabel})`);
   link.textContent = fileName;
@@ -13931,6 +17421,8 @@ const MESSAGE_DICTIONARY_KIND = "itemkey-message-dictionary-v1";
 const DICTIONARY_EXPORT_KIND = "itemkey-dict-export";
 const DICTIONARY_EXPORT_SCHEMA_VERSION = 1;
 const DICTIONARY_LABEL_MAX_LENGTH = 42;
+const DICTIONARY_STUDY_PROGRESS_STORAGE_PREFIX =
+  "itemkey:dictionary-study-progress:v1";
 
 const DEFAULT_DICTIONARY_FIELD_LABELS: DictionaryFieldLabels = {
   side1: "сторона 1",
@@ -13938,6 +17430,20 @@ const DEFAULT_DICTIONARY_FIELD_LABELS: DictionaryFieldLabels = {
   side2: "сторона 2",
   side2Note: "пояснение 2",
 };
+
+const DICTIONARY_EDITOR_SEARCH_FIELDS: DictionaryEntryField[] = [
+  "side1",
+  "side1Note",
+  "side2",
+  "side2Note",
+];
+const DEFAULT_DICTIONARY_AUTO_SPEAK_FIELDS: DictionaryEntryField[] = [
+  "side1",
+  "side2",
+];
+const DEFAULT_DICTIONARY_MANUAL_SPEAK_FIELDS: DictionaryEntryField[] = [
+  ...DICTIONARY_EDITOR_SEARCH_FIELDS,
+];
 
 type DictionaryImportPreview =
   | {
@@ -14073,6 +17579,40 @@ function normalizeDictionaryEntries(entries: DictionaryEntry[]): DictionaryEntry
   return result;
 }
 
+function isDictionaryEntryField(value: unknown): value is DictionaryEntryField {
+  return (
+    typeof value === "string" &&
+    DICTIONARY_EDITOR_SEARCH_FIELDS.includes(value as DictionaryEntryField)
+  );
+}
+
+function normalizeDictionaryAutoSpeakFields(
+  value: unknown,
+  fallback: DictionaryEntryField[] = DEFAULT_DICTIONARY_AUTO_SPEAK_FIELDS
+): DictionaryEntryField[] {
+  if (!Array.isArray(value)) {
+    return [...fallback];
+  }
+
+  const result: DictionaryEntryField[] = [];
+  for (const field of value) {
+    if (!isDictionaryEntryField(field) || result.includes(field)) {
+      continue;
+    }
+
+    result.push(field);
+  }
+
+  return result;
+}
+
+function normalizeDictionaryManualSpeakFields(
+  value: unknown,
+  fallback: DictionaryEntryField[] = DEFAULT_DICTIONARY_MANUAL_SPEAK_FIELDS
+): DictionaryEntryField[] {
+  return normalizeDictionaryAutoSpeakFields(value, fallback);
+}
+
 function normalizeMessageDictionaryPayload(
   payload: MessageDictionaryPayload
 ): MessageDictionaryPayload {
@@ -14081,6 +17621,11 @@ function normalizeMessageDictionaryPayload(
     tags: dedupeCategoryTags(Array.isArray(payload.tags) ? payload.tags : []),
     promptSide: normalizeDictionaryPromptSide(payload.promptSide),
     shuffle: Boolean(payload.shuffle),
+    autoSpeak: Boolean(payload.autoSpeak),
+    autoSpeakFields: normalizeDictionaryAutoSpeakFields(payload.autoSpeakFields),
+    manualSpeakFields: normalizeDictionaryManualSpeakFields(
+      payload.manualSpeakFields
+    ),
     labels: normalizeDictionaryLabels(payload.labels),
     entries: normalizeDictionaryEntries(payload.entries),
   };
@@ -14219,6 +17764,11 @@ function parseMessageDictionaryContent(
         : [],
       promptSide: normalizeDictionaryPromptSide(parsed.promptSide),
       shuffle: Boolean(parsed.shuffle),
+      autoSpeak: Boolean(parsed.autoSpeak),
+      autoSpeakFields: normalizeDictionaryAutoSpeakFields(parsed.autoSpeakFields),
+      manualSpeakFields: normalizeDictionaryManualSpeakFields(
+        parsed.manualSpeakFields
+      ),
       labels: normalizeDictionaryLabels(parsed.labels),
       entries,
     });
@@ -14235,6 +17785,9 @@ function serializeMessageDictionaryContent(payload: MessageDictionaryPayload): s
     tags: normalized.tags,
     promptSide: normalized.promptSide,
     shuffle: normalized.shuffle,
+    autoSpeak: normalized.autoSpeak,
+    autoSpeakFields: normalized.autoSpeakFields,
+    manualSpeakFields: normalized.manualSpeakFields,
     labels: normalized.labels,
     entries: normalized.entries,
   });
@@ -14364,6 +17917,13 @@ function parseContinuousDictionaryCollection(value: unknown): DictionaryBlock[] 
         : [],
       promptSide: normalizeDictionaryPromptSide(rawDictionary.promptSide),
       shuffle: Boolean(rawDictionary.shuffle),
+      autoSpeak: Boolean(rawDictionary.autoSpeak),
+      autoSpeakFields: normalizeDictionaryAutoSpeakFields(
+        rawDictionary.autoSpeakFields
+      ),
+      manualSpeakFields: normalizeDictionaryManualSpeakFields(
+        rawDictionary.manualSpeakFields
+      ),
       labels: normalizeDictionaryLabels(rawDictionary.labels),
       entries,
     });
@@ -14646,6 +18206,9 @@ function buildDictionaryExportDocument(
     tags: normalized.tags,
     promptSide: normalized.promptSide,
     shuffle: normalized.shuffle,
+    autoSpeak: normalized.autoSpeak,
+    autoSpeakFields: normalized.autoSpeakFields,
+    manualSpeakFields: normalized.manualSpeakFields,
     labels: normalized.labels,
     entries: normalized.entries,
   };
@@ -14704,6 +18267,11 @@ function parseDictionaryJsonImport(value: string): DictionaryImportPreview {
         : [],
       promptSide: normalizeDictionaryPromptSide(parsed.promptSide),
       shuffle: Boolean(parsed.shuffle),
+      autoSpeak: Boolean(parsed.autoSpeak),
+      autoSpeakFields: normalizeDictionaryAutoSpeakFields(parsed.autoSpeakFields),
+      manualSpeakFields: normalizeDictionaryManualSpeakFields(
+        parsed.manualSpeakFields
+      ),
       labels: normalizeDictionaryLabels(parsed.labels),
       entries,
     });
@@ -14985,6 +18553,31 @@ function toDictionaryNoteSideLabel(
     : normalizedLabels.side2Note;
 }
 
+function getDictionaryFieldLabel(
+  field: DictionaryEntryField,
+  labels: DictionaryFieldLabels = DEFAULT_DICTIONARY_FIELD_LABELS
+): string {
+  const normalizedLabels = normalizeDictionaryLabels(labels);
+  return normalizedLabels[field];
+}
+
+function getDictionaryEntryFieldText(
+  entry: DictionaryEntry,
+  field: DictionaryEntryField
+): string {
+  return entry[field];
+}
+
+function getDictionarySideAutoSpeakFields(
+  side: DictionaryPromptSide,
+  fields: DictionaryEntryField[]
+): DictionaryEntryField[] {
+  const allowedFields: DictionaryEntryField[] =
+    side === "side1" ? ["side1", "side1Note"] : ["side2", "side2Note"];
+
+  return fields.filter((field) => allowedFields.includes(field));
+}
+
 function shuffleDictionaryEntries(entries: DictionaryEntry[]): DictionaryEntry[] {
   const shuffled = [...entries];
 
@@ -14994,6 +18587,149 @@ function shuffleDictionaryEntries(entries: DictionaryEntry[]): DictionaryEntry[]
   }
 
   return shuffled;
+}
+
+function makeDictionaryStudyProgressKey(options: {
+  sourceCategoryId: string;
+  sourceMessageId: string | null;
+  dictionaryId: string | null;
+  title: string;
+}): string {
+  const sourceKey = options.dictionaryId
+    ? `dictionary:${options.dictionaryId}`
+    : options.sourceMessageId
+      ? `message:${options.sourceMessageId}`
+      : `title:${options.title}`;
+
+  return [
+    DICTIONARY_STUDY_PROGRESS_STORAGE_PREFIX,
+    options.sourceCategoryId,
+    sourceKey,
+  ]
+    .map((part) => encodeURIComponent(part))
+    .join(":");
+}
+
+function readDictionaryStudyProgress(
+  progressKey: string
+): DictionaryStudyProgress | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(progressKey);
+    if (!raw) {
+      return null;
+    }
+
+    const parsed: unknown = JSON.parse(raw);
+    if (!isObjectRecord(parsed)) {
+      return null;
+    }
+
+    const cardIds = Array.isArray(parsed.cardIds)
+      ? parsed.cardIds.filter((id): id is string => typeof id === "string")
+      : [];
+
+    return {
+      currentIndex:
+        typeof parsed.currentIndex === "number" &&
+        Number.isFinite(parsed.currentIndex)
+          ? Math.max(0, Math.floor(parsed.currentIndex))
+          : 0,
+      isAnswerRevealed: Boolean(parsed.isAnswerRevealed),
+      cardIds,
+      shuffle: Boolean(parsed.shuffle),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveDictionaryStudyProgress(study: DictionaryStudyState) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    const progress: DictionaryStudyProgress = {
+      currentIndex: study.currentIndex,
+      isAnswerRevealed: study.isAnswerRevealed,
+      cardIds: study.cards.map((entry) => entry.id),
+      shuffle: study.shuffle,
+    };
+    window.localStorage.setItem(study.progressKey, JSON.stringify(progress));
+  } catch {
+    return;
+  }
+}
+
+function restoreDictionaryStudyProgress(
+  progress: DictionaryStudyProgress | null,
+  baseCards: DictionaryEntry[],
+  defaultCards: DictionaryEntry[],
+  shuffle: boolean
+): {
+  cards: DictionaryEntry[];
+  currentIndex: number;
+  isAnswerRevealed: boolean;
+} {
+  if (!progress || baseCards.length === 0) {
+    return {
+      cards: defaultCards,
+      currentIndex: 0,
+      isAnswerRevealed: false,
+    };
+  }
+
+  const cardsById = new Map(baseCards.map((entry) => [entry.id, entry]));
+  const restoredCards =
+    shuffle && progress.shuffle
+      ? [
+          ...progress.cardIds
+            .map((id) => cardsById.get(id))
+            .filter((entry): entry is DictionaryEntry => Boolean(entry)),
+          ...baseCards.filter((entry) => !progress.cardIds.includes(entry.id)),
+        ]
+      : [...baseCards];
+  const cards = restoredCards.length > 0 ? restoredCards : defaultCards;
+
+  return {
+    cards,
+    currentIndex: Math.min(progress.currentIndex, cards.length - 1),
+    isAnswerRevealed: progress.isAnswerRevealed,
+  };
+}
+
+function getDictionaryStudyActiveTextSegments(
+  study: DictionaryStudyState,
+  mode: "auto" | "manual"
+): string[] {
+  const currentEntry = study.cards[study.currentIndex] ?? null;
+  if (!currentEntry) {
+    return [];
+  }
+
+  const activeSide = study.isAnswerRevealed
+    ? oppositeDictionaryPromptSide(study.promptSide)
+    : study.promptSide;
+
+  const fieldsToSpeak =
+    mode === "auto"
+      ? getDictionarySideAutoSpeakFields(
+          activeSide,
+          normalizeDictionaryAutoSpeakFields(study.autoSpeakFields)
+        )
+      : getDictionarySideAutoSpeakFields(
+          activeSide,
+          normalizeDictionaryManualSpeakFields(study.manualSpeakFields)
+        );
+
+  return fieldsToSpeak
+    .map((field) => getDictionaryEntryFieldText(currentEntry, field))
+    .map((text) => text.trim())
+    .filter(Boolean);
 }
 
 function reorderIdListByTarget(source: string[], dragId: string, targetId: string): string[] {
@@ -15197,6 +18933,8 @@ function sortProjectRootCategory(
 function normalizeMessageRow(message: MessageRow): MessageRow {
   return {
     ...message,
+    created_at: normalizeTimestamp(message.created_at),
+    updated_at: normalizeTimestamp(message.updated_at),
     content: normalizePersistedMessageContent(message.content),
     title: normalizeMessageTitle(message.title),
     message_type: message.message_type ?? "info",
@@ -15250,6 +18988,206 @@ function makePreview(content: string, query: string): string {
   const segment = trimmed.slice(start, end);
 
   return `${start > 0 ? "..." : ""}${segment}${end < trimmed.length ? "..." : ""}`;
+}
+
+function makeDictionaryEditorCellKey(
+  entryId: string,
+  field: DictionaryEntryField
+): string {
+  return `${entryId}:${field}`;
+}
+
+function normalizeDictionarySearchText(value: string): string {
+  return value
+    .toLocaleLowerCase("ru-RU")
+    .replace(/ё/g, "е")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function getDictionarySearchTokens(value: string): Array<{
+  text: string;
+  start: number;
+  end: number;
+}> {
+  const tokens: Array<{ text: string; start: number; end: number }> = [];
+  const wordPattern = /[0-9A-Za-zА-Яа-яЁё]+/g;
+  let match: RegExpExecArray | null = wordPattern.exec(value);
+
+  while (match) {
+    const rawText = match[0];
+    tokens.push({
+      text: normalizeDictionarySearchText(rawText),
+      start: match.index,
+      end: match.index + rawText.length,
+    });
+    match = wordPattern.exec(value);
+  }
+
+  return tokens.filter((token) => token.text.length > 0);
+}
+
+function findDictionaryEditorSearchMatch(
+  value: string,
+  query: string,
+  queryTokens: string[]
+): { start: number; end: number; isFuzzy: boolean } | null {
+  const exactPattern = buildDictionarySearchPhrasePattern(query);
+  const exactMatch = exactPattern?.exec(value);
+
+  if (exactMatch && typeof exactMatch.index === "number") {
+    return {
+      start: exactMatch.index,
+      end: exactMatch.index + exactMatch[0].length,
+      isFuzzy: false,
+    };
+  }
+
+  const valueTokens = getDictionarySearchTokens(value);
+  if (queryTokens.length === 0 || valueTokens.length === 0) {
+    return null;
+  }
+
+  let firstMatchedToken: { start: number; end: number } | null = null;
+
+  for (const queryToken of queryTokens) {
+    const matchedToken = valueTokens.find((valueToken) =>
+      isDictionarySearchTokenMatch(queryToken, valueToken.text)
+    );
+
+    if (!matchedToken) {
+      return null;
+    }
+
+    if (!firstMatchedToken) {
+      firstMatchedToken = {
+        start: matchedToken.start,
+        end: matchedToken.end,
+      };
+    }
+  }
+
+  if (!firstMatchedToken) {
+    return null;
+  }
+
+  return {
+    start: firstMatchedToken.start,
+    end: firstMatchedToken.end,
+    isFuzzy: true,
+  };
+}
+
+function buildDictionarySearchPhrasePattern(query: string): RegExp | null {
+  const normalizedQuery = normalizeDictionarySearchText(query);
+  if (!normalizedQuery) {
+    return null;
+  }
+
+  const pattern = Array.from(normalizedQuery)
+    .map((character) => {
+      if (character === " ") {
+        return "\\s+";
+      }
+
+      if (character === "е") {
+        return "[её]";
+      }
+
+      return escapeRegExp(character);
+    })
+    .join("");
+
+  return new RegExp(pattern, "iu");
+}
+
+function isDictionarySearchTokenMatch(
+  queryToken: string,
+  valueToken: string
+): boolean {
+  if (!queryToken || !valueToken) {
+    return false;
+  }
+
+  if (queryToken === valueToken || valueToken.includes(queryToken)) {
+    return true;
+  }
+
+  if (queryToken.length < 3 || valueToken.length < 3) {
+    return false;
+  }
+
+  const maxDistance = getDictionarySearchMaxDistance(queryToken.length);
+  if (Math.abs(queryToken.length - valueToken.length) > maxDistance) {
+    return false;
+  }
+
+  return (
+    getBoundedLevenshteinDistance(queryToken, valueToken, maxDistance) <=
+    maxDistance
+  );
+}
+
+function getDictionarySearchMaxDistance(length: number): number {
+  if (length <= 4) {
+    return 1;
+  }
+
+  if (length <= 8) {
+    return 2;
+  }
+
+  return 3;
+}
+
+function getBoundedLevenshteinDistance(
+  left: string,
+  right: string,
+  maxDistance: number
+): number {
+  if (Math.abs(left.length - right.length) > maxDistance) {
+    return maxDistance + 1;
+  }
+
+  let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    const current = [leftIndex];
+    let rowMinimum = current[0];
+
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      const substitutionCost =
+        left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1;
+      const nextDistance = Math.min(
+        current[rightIndex - 1] + 1,
+        previous[rightIndex] + 1,
+        previous[rightIndex - 1] + substitutionCost
+      );
+
+      current[rightIndex] = nextDistance;
+      rowMinimum = Math.min(rowMinimum, nextDistance);
+    }
+
+    if (rowMinimum > maxDistance) {
+      return maxDistance + 1;
+    }
+
+    previous = current;
+  }
+
+  return previous[right.length];
+}
+
+function wrapIndex(value: number, length: number): number {
+  if (length <= 0) {
+    return 0;
+  }
+
+  return ((value % length) + length) % length;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function isValidHttpUrl(value: string): boolean {

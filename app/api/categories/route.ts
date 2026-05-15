@@ -3,6 +3,8 @@ import { NextRequest } from "next/server";
 import { createDefaultTitle } from "@/lib/categories";
 import { getCategoryStore } from "@/lib/category-store";
 import { toErrorMessage } from "@/lib/errors";
+import { getCategoryRealtimeUserIds, getOriginClientId } from "@/lib/realtime-targets";
+import { publishRealtimeEvent } from "@/lib/realtime";
 import {
   getProjectStore,
   parseSerializedList,
@@ -87,6 +89,14 @@ export async function POST(request: NextRequest) {
         // If project metadata update fails, keep created category.
       }
     }
+
+    await publishRealtimeEvent({
+      kind: "workspace",
+      action: "category_create",
+      userIds: await getCategoryRealtimeUserIds(user.id, created.id),
+      categoryIds: [created.id],
+      originClientId: getOriginClientId(request),
+    });
 
     return Response.json({ data: created, source: store.source }, { status: 201 });
   } catch (error) {

@@ -6,6 +6,8 @@ import {
 } from "@/lib/project-store";
 import { toErrorMessage } from "@/lib/errors";
 import { getRequestUser } from "@/lib/request-user";
+import { publishRealtimeEvent } from "@/lib/realtime";
+import { getOriginClientId } from "@/lib/realtime-targets";
 
 export const dynamic = "force-dynamic";
 
@@ -53,6 +55,13 @@ export async function POST(request: NextRequest) {
       title,
       tag_filter: serializeSerializedList(tags),
       container_category_ids: serializeSerializedList(containerCategoryIds),
+    });
+
+    await publishRealtimeEvent({
+      kind: "projects",
+      action: "project_create",
+      userIds: [user.id],
+      originClientId: getOriginClientId(request),
     });
 
     return Response.json({ data: created, source: store.source }, { status: 201 });

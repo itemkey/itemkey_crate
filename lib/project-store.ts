@@ -122,9 +122,23 @@ function hasOwnProperty<T extends object>(
 function normalizeProject(raw: ProjectRow): ProjectRow {
   return {
     ...raw,
+    created_at: normalizeTimestamp(raw.created_at),
+    updated_at: normalizeTimestamp(raw.updated_at),
     tag_filter: raw.tag_filter ?? "",
     container_category_ids: raw.container_category_ids ?? "",
   };
+}
+
+function normalizeTimestamp(value: unknown): string {
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  if (typeof value === "string" && value.length > 0) {
+    return value;
+  }
+
+  return new Date(0).toISOString();
 }
 
 function makeProjectUpdateSet(patch: ProjectPatch): {

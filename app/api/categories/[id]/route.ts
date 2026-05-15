@@ -5,6 +5,8 @@ import { getCategoryStore } from "@/lib/category-store";
 import { toErrorMessage } from "@/lib/errors";
 import { getProjectStore } from "@/lib/project-store";
 import { getRequestUser } from "@/lib/request-user";
+import { publishRealtimeEvent } from "@/lib/realtime";
+import { getCategoryRealtimeUserIds, getOriginClientId } from "@/lib/realtime-targets";
 
 export const dynamic = "force-dynamic";
 
@@ -94,6 +96,13 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
 
     const store = await getCategoryStore(user.id);
     const updated = await store.update(id, patch);
+    await publishRealtimeEvent({
+      kind: "workspace",
+      action: "category_update",
+      userIds: await getCategoryRealtimeUserIds(user.id, updated.id),
+      categoryIds: [updated.id],
+      originClientId: getOriginClientId(request),
+    });
     return Response.json({ data: updated, source: store.source });
   } catch (error) {
     const fallback = "Unable to update category.";
@@ -136,6 +145,7 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
       parent_id: node.parent_id,
     }));
     const deletedIds = [target.id, ...collectDescendantIds(links, target.id)];
+    const realtimeUserIds = await getCategoryRealtimeUserIds(user.id, target.id);
 
     await store.remove(id);
 
@@ -145,6 +155,14 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
     } catch {
       // Ignore cleanup errors, category removal already succeeded.
     }
+
+    await publishRealtimeEvent({
+      kind: "workspace",
+      action: "category_delete",
+      userIds: realtimeUserIds,
+      categoryIds: deletedIds,
+      originClientId: getOriginClientId(request),
+    });
 
     return Response.json({ ok: true, source: store.source });
   } catch (error) {

@@ -3,6 +3,8 @@ import { NextRequest } from "next/server";
 import { getCategoryStore } from "@/lib/category-store";
 import { toErrorMessage } from "@/lib/errors";
 import { getRequestUser } from "@/lib/request-user";
+import { publishRealtimeEvent } from "@/lib/realtime";
+import { getCategoryRealtimeUserIds, getOriginClientId } from "@/lib/realtime-targets";
 
 export const dynamic = "force-dynamic";
 
@@ -28,6 +30,13 @@ export async function PATCH(request: NextRequest) {
 
     const store = await getCategoryStore(user.id);
     const reordered = await store.reorderMessages(body.categoryId, body.orderedIds);
+    await publishRealtimeEvent({
+      kind: "messages",
+      action: "message_reorder",
+      userIds: await getCategoryRealtimeUserIds(user.id, body.categoryId),
+      categoryIds: [body.categoryId],
+      originClientId: getOriginClientId(request),
+    });
     return Response.json({ data: reordered, source: store.source });
   } catch (error) {
     return Response.json(

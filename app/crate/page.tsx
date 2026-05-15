@@ -1,5 +1,5 @@
-import CategoryWorkspace from "@/components/category-workspace";
+import CategoryWorkspaceLoader from "@/components/category-workspace-loader";
 
 export default function CratePage() {
-  return <CategoryWorkspace />;
+  return <CategoryWorkspaceLoader />;
 }

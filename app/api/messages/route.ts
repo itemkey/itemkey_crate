@@ -3,6 +3,8 @@ import { NextRequest } from "next/server";
 import { getCategoryStore } from "@/lib/category-store";
 import { toErrorMessage } from "@/lib/errors";
 import { getRequestUser } from "@/lib/request-user";
+import { publishRealtimeEvent } from "@/lib/realtime";
+import { getCategoryRealtimeUserIds, getOriginClientId } from "@/lib/realtime-targets";
 
 export const dynamic = "force-dynamic";
 
@@ -62,6 +64,14 @@ export async function POST(request: NextRequest) {
       title,
       content,
       messageType,
+    });
+
+    await publishRealtimeEvent({
+      kind: "messages",
+      action: "message_create",
+      userIds: await getCategoryRealtimeUserIds(user.id, created.category_id),
+      categoryIds: [created.category_id],
+      originClientId: getOriginClientId(request),
     });
 
     return Response.json({ data: created, source: store.source }, { status: 201 });

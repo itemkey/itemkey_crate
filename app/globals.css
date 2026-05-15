@@ -240,6 +240,24 @@ body {
   overflow: hidden;
 }
 
+.sidebar-item-row {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+}
+
+.sidebar-item-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.sidebar-item-title {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .sidebar-item::after {
   content: "";
   position: absolute;
@@ -252,6 +270,30 @@ body {
 
 .sidebar-item-active {
   background: #909090;
+}
+
+.sidebar-item-row-active .sidebar-delete {
+  background: #909090;
+}
+
+.sidebar-delete {
+  flex: 0 0 3.2rem;
+  min-width: 3.2rem;
+  border: 0;
+  border-top: 1px solid var(--panel-light);
+  border-bottom: 1px solid #6b6b6b;
+  border-left: 1px solid #6b6b6b;
+  background: #9f9f9f;
+  color: #241515;
+  font-size: 1.55rem;
+  font-weight: 900;
+  line-height: 1;
+  align-items: center;
+  justify-content: center;
+}
+
+.sidebar-delete:disabled {
+  opacity: 0.45;
 }
 
 .sidebar-item:hover {
@@ -687,6 +729,8 @@ body {
   font-weight: 700;
   line-height: 1.25;
   padding: 0.46rem 0.68rem 0.54rem 3.2rem;
+  cursor: grab;
+  user-select: none;
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.7),
     inset 0 -1px 0 rgba(104, 104, 104, 0.4),
@@ -735,6 +779,47 @@ body {
 .message-editor-rich a.rich-file-link.rich-file-delete-confirm,
 .continuous-editor-rich a.rich-file-link.rich-file-delete-confirm {
   filter: brightness(0.58) saturate(0.68);
+}
+
+.message-editor-rich .rich-file-zone,
+.continuous-editor-rich .rich-file-zone {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  margin: 0.55rem 0;
+}
+
+.message-editor-rich .rich-file-row,
+.continuous-editor-rich .rich-file-row {
+  line-height: 1;
+}
+
+.message-editor-rich .rich-file-row .rich-file-link,
+.continuous-editor-rich .rich-file-row .rich-file-link {
+  margin: 0;
+}
+
+.message-editor-rich .rich-file-line,
+.continuous-editor-rich .rich-file-line {
+  display: block;
+  width: 100%;
+  min-width: 100%;
+  height: 0.85rem;
+  min-height: 0.85rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: text;
+  user-select: none;
+}
+
+.message-editor-rich .rich-file-link.rich-file-dragging,
+.continuous-editor-rich .rich-file-link.rich-file-dragging,
+.message-editor-rich .rich-file-row.rich-file-dragging .rich-file-link,
+.continuous-editor-rich .rich-file-row.rich-file-dragging .rich-file-link {
+  opacity: 0.72;
+  cursor: grabbing;
 }
 
 .message-editor-rich .rich-image-zone,
@@ -958,6 +1043,23 @@ body {
   gap: 0.42em;
 }
 
+.continuous-dictionary-card-dragging {
+  outline: 2px solid #4f6636;
+  outline-offset: -2px;
+}
+
+.dictionary-reorder-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-left: auto;
+}
+
+.dictionary-reorder-button {
+  min-width: 2rem;
+  padding-inline: 0.35rem;
+}
+
 .continuous-checklist-head {
   display: flex;
   align-items: center;
@@ -1146,6 +1248,131 @@ body {
 .settings-input:focus {
   outline: 1px solid #4a72be;
   outline-offset: -1px;
+}
+
+.visibility-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.35rem;
+  border: 1px solid #5f5f5f;
+  background: #dce9b7;
+  color: #243114;
+  padding: 0.12rem 0.38rem;
+  font-size: 0.68rem;
+  font-weight: 800;
+  line-height: 1;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
+
+.category-share-panel,
+.public-category-panel,
+.friends-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  border: 1px solid #6b6b6b;
+  background: #d0d0d0;
+  padding: 0.52rem;
+}
+
+.public-category-state,
+.friends-panel-head,
+.friend-item-main,
+.friend-inbox-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.45rem;
+}
+
+.friend-request-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-left: auto;
+}
+
+.public-category-state {
+  flex-wrap: wrap;
+  border: 1px solid #777777;
+  background: #efefef;
+  padding: 0.38rem 0.45rem;
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.public-member-list,
+.friend-list,
+.friend-inbox-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.42rem;
+}
+
+.public-member-item,
+.friend-item,
+.friend-inbox-item {
+  border: 1px solid #777777;
+  background: #e2e2e2;
+  padding: 0.45rem;
+}
+
+.public-member-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(6rem, 8rem) auto;
+  align-items: center;
+  gap: 0.38rem;
+}
+
+.public-member-name,
+.friend-name,
+.friend-inbox-title {
+  margin: 0;
+  color: #171717;
+  font-size: 0.86rem;
+  font-weight: 800;
+}
+
+.public-member-role {
+  min-width: 0;
+}
+
+.public-member-remove {
+  min-width: 5.8rem;
+}
+
+.friend-action-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.38rem;
+}
+
+.friend-status {
+  border: 1px solid #717171;
+  background: #f0f0f0;
+  color: #242424;
+  padding: 0.18rem 0.34rem;
+  font-size: 0.67rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.friend-inbox-button {
+  width: 100%;
+  margin-top: 0.42rem;
+}
+
+.friend-inbox-list {
+  margin-top: 0.42rem;
+}
+
+.friend-inbox-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
 }
 
 .category-tag-editor {
@@ -1401,6 +1628,30 @@ body {
   overflow: hidden;
 }
 
+.dictionary-editor-header {
+  align-items: flex-start;
+}
+
+.dictionary-editor-title-wrap {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.dictionary-editor-title-badge {
+  max-width: min(34rem, 100%);
+  border: 1px solid #5f5f5f;
+  background: #d4d4d4;
+  color: #202020;
+  padding: 0.18rem 0.48rem;
+  font-size: 0.78rem;
+  font-weight: 900;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
 .dictionary-editor-tabs {
   display: flex;
   flex-wrap: wrap;
@@ -1455,6 +1706,45 @@ body {
 .dictionary-editor-toggle input {
   width: 1rem;
   height: 1rem;
+}
+
+.dictionary-editor-autospeak-fields {
+  min-width: 0;
+  border: 1px solid #707070;
+  background: #d8d8d8;
+  padding: 0.34rem 0.48rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.32rem;
+}
+
+.dictionary-editor-autospeak-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.28rem;
+}
+
+.dictionary-editor-autospeak-option {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.32rem;
+  color: #202020;
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.dictionary-editor-autospeak-option input {
+  width: 0.95rem;
+  height: 0.95rem;
+  flex: 0 0 auto;
+}
+
+.dictionary-editor-autospeak-option span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dictionary-editor-transfer {
@@ -1531,6 +1821,10 @@ body {
   text-align: left;
 }
 
+.dictionary-editor-row-match td {
+  background: #d6ddca;
+}
+
 .dictionary-editor-label-input {
   min-width: 10rem;
   font-size: 0.72rem;
@@ -1553,6 +1847,20 @@ body {
   line-height: 1.25;
 }
 
+.dictionary-editor-cell-match {
+  border-color: #627432;
+  background: #eef4df;
+  box-shadow: inset 0 0 0 1px rgba(81, 105, 35, 0.35);
+}
+
+.dictionary-editor-cell-active-match {
+  border-color: #315fa3;
+  background: #f4f2c9;
+  outline: 2px solid #315fa3;
+  outline-offset: -2px;
+  box-shadow: inset 0 0 0 1px rgba(49, 95, 163, 0.32);
+}
+
 .dictionary-editor-remove {
   min-width: 2rem;
   padding: 0.25rem 0.48rem;
@@ -1565,6 +1873,71 @@ body {
   justify-content: flex-end;
   gap: 0.4rem;
   flex-wrap: wrap;
+}
+
+.dictionary-editor-search-panel {
+  flex: 1 1 33rem;
+  min-width: min(100%, 28rem);
+  display: flex;
+  align-items: end;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.dictionary-editor-search-field {
+  flex: 1 1 14rem;
+  min-width: 12rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.dictionary-editor-search-input {
+  min-height: 2.1rem;
+}
+
+.dictionary-editor-search-status {
+  min-height: 2.1rem;
+  border: 1px solid #686868;
+  background: #dedede;
+  color: #202020;
+  padding: 0.38rem 0.5rem;
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.78rem;
+  font-weight: 900;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.dictionary-editor-search-status-empty {
+  border-color: #795555;
+  background: #e0c8c8;
+  color: #4a1515;
+}
+
+.dictionary-editor-search-controls {
+  display: flex;
+  align-items: stretch;
+  gap: 0.24rem;
+}
+
+.dictionary-editor-search-step {
+  min-width: 2rem;
+  padding-inline: 0.42rem;
+}
+
+.dictionary-editor-search-clear,
+.dictionary-editor-add-entry {
+  min-height: 2.1rem;
+  white-space: nowrap;
+}
+
+.friend-inbox-placement {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.24rem;
 }
 
 .dictionary-editor-actions .danger-action {
@@ -1629,13 +2002,49 @@ body {
 }
 
 .dictionary-study-counter {
-  align-self: flex-start;
   border: 1px solid #646464;
   background: #d6d6d6;
   padding: 0.22rem 0.58rem;
   color: #222222;
   font-size: 0.82rem;
   font-weight: 800;
+}
+
+.dictionary-study-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.dictionary-study-shuffle-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid #686868;
+  background: #cfcfcf;
+  padding: 0.22rem 0.5rem;
+  color: #222222;
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.dictionary-study-shuffle-toggle input {
+  width: 1rem;
+  height: 1rem;
+}
+
+.dictionary-study-reset-button {
+  padding-block: 0.22rem;
+}
+
+.dictionary-study-autospeak-badge {
+  border: 1px solid #5f6d3c;
+  background: #d8e3c1;
+  padding: 0.22rem 0.5rem;
+  color: #263315;
+  font-size: 0.78rem;
+  font-weight: 900;
 }
 
 .dictionary-study-card-shell {
@@ -1645,37 +2054,51 @@ body {
   background: #eeeeee;
   display: flex;
   align-items: stretch;
-  overflow: visible;
+  overflow: hidden;
 }
 
 .dictionary-study-card-content {
   --dictionary-study-scale: 1;
   width: 100%;
+  height: 100%;
   min-height: 0;
   padding: var(--dictionary-study-padding, clamp(0.42rem, 3vw, 1.5rem));
   display: flex;
   flex-direction: column;
   justify-content: center;
-  gap: var(--dictionary-study-gap, 0.75rem);
-  overflow: visible;
+  align-items: stretch;
+  overflow: hidden;
   animation: dictionary-card-enter 180ms ease-out both;
+}
+
+.dictionary-study-card-fit {
+  width: 100%;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: var(--dictionary-study-gap, 0.75rem);
+  min-height: 0;
 }
 
 .dictionary-study-side {
   margin: 0;
   color: #414141;
-  font-size: 0.82rem;
+  font-size: clamp(0.72rem, calc(var(--dictionary-study-scale, 1) * 0.82rem), 0.82rem);
   font-weight: 900;
   text-transform: uppercase;
 }
 
 .dictionary-study-word {
+  width: 100%;
   color: #151515;
   font-size: var(--dictionary-study-word-size, clamp(0.9rem, 7vw, 5.1rem));
   font-weight: 900;
-  line-height: 1.04;
-  word-break: break-word;
-  overflow-wrap: anywhere;
+  line-height: 1.14;
+  word-break: normal;
+  overflow-wrap: normal;
+  hyphens: none;
 }
 
 .dictionary-study-note {
@@ -1699,14 +2122,20 @@ body {
 
 .dictionary-study-actions {
   display: grid;
-  grid-template-columns: auto minmax(8rem, 1fr) auto;
+  grid-template-columns: auto minmax(8rem, 1fr) auto auto;
   align-items: center;
   gap: 0.65rem;
 }
 
-.dictionary-study-arrow {
+.dictionary-study-arrow,
+.dictionary-study-speak {
   width: 4.6rem;
   height: 4.1rem;
+}
+
+.dictionary-study-speak svg {
+  width: 1.45rem;
+  height: 1.45rem;
 }
 
 .dictionary-study-reveal {
@@ -1723,6 +2152,12 @@ body {
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dictionary-study-card-content {
+    animation: none;
   }
 }
 
@@ -2012,6 +2447,38 @@ body {
   background-size: cover;
 }
 
+.mobile-only {
+  display: none !important;
+}
+
+.workspace-loading-shell {
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #b8b8b8;
+  color: #171717;
+}
+
+.workspace-loading-panel {
+  border: 2px solid #686868;
+  background: #d4d4d4;
+  padding: 0.75rem 1rem;
+  font-size: 0.9rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+@media (min-width: 901px) {
+  .toolkit-advanced > summary {
+    display: none;
+  }
+
+  .toolkit-advanced:not([open]) > .toolkit-advanced-grid {
+    display: grid;
+  }
+}
+
 @media (max-width: 1200px) {
   .settings-panel {
     flex-basis: 16.5rem;
@@ -2123,16 +2590,755 @@ body {
     width: 100%;
   }
 
+  .dictionary-editor-title-wrap {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+
+  .dictionary-editor-search-panel,
+  .dictionary-editor-search-field,
+  .dictionary-editor-search-controls,
+  .dictionary-editor-search-clear,
+  .dictionary-editor-add-entry {
+    width: 100%;
+  }
+
+  .dictionary-editor-search-controls {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1.5fr;
+  }
+
+  .dictionary-editor-search-status {
+    width: 100%;
+    justify-content: center;
+  }
+
   .dictionary-study-actions {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
   }
 
   .dictionary-study-reveal {
-    grid-column: 1 / -1;
-    order: -1;
+    grid-column: auto;
+    order: 0;
+    min-width: 0;
   }
 
-  .dictionary-study-arrow {
+  .dictionary-study-arrow,
+  .dictionary-study-speak {
+    width: clamp(3.2rem, 18vw, 4.1rem);
+  }
+}
+
+@media (max-width: 900px) {
+  .mobile-only {
+    display: flex !important;
+  }
+
+  .mobile-panel-backdrop.mobile-only {
+    display: block !important;
+  }
+
+  .mobile-hide {
+    display: none !important;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+
+  .workspace-root {
+    height: 100dvh;
+    min-height: 100dvh;
+    overflow: hidden;
+  }
+
+  .frame-shell {
+    border-width: 1px;
+  }
+
+  .frame-shell > .popup-3d,
+  .entry-shell .popup-3d {
+    max-height: calc(100dvh - 1.2rem - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+    width: calc(100vw - 1.2rem);
+    max-width: calc(100vw - 1.2rem);
+    overflow-y: auto;
+    padding: 1rem;
+  }
+
+  .entry-shell {
+    align-items: center;
+    justify-content: center;
+    overflow-y: auto;
+    padding: calc(0.6rem + env(safe-area-inset-top)) 0.6rem
+      calc(0.6rem + env(safe-area-inset-bottom));
+  }
+
+  .entry-panel {
+    min-height: auto;
+  }
+
+  .entry-title {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    font-size: clamp(1rem, 4vw, 1.2rem);
+    letter-spacing: 0;
+    line-height: 1.05;
+  }
+
+  .entry-actions,
+  .entry-button,
+  .frame-shell > .popup-3d .mini-action {
     width: 100%;
+  }
+
+  .entry-button {
+    min-width: 0;
+    min-height: 3rem;
+    font-size: 0.94rem;
+    letter-spacing: 0.035em;
+  }
+
+  .top-strip {
+    min-height: calc(3.55rem + env(safe-area-inset-top));
+    height: auto !important;
+    gap: 0.35rem;
+    padding: calc(0.36rem + env(safe-area-inset-top)) 0.45rem 0.36rem !important;
+  }
+
+  .title-chip {
+    min-width: 0 !important;
+    min-height: 2.65rem;
+    padding: 0.38rem 0.5rem !important;
+    overflow: hidden;
+  }
+
+  .title-chip span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: clamp(1.05rem, 5.2vw, 1.42rem) !important;
+  }
+
+  .project-topbar-group {
+    flex: 0 0 auto;
+    gap: 0.28rem;
+  }
+
+  .project-hash-button,
+  .project-tab-strip {
+    display: none !important;
+  }
+
+  .logo-cube,
+  .mobile-header-action {
+    width: 2.65rem;
+    min-width: 2.65rem;
+    height: 2.65rem;
+    border: 2px solid #666666;
+    background: #cfcfcf;
+    align-items: center;
+    justify-content: center;
+    color: #222222;
+    font-size: 0.72rem;
+    font-weight: 900;
+    line-height: 1;
+  }
+
+  .mobile-project-trigger {
+    width: min(30vw, 8rem);
+    max-width: min(30vw, 8rem);
+    padding: 0 0.38rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    justify-content: flex-start;
+  }
+
+  .content-bay {
+    position: relative;
+  }
+
+  .sidebar-rail,
+  .settings-panel {
+    display: none !important;
+  }
+
+  .mobile-panel-categories-open .sidebar-rail {
+    position: absolute;
+    z-index: 45;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    display: flex !important;
+    width: min(86vw, 23rem);
+    min-width: 0;
+    max-width: none;
+    padding: 0;
+    border-right: 2px solid #5c5c5c;
+    box-shadow: 10px 0 24px rgba(0, 0, 0, 0.22);
+  }
+
+  .mobile-panel-categories-open .sidebar-rail::after {
+    display: none;
+  }
+
+  .mobile-panel-settings-open .settings-panel {
+    position: absolute;
+    z-index: 46;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    display: block !important;
+    width: min(92vw, 26rem) !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    padding: 0.55rem;
+    border-left: 2px solid #5c5c5c;
+    box-shadow: -10px 0 24px rgba(0, 0, 0, 0.22);
+  }
+
+  .mobile-panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.35rem 0 0.55rem;
+    border-bottom: 1px solid #747474;
+    color: #171717;
+    font-size: 1.35rem;
+    line-height: 1;
+  }
+
+  .sidebar-rail .mobile-panel-head {
+    flex: 0 0 auto;
+    padding: 0.55rem;
+    background: #9b9b9b;
+  }
+
+  .sidebar-scroll {
+    height: auto;
+  }
+
+  .sidebar-item-row {
+    align-items: stretch;
+  }
+
+  .sidebar-item {
+    min-height: 3.8rem;
+    padding: 0.62rem 0.7rem;
+    font-size: clamp(1.15rem, 6vw, 1.65rem) !important;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .sidebar-item-main {
+    display: flex;
+    align-items: center;
+  }
+
+  .sidebar-item-title {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+  }
+
+  .sidebar-delete {
+    min-height: 3.8rem;
+    flex-basis: 3.1rem;
+    min-width: 3.1rem;
+  }
+
+  .sidebar-item::after {
+    display: none;
+  }
+
+  .workspace-screen {
+    width: 100%;
+    border: 0;
+  }
+
+  .message-toolbar {
+    min-height: 2.35rem;
+    padding: 0.34rem 0.45rem;
+    gap: 0.35rem;
+  }
+
+  .message-toolbar-tools {
+    display: none !important;
+  }
+
+  .message-toolbar .toolbar-right {
+    margin-left: 0;
+    width: 100%;
+    justify-content: space-between;
+    gap: 0.35rem;
+  }
+
+  .toolbar-meta {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.72rem;
+  }
+
+  .message-toolbar .toolbar-zoom-controls {
+    display: none;
+  }
+
+  .message-board {
+    padding: 0.35rem;
+  }
+
+  .message-board-block {
+    gap: 0.38rem;
+  }
+
+  .message-item-block {
+    min-height: 10rem;
+  }
+
+  .message-head {
+    padding: 0.35rem 0.48rem;
+  }
+
+  .message-title {
+    font-size: 0.9rem;
+  }
+
+  .message-kind {
+    display: none;
+  }
+
+  .message-drag,
+  .continuous-checklist-gear,
+  .checklist-item-drag {
+    min-height: 2.2rem;
+    min-width: 2.2rem;
+  }
+
+  .message-editor,
+  .continuous-editor {
+    padding: 0.72rem;
+    font-size: 1rem;
+    line-height: 1.45;
+  }
+
+  .continuous-checklist-board,
+  .continuous-dictionary-board {
+    max-height: 28dvh;
+  }
+
+  .continuous-checklist-item {
+    gap: 0.42em;
+    padding: 0.35em 0.45em;
+  }
+
+  .checklist-item-actions {
+    gap: 0.2em;
+  }
+
+  .checklist-item-view {
+    min-width: 2.75em;
+  }
+
+  .bottom-strip {
+    height: calc(4.65rem + env(safe-area-inset-bottom)) !important;
+    align-items: center !important;
+    gap: 0.35rem;
+    padding: 0.45rem 0.45rem calc(0.45rem + env(safe-area-inset-bottom)) !important;
+  }
+
+  .bottom-strip::before,
+  .bottom-strip::after {
+    display: none;
+  }
+
+  .bottom-strip > div {
+    gap: 0.34rem !important;
+  }
+
+  .tool-button {
+    width: clamp(2.72rem, 15vw, 3.5rem);
+    min-width: clamp(2.72rem, 15vw, 3.5rem);
+    height: 3.15rem;
+    font-size: 0.74rem;
+    text-transform: uppercase;
+  }
+
+  .tool-button svg {
+    width: 1.4rem;
+    height: 1.4rem;
+  }
+
+  .mobile-panel-backdrop {
+    position: absolute;
+    inset: 0;
+    z-index: 40;
+    border: 0;
+    background: rgba(0, 0, 0, 0.28);
+  }
+
+  .mobile-sheet {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 51;
+    max-height: min(76dvh, 38rem);
+    flex-direction: column;
+    gap: 0.55rem;
+    border: 2px solid #656565;
+    border-bottom: 0;
+    background: #a0a0a0;
+    padding: 0.55rem 0.6rem calc(0.7rem + env(safe-area-inset-bottom));
+    box-shadow: 0 -14px 28px rgba(0, 0, 0, 0.24);
+    overflow: hidden;
+  }
+
+  .mobile-project-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.36rem;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .mobile-project-list .project-tab {
+    width: 100%;
+    min-height: 2.8rem;
+    padding: 0.55rem 0.7rem;
+    text-align: left;
+    white-space: normal;
+  }
+
+  .mobile-wide-action {
+    width: 100%;
+    min-height: 2.85rem;
+    justify-content: center;
+  }
+
+  .mobile-tools-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.35rem;
+  }
+
+  .mobile-tools-actions .mini-action,
+  .mobile-rich-tools .mini-action,
+  .mobile-rich-tools .danger-action {
+    min-height: 2.65rem;
+  }
+
+  .mobile-tools-actions .toolbar-zoom-controls {
+    grid-column: 1 / -1;
+    display: flex;
+    justify-content: space-between;
+    border: 1px solid #717171;
+    background: #cfcfcf;
+    padding: 0.34rem;
+  }
+
+  .mobile-rich-tools {
+    display: flex;
+    min-height: 0;
+    max-height: 46dvh;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    overflow-y: auto;
+  }
+
+  .mobile-rich-tools .text-tools-inline {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+  }
+
+  .mobile-rich-tools .toolbar-meta {
+    display: none;
+  }
+
+  .mini-action,
+  .danger-action,
+  .menu-action,
+  .project-tab {
+    min-height: 2.55rem;
+  }
+
+  .settings-input {
+    min-height: 2.55rem;
+    font-size: 16px;
+  }
+
+  .settings-label {
+    font-size: 0.74rem;
+  }
+
+  .friend-action-row,
+  .public-member-item {
+    grid-template-columns: 1fr;
+  }
+
+  .public-member-remove {
+    width: 100%;
+  }
+
+  .settings-title {
+    display: none;
+  }
+
+  .settings-group {
+    gap: 0.55rem;
+  }
+
+  .text-color-popover {
+    position: fixed;
+    left: 0.65rem;
+    right: 0.65rem;
+    top: auto;
+    bottom: calc(0.75rem + env(safe-area-inset-bottom));
+    width: auto;
+    min-width: 0;
+    justify-content: center;
+  }
+
+  .search-modal,
+  .category-tag-library,
+  .project-create-modal,
+  .checklist-editor-modal,
+  .dictionary-editor-modal,
+  .confirm-modal {
+    align-self: flex-end;
+    width: 100% !important;
+    max-width: 100% !important;
+    max-height: calc(100dvh - 1rem - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+    border-bottom: 0;
+    overflow: auto;
+  }
+
+  .project-create-modal,
+  .checklist-editor-modal,
+  .dictionary-editor-modal {
+    height: calc(100dvh - 1rem - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+  }
+
+  .project-admin-list,
+  .project-create-tag-list,
+  .category-tag-library-list {
+    max-height: none;
+  }
+
+  .project-admin-item {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .project-admin-order {
+    width: 100%;
+  }
+
+  .project-admin-move,
+  .project-admin-save,
+  .project-admin-delete {
+    width: 100%;
+  }
+
+  .dictionary-editor-header {
+    align-items: stretch;
+  }
+
+  .dictionary-editor-tabs {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.28rem;
+  }
+
+  .dictionary-editor-tab {
+    min-width: 0;
+    padding-inline: 0.24rem;
+    font-size: 0.78rem;
+  }
+
+  .dictionary-editor-table {
+    display: block;
+    min-width: 0;
+    border-collapse: separate;
+  }
+
+  .dictionary-editor-table thead {
+    display: none;
+  }
+
+  .dictionary-editor-table tbody {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+  }
+
+  .dictionary-editor-table tr {
+    display: block;
+    border: 1px solid #6a6a6a;
+    background: #d6d6d6;
+    padding: 0.45rem;
+  }
+
+  .dictionary-editor-table th,
+  .dictionary-editor-table td {
+    display: block;
+    border: 0;
+    padding: 0;
+  }
+
+  .dictionary-editor-table td + td {
+    margin-top: 0.45rem;
+  }
+
+  .dictionary-editor-table td::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 0.18rem;
+    color: #2b2b2b;
+    font-size: 0.72rem;
+    font-weight: 900;
+    line-height: 1.15;
+    text-transform: uppercase;
+  }
+
+  .dictionary-editor-table td[data-label="actions"]::before {
+    display: none;
+  }
+
+  .dictionary-editor-table-wrap {
+    border: 0;
+    background: transparent;
+  }
+
+  .dictionary-editor-actions {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    margin: 0 -0.55rem -0.7rem;
+    border-top: 1px solid #6a6a6a;
+    background: #b6b6b6;
+    padding: 0.45rem 0.55rem calc(0.5rem + env(safe-area-inset-bottom));
+  }
+
+  .dictionary-editor-search-panel {
+    display: none;
+  }
+
+  .dictionary-editor-search-panel.dictionary-editor-search-panel-open {
+    display: flex;
+  }
+
+  .dictionary-editor-mobile-search-toggle,
+  .dictionary-editor-mobile-add-entry {
+    flex: 1 1 8rem;
+    justify-content: center;
+  }
+
+  .dictionary-editor-cell {
+    min-height: 5.25rem;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .dictionary-study-overlay {
+    padding: 0.5rem;
+  }
+
+  .dictionary-study-panel {
+    width: 100%;
+    height: calc(100dvh - 1rem - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+    max-height: calc(100dvh - 1rem - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+    padding: 0.7rem;
+    gap: 0.55rem;
+  }
+
+  .dictionary-study-head {
+    align-items: flex-start;
+  }
+
+  .dictionary-study-title {
+    font-size: clamp(1.35rem, 8vw, 2.4rem);
+  }
+
+  .dictionary-study-meta-row {
+    gap: 0.35rem;
+  }
+
+  .dictionary-study-card-shell {
+    min-height: 0;
+  }
+
+  .dictionary-study-card-content {
+    animation: none;
+  }
+
+  .menu-3d {
+    left: 0 !important;
+    right: 0 !important;
+    top: auto !important;
+    bottom: 0 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    height: min(88dvh, 42rem) !important;
+    padding: 0.75rem 0.75rem calc(0.8rem + env(safe-area-inset-bottom));
+    border-bottom: 0;
+  }
+
+  .menu-scroll {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .toolkit-advanced {
+    border: 1px solid #686868;
+    background: #d2d2d2;
+    padding: 0.4rem;
+  }
+
+  .toolkit-advanced-summary {
+    display: flex;
+    min-height: 2.65rem;
+    cursor: pointer;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid #666666;
+    background: #c8c8c8;
+    padding: 0.4rem 0.6rem;
+    font-size: 0.9rem;
+    font-weight: 800;
+    text-transform: uppercase;
+  }
+
+  .toolkit-advanced-grid {
+    margin-top: 0.5rem;
+    grid-template-columns: 1fr !important;
+  }
+
+  .entry-shell section,
+  .entry-shell form {
+    max-width: 100%;
+  }
+
+  .entry-shell .flex.items-center.gap-2 {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .entry-shell .flex.flex-wrap,
+  .frame-shell > .popup-3d .flex.flex-wrap {
+    align-items: stretch;
+  }
+
+  .frame-shell > .popup-3d h1 {
+    font-size: clamp(2rem, 12vw, 3rem);
   }
 }

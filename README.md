@@ -5,11 +5,42 @@
 ## Run locally
 
 ```bash
-npm install
-npm run dev
+npm.cmd install
+npm.cmd run dev
 ```
 
 Open `http://localhost:3000`.
+
+## Run with a public HTTPS link
+
+This project can be shared without a domain through a temporary Cloudflare Quick Tunnel.
+Install `cloudflared` once:
+
+```powershell
+winget install --id Cloudflare.cloudflared
+```
+
+Then start the public production server:
+
+```powershell
+npm.cmd run public
+```
+
+The command builds the app, creates a `https://*.trycloudflare.com` link, starts
+Next.js on `127.0.0.1:3000`, and sets `APP_BASE_URL` to that public link for
+auth email/reset links. Keep the terminal open while using the site, and press
+`Ctrl+C` to stop it.
+
+Quick Tunnel links are temporary and change on each run. For a stable permanent
+address later, use a real domain with a named Cloudflare Tunnel or deploy to a
+hosting provider.
+
+For local production testing without a public tunnel:
+
+```powershell
+npm.cmd run build
+npm.cmd run start:local
+```
 
 ## Stack
 
@@ -90,7 +121,7 @@ Main tables:
 
 ## Security checks
 
-- Verify no Supabase references: `npm run check:no-supabase`
+- Verify no Supabase references: `npm.cmd run check:no-supabase`
 
 ## Current features
 

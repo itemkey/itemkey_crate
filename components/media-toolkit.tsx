@@ -590,7 +590,10 @@ export default function MediaToolkit({
                 )}
               </div>
 
-              <div className="grid gap-3 md:grid-cols-3">
+              <details className="toolkit-advanced">
+                <summary className="toolkit-advanced-summary">advanced</summary>
+
+                <div className="toolkit-advanced-grid grid gap-3 md:grid-cols-3">
                 <div className="md:col-span-1">
                   <label className="settings-label" htmlFor="cookies-browser">
                     Cookies browser
@@ -652,7 +655,8 @@ export default function MediaToolkit({
                     disabled={downloaderBusy}
                   />
                 </div>
-              </div>
+                </div>
+              </details>
 
               {!isBatchMode && resolutions.length > 0 && (
                 <div className="mt-1 flex flex-wrap items-center gap-2">

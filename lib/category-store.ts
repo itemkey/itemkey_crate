@@ -9,13 +9,16 @@ import type {
 
 import { getPostgresPool } from "@/lib/db/postgres";
 import { toErrorMessage } from "@/lib/errors";
+import type { CategoryTreeDocument } from "@/lib/category-transfer";
 import type {
+  CategoryAccessRole,
   CategoryFormat,
   CategoryRow,
   CategoryType,
   MessageRow,
   MessageType,
 } from "@/lib/types";
+import { collectDescendantIds } from "@/lib/categories";
 
 const CATEGORY_COLUMNS =
   "id,workspace_id,parent_id,title,content,description,tag,format,category_type,position,created_at,updated_at";
@@ -63,6 +66,17 @@ export type CategoryStore = {
   create(input: CategoryCreate): Promise<CategoryRow>;
   update(id: string, patch: CategoryPatch): Promise<CategoryRow>;
   remove(id: string): Promise<void>;
+  restoreTree(document: CategoryTreeDocument): Promise<{
+    categories: CategoryRow[];
+    messages: MessageRow[];
+  }>;
+  importTreeAsChild(
+    document: CategoryTreeDocument,
+    parentId: string | null
+  ): Promise<{
+    categories: CategoryRow[];
+    messages: MessageRow[];
+  }>;
   listMessages(categoryId: string): Promise<MessageRow[]>;
   createMessage(input: MessageCreate): Promise<MessageRow>;
   updateMessage(id: string, patch: MessagePatch): Promise<MessageRow>;
@@ -76,6 +90,60 @@ type SqlExecutor = {
     values?: unknown[]
   ): Promise<QueryResult<T>>;
 };
+
+type PublicRootRecord = {
+  id: string;
+  owner_user_id: string;
+  workspace_id: string;
+  root_category_id: string;
+  role?: "viewer" | "editor";
+  mount_parent_category_id?: string | null;
+};
+
+type CategoryAccess = {
+  category: CategoryRow;
+  workspaceId: string;
+  role: CategoryAccessRole;
+  visibility: "local" | "public";
+  publicRootRecordId: string | null;
+  publicRootCategoryId: string | null;
+  publicOwnerUserId: string | null;
+  isPublicRoot: boolean;
+};
+
+type MessageAccess = {
+  message: MessageRow;
+  categoryAccess: CategoryAccess;
+};
+
+let publicMembersMountParentColumnPromise: Promise<boolean> | null = null;
+
+async function hasPublicMembersMountParentColumn(executor: SqlExecutor): Promise<boolean> {
+  if (publicMembersMountParentColumnPromise) {
+    return publicMembersMountParentColumnPromise;
+  }
+
+  const hasColumn = await executor
+    .query<{ exists: boolean }>(
+      `
+        select exists (
+          select 1
+          from information_schema.columns
+          where table_schema = 'public'
+            and table_name = 'public_category_members'
+            and column_name = 'mount_parent_category_id'
+        ) as exists
+      `
+    )
+    .then(({ rows }) => Boolean(rows[0]?.exists))
+    .catch(() => false);
+
+  if (hasColumn) {
+    publicMembersMountParentColumnPromise = Promise.resolve(true);
+  }
+
+  return hasColumn;
+}
 
 function hasMainRootCategory(categories: CategoryRow[]): boolean {
   return categories.some(
@@ -107,10 +175,16 @@ function buildMainRootRow(workspaceId: string, position: number): CategoryRow {
 function normalizeCategory(raw: CategoryRow): CategoryRow {
   return {
     ...raw,
+    created_at: normalizeTimestamp(raw.created_at),
+    updated_at: normalizeTimestamp(raw.updated_at),
     description: raw.description ?? "",
     tag: raw.tag ?? "",
     format: raw.format ?? "continuous",
     category_type: raw.category_type ?? "learning",
+    visibility: raw.visibility ?? "local",
+    access_role: raw.access_role ?? "owner",
+    public_root_id: raw.public_root_id ?? null,
+    public_owner_user_id: raw.public_owner_user_id ?? null,
   };
 }
 
@@ -122,9 +196,23 @@ function normalizeMessage(raw: MessageRow): MessageRow {
 
   return {
     ...raw,
+    created_at: normalizeTimestamp(raw.created_at),
+    updated_at: normalizeTimestamp(raw.updated_at),
     title: normalizedTitle,
     message_type: raw.message_type ?? "info",
   };
+}
+
+function normalizeTimestamp(value: unknown): string {
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  if (typeof value === "string" && value.length > 0) {
+    return value;
+  }
+
+  return new Date(0).toISOString();
 }
 
 function toFinitePosition(value: unknown): number {
@@ -391,6 +479,691 @@ async function ensureMainRootForPostgres(
   return fetchWorkspaceCategoriesForPostgres(executor, workspaceId);
 }
 
+function markCategoryAccess(
+  category: CategoryRow,
+  access: {
+    visibility: "local" | "public";
+    role: CategoryAccessRole;
+    publicRootCategoryId: string | null;
+    publicOwnerUserId: string | null;
+    displayParentId?: string | null;
+  }
+): CategoryRow {
+  return normalizeCategory({
+    ...category,
+    parent_id:
+      typeof access.displayParentId === "undefined"
+        ? category.parent_id
+        : access.displayParentId,
+    visibility: access.visibility,
+    access_role: access.role,
+    public_root_id: access.publicRootCategoryId,
+    public_owner_user_id: access.publicOwnerUserId,
+  });
+}
+
+function collectSubtreeIds(categories: CategoryRow[], rootId: string): Set<string> {
+  return new Set([
+    rootId,
+    ...collectDescendantIds(
+      categories.map((category) => ({
+        id: category.id,
+        parent_id: category.parent_id,
+      })),
+      rootId
+    ),
+  ]);
+}
+
+async function fetchOwnedPublicRootsForPostgres(
+  executor: SqlExecutor,
+  ownerUserId: string,
+  workspaceId: string
+): Promise<PublicRootRecord[]> {
+  const { rows } = await executor.query<PublicRootRecord>(
+    `
+      select id, owner_user_id, workspace_id, root_category_id
+      from public.public_category_roots
+      where owner_user_id = $1::uuid
+        and workspace_id = $2::uuid
+      order by created_at asc
+    `,
+    [ownerUserId, workspaceId]
+  );
+
+  return rows;
+}
+
+async function fetchMemberPublicRootsForPostgres(
+  executor: SqlExecutor,
+  appUserId: string
+): Promise<PublicRootRecord[]> {
+  const mountParentSelect = (await hasPublicMembersMountParentColumn(executor))
+    ? "pcm.mount_parent_category_id"
+    : "null::uuid as mount_parent_category_id";
+
+  const { rows } = await executor.query<PublicRootRecord>(
+    `
+      select
+        pcr.id,
+        pcr.owner_user_id,
+        pcr.workspace_id,
+        pcr.root_category_id,
+        pcm.role,
+        ${mountParentSelect}
+      from public.public_category_members pcm
+      join public.public_category_roots pcr
+        on pcr.id = pcm.public_root_id
+      where pcm.app_user_id = $1::uuid
+      order by pcm.created_at asc
+    `,
+    [appUserId]
+  );
+
+  return rows;
+}
+
+function annotateOwnedCategories(
+  categories: CategoryRow[],
+  publicRoots: PublicRootRecord[],
+  ownerUserId: string
+): CategoryRow[] {
+  const annotated = categories.map((category) =>
+    markCategoryAccess(category, {
+      visibility: "local",
+      role: "owner",
+      publicRootCategoryId: null,
+      publicOwnerUserId: null,
+    })
+  );
+
+  for (const publicRoot of publicRoots) {
+    const subtreeIds = collectSubtreeIds(categories, publicRoot.root_category_id);
+    for (let index = 0; index < annotated.length; index += 1) {
+      if (!subtreeIds.has(annotated[index].id)) {
+        continue;
+      }
+
+      annotated[index] = markCategoryAccess(annotated[index], {
+        visibility: "public",
+        role: "owner",
+        publicRootCategoryId: publicRoot.root_category_id,
+        publicOwnerUserId: ownerUserId,
+      });
+    }
+  }
+
+  return annotated;
+}
+
+async function fetchAccessibleCategoriesForPostgres(
+  executor: SqlExecutor,
+  appUserId: string,
+  ownWorkspaceId: string
+): Promise<CategoryRow[]> {
+  let ownedCategories = await fetchWorkspaceCategoriesForPostgres(
+    executor,
+    ownWorkspaceId
+  );
+
+  if (ownedCategories.length === 0) {
+    await seedWorkspaceIfEmptyForPostgres(executor, ownWorkspaceId);
+    ownedCategories = await fetchWorkspaceCategoriesForPostgres(
+      executor,
+      ownWorkspaceId
+    );
+  }
+
+  ownedCategories = await ensureMainRootForPostgres(
+    executor,
+    ownWorkspaceId,
+    ownedCategories
+  );
+
+  const ownedPublicRoots = await fetchOwnedPublicRootsForPostgres(
+    executor,
+    appUserId,
+    ownWorkspaceId
+  );
+  const visible = annotateOwnedCategories(
+    ownedCategories,
+    ownedPublicRoots,
+    appUserId
+  );
+  const localMainRootId =
+    ownedCategories.find(
+      (category) =>
+        category.parent_id === null &&
+        category.title.trim().toLowerCase() === MAIN_CATEGORY_TITLE
+    )?.id ?? null;
+  const localCategoryIdSet = new Set(ownedCategories.map((category) => category.id));
+
+  const memberPublicRoots = await fetchMemberPublicRootsForPostgres(
+    executor,
+    appUserId
+  );
+  const workspaceCache = new Map<string, CategoryRow[]>();
+
+  for (const publicRoot of memberPublicRoots) {
+    const cached =
+      workspaceCache.get(publicRoot.workspace_id) ??
+      (await fetchWorkspaceCategoriesForPostgres(executor, publicRoot.workspace_id));
+    workspaceCache.set(publicRoot.workspace_id, cached);
+
+    const subtreeIds = collectSubtreeIds(cached, publicRoot.root_category_id);
+    for (const category of cached) {
+      if (!subtreeIds.has(category.id)) {
+        continue;
+      }
+
+      const displayParentId =
+        category.id === publicRoot.root_category_id
+          ? publicRoot.mount_parent_category_id &&
+            localCategoryIdSet.has(publicRoot.mount_parent_category_id)
+            ? publicRoot.mount_parent_category_id
+            : localMainRootId
+          : !category.parent_id || !subtreeIds.has(category.parent_id)
+            ? null
+            : category.parent_id;
+
+      visible.push(
+        markCategoryAccess(category, {
+          visibility: "public",
+          role: publicRoot.role === "editor" ? "editor" : "viewer",
+          publicRootCategoryId: publicRoot.root_category_id,
+          publicOwnerUserId: publicRoot.owner_user_id,
+          displayParentId,
+        })
+      );
+    }
+  }
+
+  return visible.sort(sortCategoriesForStore);
+}
+
+function sortCategoriesForStore(a: CategoryRow, b: CategoryRow): number {
+  if (a.position === b.position) {
+    return a.created_at.localeCompare(b.created_at);
+  }
+
+  return a.position - b.position;
+}
+
+async function fetchCategoryByIdForPostgres(
+  executor: SqlExecutor,
+  categoryId: string
+): Promise<CategoryRow | null> {
+  const { rows } = await executor.query<CategoryRow>(
+    `
+      select ${CATEGORY_COLUMNS}
+      from public.categories
+      where id = $1::uuid
+      limit 1
+    `,
+    [categoryId]
+  );
+
+  const row = rows[0];
+  return row ? normalizeCategory(row) : null;
+}
+
+async function fetchMessageByIdForPostgres(
+  executor: SqlExecutor,
+  messageId: string
+): Promise<MessageRow | null> {
+  const { rows } = await executor.query<MessageRow>(
+    `
+      select ${MESSAGE_COLUMNS}
+      from public.category_messages
+      where id = $1::uuid
+      limit 1
+    `,
+    [messageId]
+  );
+
+  const row = rows[0];
+  return row ? normalizeMessage(row) : null;
+}
+
+async function resolveCategoryAccessForPostgres(
+  executor: SqlExecutor,
+  appUserId: string,
+  ownWorkspaceId: string,
+  categoryId: string
+): Promise<CategoryAccess> {
+  const category = await fetchCategoryByIdForPostgres(executor, categoryId);
+  if (!category) {
+    throw new Error("Category not found.");
+  }
+
+  if (category.workspace_id === ownWorkspaceId) {
+    const ownedPublicRoots = await fetchOwnedPublicRootsForPostgres(
+      executor,
+      appUserId,
+      ownWorkspaceId
+    );
+    const ownCategories = await fetchWorkspaceCategoriesForPostgres(
+      executor,
+      ownWorkspaceId
+    );
+
+    for (const publicRoot of ownedPublicRoots) {
+      const subtreeIds = collectSubtreeIds(ownCategories, publicRoot.root_category_id);
+      if (!subtreeIds.has(category.id)) {
+        continue;
+      }
+
+      return {
+        category: markCategoryAccess(category, {
+          visibility: "public",
+          role: "owner",
+          publicRootCategoryId: publicRoot.root_category_id,
+          publicOwnerUserId: appUserId,
+        }),
+        workspaceId: category.workspace_id,
+        role: "owner",
+        visibility: "public",
+        publicRootRecordId: publicRoot.id,
+        publicRootCategoryId: publicRoot.root_category_id,
+        publicOwnerUserId: appUserId,
+        isPublicRoot: category.id === publicRoot.root_category_id,
+      };
+    }
+
+    return {
+      category: markCategoryAccess(category, {
+        visibility: "local",
+        role: "owner",
+        publicRootCategoryId: null,
+        publicOwnerUserId: null,
+      }),
+      workspaceId: category.workspace_id,
+      role: "owner",
+      visibility: "local",
+      publicRootRecordId: null,
+      publicRootCategoryId: null,
+      publicOwnerUserId: null,
+      isPublicRoot: false,
+    };
+  }
+
+  const publicRoots = await fetchMemberPublicRootsForPostgres(executor, appUserId);
+  const matchingRoots = publicRoots.filter(
+    (root) => root.workspace_id === category.workspace_id
+  );
+
+  if (matchingRoots.length === 0) {
+    throw new Error("Category not found.");
+  }
+
+  const workspaceCategories = await fetchWorkspaceCategoriesForPostgres(
+    executor,
+    category.workspace_id
+  );
+  const ownCategories = await fetchWorkspaceCategoriesForPostgres(
+    executor,
+    ownWorkspaceId
+  );
+  const localMainRootId =
+    ownCategories.find(
+      (node) =>
+        node.parent_id === null &&
+        node.title.trim().toLowerCase() === MAIN_CATEGORY_TITLE
+    )?.id ?? null;
+  const localCategoryIdSet = new Set(ownCategories.map((node) => node.id));
+
+  for (const publicRoot of matchingRoots) {
+    const subtreeIds = collectSubtreeIds(
+      workspaceCategories,
+      publicRoot.root_category_id
+    );
+    if (!subtreeIds.has(category.id)) {
+      continue;
+    }
+
+    return {
+      category: markCategoryAccess(category, {
+        visibility: "public",
+        role: publicRoot.role === "editor" ? "editor" : "viewer",
+        publicRootCategoryId: publicRoot.root_category_id,
+        publicOwnerUserId: publicRoot.owner_user_id,
+        displayParentId:
+          category.id === publicRoot.root_category_id
+            ? publicRoot.mount_parent_category_id &&
+              localCategoryIdSet.has(publicRoot.mount_parent_category_id)
+              ? publicRoot.mount_parent_category_id
+              : localMainRootId
+            : !category.parent_id || !subtreeIds.has(category.parent_id)
+              ? null
+              : category.parent_id,
+      }),
+      workspaceId: category.workspace_id,
+      role: publicRoot.role === "editor" ? "editor" : "viewer",
+      visibility: "public",
+      publicRootRecordId: publicRoot.id,
+      publicRootCategoryId: publicRoot.root_category_id,
+      publicOwnerUserId: publicRoot.owner_user_id,
+      isPublicRoot: category.id === publicRoot.root_category_id,
+    };
+  }
+
+  throw new Error("Category not found.");
+}
+
+async function resolveMessageAccessForPostgres(
+  executor: SqlExecutor,
+  appUserId: string,
+  ownWorkspaceId: string,
+  messageId: string
+): Promise<MessageAccess> {
+  const message = await fetchMessageByIdForPostgres(executor, messageId);
+  if (!message) {
+    throw new Error("Message not found.");
+  }
+
+  return {
+    message,
+    categoryAccess: await resolveCategoryAccessForPostgres(
+      executor,
+      appUserId,
+      ownWorkspaceId,
+      message.category_id
+    ),
+  };
+}
+
+function assertCanEditCategory(access: CategoryAccess): void {
+  if (access.role === "viewer") {
+    throw new Error("Недостаточно прав для редактирования public-категории.");
+  }
+}
+
+async function assertCategoryParentAllowedForPostgres(
+  executor: SqlExecutor,
+  appUserId: string,
+  ownWorkspaceId: string,
+  access: CategoryAccess,
+  nextParentId: string | null
+): Promise<void> {
+  if (!nextParentId) {
+    if (access.role !== "owner") {
+      throw new Error("Редактор не может вынести public-категорию в корень.");
+    }
+    return;
+  }
+
+  const parentAccess = await resolveCategoryAccessForPostgres(
+    executor,
+    appUserId,
+    ownWorkspaceId,
+    nextParentId
+  );
+
+  if (parentAccess.workspaceId !== access.workspaceId) {
+    throw new Error("Категорию нельзя переместить в другое рабочее пространство.");
+  }
+
+  if (access.role === "owner") {
+    return;
+  }
+
+  if (
+    !access.publicRootCategoryId ||
+    parentAccess.publicRootCategoryId !== access.publicRootCategoryId
+  ) {
+    throw new Error("Редактор может перемещать категории только внутри public-дерева.");
+  }
+}
+
+async function createCategoryInWorkspaceForPostgres(
+  executor: SqlExecutor,
+  workspaceId: string,
+  parentId: string | null,
+  title: string
+): Promise<CategoryRow> {
+  const { rows: positionRows } = await executor.query<{
+    next_position: number | string;
+  }>(
+    `
+      select coalesce(max(position), -1) + 1 as next_position
+      from public.categories
+      where workspace_id = $1::uuid
+        and parent_id is not distinct from $2::uuid
+    `,
+    [workspaceId, parentId]
+  );
+
+  const nextPosition = toFinitePosition(positionRows[0]?.next_position ?? 0);
+
+  const { rows } = await executor.query<CategoryRow>(
+    `
+      insert into public.categories (
+        workspace_id,
+        parent_id,
+        title,
+        content,
+        description,
+        tag,
+        format,
+        category_type,
+        position
+      )
+      values (
+        $1::uuid,
+        $2::uuid,
+        $3::text,
+        '',
+        '',
+        '',
+        'continuous',
+        'learning',
+        $4::int
+      )
+      returning ${CATEGORY_COLUMNS}
+    `,
+    [workspaceId, parentId, title, nextPosition]
+  );
+
+  const created = rows[0];
+  if (!created) {
+    throw new Error("Create failed: no row returned");
+  }
+
+  return normalizeCategory(created);
+}
+
+async function importTreeAsChildForPostgres(
+  pool: Pool,
+  appUserId: string,
+  ownWorkspaceId: string,
+  document: CategoryTreeDocument,
+  targetParentId: string | null
+): Promise<{
+  categories: CategoryRow[];
+  messages: MessageRow[];
+}> {
+  if (targetParentId) {
+    const parentAccess = await resolveCategoryAccessForPostgres(
+      pool,
+      appUserId,
+      ownWorkspaceId,
+      targetParentId
+    );
+    if (parentAccess.workspaceId !== ownWorkspaceId || parentAccess.visibility !== "local") {
+      throw new Error("Категорию можно принять только в локальную категорию.");
+    }
+  }
+
+  const importedRoot = document.categories.find(
+    (category) => category.id === document.rootCategoryId
+  );
+  if (!importedRoot) {
+    throw new Error("Root category from import file was not found.");
+  }
+
+  const categoryIdMap = new Map<string, string>();
+  const createdCategoryIds: string[] = [];
+  const createdMessageIds: string[] = [];
+
+  await withPostgresTransaction(pool, async (client) => {
+    const createdRoot = await createCategoryInWorkspaceForPostgres(
+      client,
+      ownWorkspaceId,
+      targetParentId,
+      importedRoot.title
+    );
+    categoryIdMap.set(importedRoot.id, createdRoot.id);
+    createdCategoryIds.push(createdRoot.id);
+
+    await client.query(
+      `
+        update public.categories
+        set
+          title = $3::text,
+          content = $4::text,
+          description = $5::text,
+          tag = $6::text,
+          format = $7::text,
+          category_type = $8::text,
+          position = $9::int
+        where workspace_id = $1::uuid
+          and id = $2::uuid
+      `,
+      [
+        ownWorkspaceId,
+        createdRoot.id,
+        importedRoot.title,
+        importedRoot.content,
+        importedRoot.description,
+        importedRoot.tag,
+        importedRoot.format,
+        importedRoot.category_type,
+        importedRoot.position,
+      ]
+    );
+
+    const pendingCategories = document.categories.filter(
+      (category) => category.id !== importedRoot.id
+    );
+
+    while (pendingCategories.length > 0) {
+      let progressed = false;
+
+      for (let index = pendingCategories.length - 1; index >= 0; index -= 1) {
+        const candidate = pendingCategories[index];
+        if (!candidate.parent_id) {
+          throw new Error("В импорте найдена категория без parent_id.");
+        }
+
+        const mappedParentId = categoryIdMap.get(candidate.parent_id);
+        if (!mappedParentId) {
+          continue;
+        }
+
+        const created = await createCategoryInWorkspaceForPostgres(
+          client,
+          ownWorkspaceId,
+          mappedParentId,
+          candidate.title
+        );
+
+        await client.query(
+          `
+            update public.categories
+            set
+              title = $3::text,
+              content = $4::text,
+              description = $5::text,
+              tag = $6::text,
+              format = $7::text,
+              category_type = $8::text,
+              position = $9::int
+            where workspace_id = $1::uuid
+              and id = $2::uuid
+          `,
+          [
+            ownWorkspaceId,
+            created.id,
+            candidate.title,
+            candidate.content,
+            candidate.description,
+            candidate.tag,
+            candidate.format,
+            candidate.category_type,
+            candidate.position,
+          ]
+        );
+
+        categoryIdMap.set(candidate.id, created.id);
+        createdCategoryIds.push(created.id);
+        pendingCategories.splice(index, 1);
+        progressed = true;
+      }
+
+      if (!progressed) {
+        throw new Error("Не удалось восстановить дерево категорий.");
+      }
+    }
+
+    for (const message of document.messages) {
+      const mappedCategoryId = categoryIdMap.get(message.category_id);
+      if (!mappedCategoryId) {
+        throw new Error("В импорте найдено сообщение с неизвестной категорией.");
+      }
+
+      const { rows } = await client.query<MessageRow>(
+        `
+          insert into public.category_messages (
+            workspace_id,
+            category_id,
+            title,
+            content,
+            position,
+            message_type
+          )
+          values (
+            $1::uuid,
+            $2::uuid,
+            $3::text,
+            $4::text,
+            $5::int,
+            $6::text
+          )
+          returning ${MESSAGE_COLUMNS}
+        `,
+        [
+          ownWorkspaceId,
+          mappedCategoryId,
+          message.title,
+          message.content,
+          message.position,
+          message.message_type,
+        ]
+      );
+
+      if (rows[0]) {
+        createdMessageIds.push(rows[0].id);
+      }
+    }
+  });
+
+  const freshCategories = await fetchWorkspaceCategoriesForPostgres(pool, ownWorkspaceId);
+  const createdCategoryIdSet = new Set(createdCategoryIds);
+  const createdMessageIdSet = new Set(createdMessageIds);
+  const messageChunks = await Promise.all(
+    createdCategoryIds.map((categoryId) =>
+      fetchCategoryMessagesForPostgres(pool, ownWorkspaceId, categoryId)
+    )
+  );
+
+  return {
+    categories: freshCategories.filter((category) => createdCategoryIdSet.has(category.id)),
+    messages: messageChunks
+      .flat()
+      .filter((message) => createdMessageIdSet.has(message.id)),
+  };
+}
+
 function createPostgresStore(userId: string): CategoryStore {
   const pool = getPostgresPool();
   const workspacePromise = ensureWorkspaceIdForPostgres(pool, userId);
@@ -399,68 +1172,73 @@ function createPostgresStore(userId: string): CategoryStore {
     source: "postgres",
     async list() {
       const workspaceId = await workspacePromise;
-      const currentRows = await fetchWorkspaceCategoriesForPostgres(pool, workspaceId);
-
-      if (currentRows.length === 0) {
-        await seedWorkspaceIfEmptyForPostgres(pool, workspaceId);
-        return fetchWorkspaceCategoriesForPostgres(pool, workspaceId);
-      }
-
-      return ensureMainRootForPostgres(pool, workspaceId, currentRows);
+      return fetchAccessibleCategoriesForPostgres(pool, userId, workspaceId);
     },
     async create(input) {
-      const workspaceId = await workspacePromise;
+      const ownWorkspaceId = await workspacePromise;
+      let targetWorkspaceId = ownWorkspaceId;
+      let parentId = input.parentId;
+      let inheritedAccess: CategoryAccess | null = null;
 
-      const { rows: positionRows } = await pool.query<{ next_position: number | string }>(
-        `
-          select coalesce(max(position), -1) + 1 as next_position
-          from public.categories
-          where workspace_id = $1::uuid
-            and parent_id is not distinct from $2::uuid
-        `,
-        [workspaceId, input.parentId]
-      );
-
-      const nextPosition = toFinitePosition(positionRows[0]?.next_position ?? 0);
-
-      const { rows } = await pool.query<CategoryRow>(
-        `
-          insert into public.categories (
-            workspace_id,
-            parent_id,
-            title,
-            content,
-            description,
-            tag,
-            format,
-            category_type,
-            position
-          )
-          values (
-            $1::uuid,
-            $2::uuid,
-            $3::text,
-            '',
-            '',
-            '',
-            'continuous',
-            'learning',
-            $4::int
-          )
-          returning ${CATEGORY_COLUMNS}
-        `,
-        [workspaceId, input.parentId, input.title, nextPosition]
-      );
-
-      const created = rows[0];
-      if (!created) {
-        throw new Error("Create failed: no row returned");
+      if (input.parentId) {
+        inheritedAccess = await resolveCategoryAccessForPostgres(
+          pool,
+          userId,
+          ownWorkspaceId,
+          input.parentId
+        );
+        assertCanEditCategory(inheritedAccess);
+        targetWorkspaceId = inheritedAccess.workspaceId;
+        parentId = inheritedAccess.category.id;
       }
 
-      return normalizeCategory(created);
+      const created = await createCategoryInWorkspaceForPostgres(
+        pool,
+        targetWorkspaceId,
+        parentId,
+        input.title
+      );
+
+      if (!inheritedAccess) {
+        return markCategoryAccess(created, {
+          visibility: "local",
+          role: "owner",
+          publicRootCategoryId: null,
+          publicOwnerUserId: null,
+        });
+      }
+
+      return markCategoryAccess(created, {
+        visibility: inheritedAccess.visibility,
+        role: inheritedAccess.role,
+        publicRootCategoryId: inheritedAccess.publicRootCategoryId,
+        publicOwnerUserId: inheritedAccess.publicOwnerUserId,
+      });
     },
     async update(id, patch) {
-      const workspaceId = await workspacePromise;
+      const ownWorkspaceId = await workspacePromise;
+      const access = await resolveCategoryAccessForPostgres(
+        pool,
+        userId,
+        ownWorkspaceId,
+        id
+      );
+      assertCanEditCategory(access);
+
+      if (access.role !== "owner" && access.isPublicRoot && hasOwnProperty(patch, "parent_id")) {
+        throw new Error("Редактор не может перемещать корень public-категории.");
+      }
+
+      if (hasOwnProperty(patch, "parent_id")) {
+        await assertCategoryParentAllowedForPostgres(
+          pool,
+          userId,
+          ownWorkspaceId,
+          access,
+          patch.parent_id ?? null
+        );
+      }
+
       const { setClause, values } = makeCategoryUpdateSet(patch);
 
       const { rows } = await pool.query<CategoryRow>(
@@ -471,7 +1249,7 @@ function createPostgresStore(userId: string): CategoryStore {
             and id = $${values.length + 2}::uuid
           returning ${CATEGORY_COLUMNS}
         `,
-        [...values, workspaceId, id]
+        [...values, access.workspaceId, id]
       );
 
       const updated = rows[0];
@@ -479,10 +1257,26 @@ function createPostgresStore(userId: string): CategoryStore {
         throw new Error("Update failed: Category not found");
       }
 
-      return normalizeCategory(updated);
+      return markCategoryAccess(updated, {
+        visibility: access.visibility,
+        role: access.role,
+        publicRootCategoryId: access.publicRootCategoryId,
+        publicOwnerUserId: access.publicOwnerUserId,
+      });
     },
     async remove(id) {
-      const workspaceId = await workspacePromise;
+      const ownWorkspaceId = await workspacePromise;
+      const access = await resolveCategoryAccessForPostgres(
+        pool,
+        userId,
+        ownWorkspaceId,
+        id
+      );
+      assertCanEditCategory(access);
+
+      if (access.role !== "owner" && access.isPublicRoot) {
+        throw new Error("Public-root может удалить только владелец.");
+      }
 
       await pool.query(
         `
@@ -490,15 +1284,154 @@ function createPostgresStore(userId: string): CategoryStore {
           where workspace_id = $1::uuid
             and id = $2::uuid
         `,
-        [workspaceId, id]
+        [access.workspaceId, id]
       );
     },
-    async listMessages(categoryId) {
+    async restoreTree(document) {
       const workspaceId = await workspacePromise;
-      return fetchCategoryMessagesForPostgres(pool, workspaceId, categoryId);
+      const restoredCategoryIds = new Set<string>();
+
+      await withPostgresTransaction(pool, async (client) => {
+        const pendingCategories = [...document.categories];
+
+        while (pendingCategories.length > 0) {
+          let progressed = false;
+
+          for (let index = pendingCategories.length - 1; index >= 0; index -= 1) {
+            const category = pendingCategories[index];
+            const parentIsInsideRestore = document.categories.some(
+              (candidate) => candidate.id === category.parent_id
+            );
+
+            if (parentIsInsideRestore && !restoredCategoryIds.has(category.parent_id ?? "")) {
+              continue;
+            }
+
+            await client.query(
+              `
+                insert into public.categories (
+                  id,
+                  workspace_id,
+                  parent_id,
+                  title,
+                  content,
+                  description,
+                  tag,
+                  format,
+                  category_type,
+                  position
+                )
+                values (
+                  $1::uuid,
+                  $2::uuid,
+                  $3::uuid,
+                  $4::text,
+                  $5::text,
+                  $6::text,
+                  $7::text,
+                  $8::text,
+                  $9::text,
+                  $10::int
+                )
+              `,
+              [
+                category.id,
+                workspaceId,
+                category.parent_id,
+                category.title,
+                category.content,
+                category.description,
+                category.tag,
+                category.format,
+                category.category_type,
+                category.position,
+              ]
+            );
+
+            restoredCategoryIds.add(category.id);
+            pendingCategories.splice(index, 1);
+            progressed = true;
+          }
+
+          if (!progressed) {
+            throw new Error("Restore failed: category tree has unresolved parents.");
+          }
+        }
+
+        for (const message of document.messages) {
+          await client.query(
+            `
+              insert into public.category_messages (
+                id,
+                workspace_id,
+                category_id,
+                title,
+                content,
+                position,
+                message_type
+              )
+              values (
+                $1::uuid,
+                $2::uuid,
+                $3::uuid,
+                $4::text,
+                $5::text,
+                $6::int,
+                $7::text
+              )
+            `,
+            [
+              message.id,
+              workspaceId,
+              message.category_id,
+              message.title,
+              message.content,
+              message.position,
+              message.message_type,
+            ]
+          );
+        }
+      });
+
+      const freshCategories = await fetchWorkspaceCategoriesForPostgres(pool, workspaceId);
+      const restoredCategoryIdSet = new Set(document.categories.map((category) => category.id));
+      const restoredCategories = freshCategories.filter((category) =>
+        restoredCategoryIdSet.has(category.id)
+      );
+      const messageChunks = await Promise.all(
+        document.categories.map((category) =>
+          fetchCategoryMessagesForPostgres(pool, workspaceId, category.id)
+        )
+      );
+
+      return {
+        categories: restoredCategories,
+        messages: messageChunks.flat(),
+      };
+    },
+    async importTreeAsChild(document, parentId) {
+      const workspaceId = await workspacePromise;
+      return importTreeAsChildForPostgres(pool, userId, workspaceId, document, parentId);
+    },
+    async listMessages(categoryId) {
+      const ownWorkspaceId = await workspacePromise;
+      const access = await resolveCategoryAccessForPostgres(
+        pool,
+        userId,
+        ownWorkspaceId,
+        categoryId
+      );
+      return fetchCategoryMessagesForPostgres(pool, access.workspaceId, categoryId);
     },
     async createMessage(input) {
-      const workspaceId = await workspacePromise;
+      const ownWorkspaceId = await workspacePromise;
+      const access = await resolveCategoryAccessForPostgres(
+        pool,
+        userId,
+        ownWorkspaceId,
+        input.categoryId
+      );
+      assertCanEditCategory(access);
 
       const { rows: positionRows } = await pool.query<{ next_position: number | string }>(
         `
@@ -507,7 +1440,7 @@ function createPostgresStore(userId: string): CategoryStore {
           where workspace_id = $1::uuid
             and category_id = $2::uuid
         `,
-        [workspaceId, input.categoryId]
+        [access.workspaceId, input.categoryId]
       );
 
       const nextPosition = toFinitePosition(positionRows[0]?.next_position ?? 0);
@@ -533,7 +1466,7 @@ function createPostgresStore(userId: string): CategoryStore {
           returning ${MESSAGE_COLUMNS}
         `,
         [
-          workspaceId,
+          access.workspaceId,
           input.categoryId,
           typeof input.title === "string" && input.title.trim().length > 0
             ? input.title.trim()
@@ -552,7 +1485,14 @@ function createPostgresStore(userId: string): CategoryStore {
       return normalizeMessage(created);
     },
     async updateMessage(id, patch) {
-      const workspaceId = await workspacePromise;
+      const ownWorkspaceId = await workspacePromise;
+      const access = await resolveMessageAccessForPostgres(
+        pool,
+        userId,
+        ownWorkspaceId,
+        id
+      );
+      assertCanEditCategory(access.categoryAccess);
       const { setClause, values } = makeMessageUpdateSet(patch);
 
       const { rows } = await pool.query<MessageRow>(
@@ -563,7 +1503,7 @@ function createPostgresStore(userId: string): CategoryStore {
             and id = $${values.length + 2}::uuid
           returning ${MESSAGE_COLUMNS}
         `,
-        [...values, workspaceId, id]
+        [...values, access.categoryAccess.workspaceId, id]
       );
 
       const updated = rows[0];
@@ -574,7 +1514,14 @@ function createPostgresStore(userId: string): CategoryStore {
       return normalizeMessage(updated);
     },
     async removeMessage(id) {
-      const workspaceId = await workspacePromise;
+      const ownWorkspaceId = await workspacePromise;
+      const access = await resolveMessageAccessForPostgres(
+        pool,
+        userId,
+        ownWorkspaceId,
+        id
+      );
+      assertCanEditCategory(access.categoryAccess);
 
       await pool.query(
         `
@@ -582,14 +1529,21 @@ function createPostgresStore(userId: string): CategoryStore {
           where workspace_id = $1::uuid
             and id = $2::uuid
         `,
-        [workspaceId, id]
+        [access.categoryAccess.workspaceId, id]
       );
     },
     async reorderMessages(categoryId, orderedIds) {
-      const workspaceId = await workspacePromise;
+      const ownWorkspaceId = await workspacePromise;
+      const access = await resolveCategoryAccessForPostgres(
+        pool,
+        userId,
+        ownWorkspaceId,
+        categoryId
+      );
+      assertCanEditCategory(access);
 
       if (orderedIds.length === 0) {
-        return fetchCategoryMessagesForPostgres(pool, workspaceId, categoryId);
+        return fetchCategoryMessagesForPostgres(pool, access.workspaceId, categoryId);
       }
 
       const uniqueIds = new Set(orderedIds);
@@ -607,12 +1561,12 @@ function createPostgresStore(userId: string): CategoryStore {
                 and category_id = $3::uuid
                 and id = $4::uuid
             `,
-            [index, workspaceId, categoryId, orderedIds[index]]
+            [index, access.workspaceId, categoryId, orderedIds[index]]
           );
         }
       });
 
-      return fetchCategoryMessagesForPostgres(pool, workspaceId, categoryId);
+      return fetchCategoryMessagesForPostgres(pool, access.workspaceId, categoryId);
     },
   };
 }

@@ -4,6 +4,10 @@ drop table if exists public.auth_rate_events cascade;
 drop table if exists public.password_reset_tokens cascade;
 drop table if exists public.email_verification_tokens cascade;
 drop table if exists public.app_sessions cascade;
+drop table if exists public.inbox_items cascade;
+drop table if exists public.public_category_members cascade;
+drop table if exists public.public_category_roots cascade;
+drop table if exists public.friendships cascade;
 drop table if exists public.projects cascade;
 drop table if exists public.category_messages cascade;
 drop table if exists public.categories cascade;
@@ -204,6 +208,94 @@ create table public.category_messages (
 create index category_messages_workspace_category_position_idx
   on public.category_messages(workspace_id, category_id, position, created_at);
 
+create table public.friendships (
+  id uuid primary key default gen_random_uuid(),
+  requester_user_id uuid not null references public.app_users(id) on delete cascade,
+  addressee_user_id uuid not null references public.app_users(id) on delete cascade,
+  status text not null default 'pending' check (status in ('pending', 'accepted')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint friendships_not_self_check check (requester_user_id <> addressee_user_id)
+);
+
+create unique index friendships_pair_unique_idx
+  on public.friendships (
+    least(requester_user_id, addressee_user_id),
+    greatest(requester_user_id, addressee_user_id)
+  );
+
+create index friendships_requester_idx
+  on public.friendships(requester_user_id, status, created_at desc);
+
+create index friendships_addressee_idx
+  on public.friendships(addressee_user_id, status, created_at desc);
+
+create table public.public_category_roots (
+  id uuid primary key default gen_random_uuid(),
+  owner_user_id uuid not null references public.app_users(id) on delete cascade,
+  workspace_id uuid not null references public.workspaces(id) on delete cascade,
+  root_category_id uuid not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (workspace_id, root_category_id),
+  constraint public_category_roots_category_fk
+    foreign key (workspace_id, root_category_id)
+    references public.categories(workspace_id, id)
+    on delete cascade
+);
+
+create index public_category_roots_owner_idx
+  on public.public_category_roots(owner_user_id, created_at desc);
+
+create table public.public_category_members (
+  id uuid primary key default gen_random_uuid(),
+  public_root_id uuid not null references public.public_category_roots(id) on delete cascade,
+  app_user_id uuid not null references public.app_users(id) on delete cascade,
+  role text not null default 'viewer' check (role in ('viewer', 'editor')),
+  mount_parent_category_id uuid null references public.categories(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (public_root_id, app_user_id)
+);
+
+create index public_category_members_user_idx
+  on public.public_category_members(app_user_id, role, created_at desc);
+
+create index public_category_members_mount_parent_idx
+  on public.public_category_members(mount_parent_category_id);
+
+create table public.inbox_items (
+  id uuid primary key default gen_random_uuid(),
+  sender_user_id uuid not null references public.app_users(id) on delete cascade,
+  recipient_user_id uuid not null references public.app_users(id) on delete cascade,
+  type text not null check (type in ('category_share', 'public_invite')),
+  status text not null default 'pending' check (status in ('pending', 'accepted', 'declined')),
+  title text not null,
+  message text not null default '',
+  category_snapshot jsonb null,
+  public_root_id uuid null references public.public_category_roots(id) on delete cascade,
+  responded_at timestamptz null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint inbox_items_not_self_check check (sender_user_id <> recipient_user_id),
+  constraint inbox_items_payload_check
+    check (
+      (type = 'category_share' and category_snapshot is not null and public_root_id is null)
+      or
+      (type = 'public_invite' and category_snapshot is null and public_root_id is not null)
+    )
+);
+
+create index inbox_items_recipient_idx
+  on public.inbox_items(recipient_user_id, status, created_at desc);
+
+create index inbox_items_sender_idx
+  on public.inbox_items(sender_user_id, status, created_at desc);
+
+create unique index inbox_items_public_invite_pending_unique_idx
+  on public.inbox_items(public_root_id, recipient_user_id)
+  where type = 'public_invite' and status = 'pending';
+
 create or replace function public.set_updated_at()
 returns trigger
 language plpgsql
@@ -232,4 +324,20 @@ for each row execute function public.set_updated_at();
 
 create trigger trg_category_messages_updated_at
 before update on public.category_messages
+for each row execute function public.set_updated_at();
+
+create trigger trg_friendships_updated_at
+before update on public.friendships
+for each row execute function public.set_updated_at();
+
+create trigger trg_public_category_roots_updated_at
+before update on public.public_category_roots
+for each row execute function public.set_updated_at();
+
+create trigger trg_public_category_members_updated_at
+before update on public.public_category_members
+for each row execute function public.set_updated_at();
+
+create trigger trg_inbox_items_updated_at
+before update on public.inbox_items
 for each row execute function public.set_updated_at();
