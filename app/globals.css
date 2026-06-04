@@ -215,6 +215,164 @@ body {
   overflow-x: hidden;
 }
 
+.pdf-viewer-page {
+  min-height: 100dvh;
+  background: #8f8f8f;
+  color: #191919;
+  padding: 1rem;
+}
+
+.pdf-viewer-header {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0 auto 1rem;
+  max-width: 68rem;
+  border: 1px solid #555555;
+  background: #d7d7d7;
+  padding: 0.75rem;
+  box-shadow: 0 2px 0 rgba(0, 0, 0, 0.22);
+}
+
+.pdf-viewer-title-block {
+  min-width: 0;
+}
+
+.pdf-viewer-kicker {
+  margin: 0 0 0.15rem;
+  font-size: 0.76rem;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.pdf-viewer-title-block h1 {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 1.08rem;
+  font-weight: 900;
+  line-height: 1.16;
+}
+
+.pdf-viewer-title-block p:last-child {
+  margin: 0.2rem 0 0;
+  color: #3f3f3f;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.pdf-viewer-download,
+.pdf-viewer-error a {
+  display: inline-flex;
+  min-height: 2.4rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #555555;
+  background: #c8c8c8;
+  color: #191919;
+  padding: 0.45rem 0.7rem;
+  font-size: 0.82rem;
+  font-weight: 900;
+  text-decoration: none;
+  text-transform: uppercase;
+}
+
+.pdf-viewer-download:focus-visible,
+.pdf-viewer-error a:focus-visible {
+  outline: 2px solid #1f1f1f;
+  outline-offset: 2px;
+}
+
+.pdf-viewer-error {
+  margin: 0 auto 1rem;
+  max-width: 68rem;
+  border: 1px solid #6a1313;
+  background: #f2d7d7;
+  padding: 0.85rem;
+}
+
+.pdf-viewer-error h2,
+.pdf-viewer-error p {
+  margin: 0 0 0.55rem;
+}
+
+.pdf-viewer-pages {
+  display: grid;
+  gap: 1rem;
+  justify-items: center;
+}
+
+.pdf-viewer-page-frame {
+  width: min(100%, 68rem);
+  text-align: center;
+}
+
+.pdf-viewer-page-number {
+  margin: 0 auto 0.35rem;
+  width: fit-content;
+  border: 1px solid #555555;
+  background: #d7d7d7;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.76rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.pdf-viewer-page-frame canvas {
+  display: block;
+  max-width: 100%;
+  margin: 0 auto;
+  border: 1px solid #555555;
+  background: #ffffff;
+  box-shadow: 0 2px 0 rgba(0, 0, 0, 0.24);
+}
+
+@media (max-width: 640px) {
+  .pdf-viewer-page {
+    padding: 0.65rem;
+  }
+
+  .pdf-viewer-header {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+
+  .pdf-viewer-download {
+    width: 100%;
+  }
+}
+
+.sidebar-tab-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.25rem;
+  padding: 0.38rem 1.35rem 0.38rem 0.38rem;
+  border-bottom: 1px solid #6b6b6b;
+  background: #8f8f8f;
+}
+
+.sidebar-tab {
+  min-width: 0;
+  border: 1px solid #676767;
+  background: #b9b9b9;
+  padding: 0.32rem 0.35rem;
+  color: #1f1f1f;
+  font-size: 0.72rem;
+  font-weight: 900;
+  line-height: 1.05;
+  text-align: left;
+}
+
+.sidebar-tab-active {
+  border-color: #4f6636;
+  background: #cfe0b7;
+}
+
 .workspace-screen {
   flex: 1 1 auto;
   min-width: 0;
@@ -256,6 +414,42 @@ body {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.dictionary-group-create {
+  min-height: 3.8rem;
+  background: #b9cda2;
+}
+
+.dictionary-group-sidebar-item {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.18rem;
+  min-height: 4.2rem;
+}
+
+.dictionary-group-sidebar-item small {
+  max-width: 100%;
+  overflow: hidden;
+  color: #343434;
+  font-family: var(--font-sans);
+  font-size: 0.68rem;
+  font-weight: 900;
+  line-height: 1;
+  text-overflow: ellipsis;
+}
+
+.dictionary-group-delete {
+  display: flex;
+}
+
+.dictionary-group-empty {
+  margin: 0;
+  padding: 0.8rem 1.45rem 0.8rem 0.58rem;
+  color: #252525;
+  font-size: 0.8rem;
+  font-weight: 900;
 }
 
 .sidebar-item::after {
@@ -1708,6 +1902,24 @@ body {
   height: 1rem;
 }
 
+.dictionary-editor-toggle-disabled {
+  opacity: 0.58;
+}
+
+.dictionary-editor-motivation-settings {
+  min-width: 0;
+  border: 1px solid #707070;
+  background: #d8d8d8;
+  padding: 0.42rem 0.5rem;
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(8rem, 0.8fr);
+  gap: 0.45rem;
+}
+
+.dictionary-editor-motivation-settings-disabled {
+  opacity: 0.58;
+}
+
 .dictionary-editor-autospeak-fields {
   min-width: 0;
   border: 1px solid #707070;
@@ -1958,6 +2170,7 @@ body {
 }
 
 .dictionary-study-panel {
+  --dictionary-study-panel-padding: clamp(0.8rem, 2.5vw, 1.4rem);
   position: relative;
   z-index: 1;
   width: min(58rem, 100%);
@@ -1965,11 +2178,12 @@ body {
   max-height: min(88vh, 42rem);
   border: 2px solid #666666;
   background: #b1b1b1;
-  padding: clamp(0.8rem, 2.5vw, 1.4rem);
+  padding: var(--dictionary-study-panel-padding);
   display: flex;
   flex-direction: column;
   gap: 0.85rem;
   min-height: 0;
+  overflow: hidden;
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
 }
 
@@ -2017,6 +2231,7 @@ body {
   flex-wrap: wrap;
 }
 
+.dictionary-study-toggle,
 .dictionary-study-shuffle-toggle {
   display: inline-flex;
   align-items: center;
@@ -2029,6 +2244,7 @@ body {
   font-weight: 800;
 }
 
+.dictionary-study-toggle input,
 .dictionary-study-shuffle-toggle input {
   width: 1rem;
   height: 1rem;
@@ -2047,7 +2263,17 @@ body {
   font-weight: 900;
 }
 
+.dictionary-study-progress-badge {
+  border: 1px solid #575f78;
+  background: #d7ddee;
+  padding: 0.22rem 0.5rem;
+  color: #1f2740;
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
 .dictionary-study-card-shell {
+  position: relative;
   min-height: clamp(14rem, 42vh, 22rem);
   flex: 1 1 auto;
   border: 2px solid #6f6f6f;
@@ -2055,6 +2281,15 @@ body {
   display: flex;
   align-items: stretch;
   overflow: hidden;
+}
+
+.dictionary-study-card-shell-flippable {
+  cursor: pointer;
+}
+
+.dictionary-study-card-shell-flippable:focus-visible {
+  outline: 3px solid #2f6fd1;
+  outline-offset: 3px;
 }
 
 .dictionary-study-card-content {
@@ -2115,14 +2350,30 @@ body {
   overflow-wrap: anywhere;
 }
 
-.dictionary-study-note-empty {
-  background: #dddddd;
-  color: #515151;
+.dictionary-study-answer-status {
+  border: 1px solid #6a6a6a;
+  background: #dcdcdc;
+  padding: 0.45rem 0.65rem;
+  color: #202020;
+  font-size: 0.9rem;
+  font-weight: 900;
+}
+
+.dictionary-study-answer-status-correct {
+  border-color: #4f6b39;
+  background: #d7e8c7;
+  color: #203314;
+}
+
+.dictionary-study-answer-status-wrong {
+  border-color: #7a4d4d;
+  background: #e8cccc;
+  color: #3b1515;
 }
 
 .dictionary-study-actions {
   display: grid;
-  grid-template-columns: auto minmax(8rem, 1fr) auto auto;
+  grid-template-columns: auto minmax(6.5rem, auto) auto minmax(8rem, 1fr) auto;
   align-items: center;
   gap: 0.65rem;
 }
@@ -2141,6 +2392,200 @@ body {
 .dictionary-study-reveal {
   min-height: 3.1rem;
   font-size: 1.05rem;
+  line-height: 1.08;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.dictionary-study-similar {
+  min-width: 6.5rem;
+  min-height: 3.1rem;
+  font-size: 0.96rem;
+  line-height: 1.08;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.dictionary-study-similar-active {
+  border-color: #5f6d3c;
+  background: #d8e3c1;
+  color: #263315;
+}
+
+.dictionary-study-similar-empty {
+  background: rgba(222, 222, 222, 0.32);
+  color: rgba(32, 32, 32, 0.42);
+  opacity: 0.48;
+}
+
+.dictionary-study-doomscroll-row {
+  position: relative;
+  z-index: 12;
+  display: grid;
+  grid-template-columns: minmax(10rem, 1fr);
+}
+
+.dictionary-study-doomscroll-button {
+  width: 100%;
+  min-width: 0;
+  min-height: 3.35rem;
+  border-color: #5b5b5b;
+  background: #dedede;
+  color: #151515;
+  font-size: 1.1rem;
+  font-weight: 900;
+  text-transform: lowercase;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.65),
+    inset 0 -1px 0 rgba(70, 70, 70, 0.28);
+}
+
+.dictionary-study-progress-action-stack {
+  display: grid;
+  gap: 0.58rem;
+}
+
+.dictionary-study-progress-actions {
+  grid-template-columns: auto minmax(6.5rem, auto) auto minmax(8rem, 1fr) auto;
+}
+
+.dictionary-study-grade-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.dictionary-study-complete-actions {
+  grid-template-columns: minmax(10rem, 1fr);
+}
+
+.dictionary-study-grade {
+  width: 4.6rem;
+  height: 4.1rem;
+  font-size: 1.6rem;
+}
+
+.dictionary-study-grade-wide.tool-button {
+  width: 100%;
+  min-width: 0;
+  height: 3.55rem;
+  font-size: 1.05rem;
+  text-transform: lowercase;
+  white-space: nowrap;
+}
+
+.dictionary-study-results {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.75rem;
+}
+
+.dictionary-study-result-score {
+  color: #151515;
+  font-size: clamp(2.8rem, 10vw, 6rem);
+  font-weight: 950;
+  line-height: 0.9;
+}
+
+.dictionary-study-result-grid {
+  display: grid;
+  grid-template-columns: minmax(7rem, 1fr) minmax(7rem, 1fr);
+  gap: 0.35rem 0.75rem;
+  max-width: 28rem;
+}
+
+.dictionary-study-result-grid span,
+.dictionary-study-result-grid strong {
+  border: 1px solid #777777;
+  background: #dcdcdc;
+  padding: 0.42rem 0.55rem;
+  color: #202020;
+  font-size: 0.88rem;
+  line-height: 1.15;
+}
+
+.dictionary-study-result-grid strong {
+  background: #eef1e5;
+  font-weight: 900;
+}
+
+.dictionary-study-motivation {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(8, 8, 8, 0.38);
+  opacity: 1;
+  backdrop-filter: blur(1.6px);
+  transition:
+    opacity 900ms cubic-bezier(0.16, 1, 0.3, 1),
+    background-color 900ms cubic-bezier(0.16, 1, 0.3, 1),
+    backdrop-filter 900ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: opacity, backdrop-filter;
+}
+
+.dictionary-study-motivation-entering {
+  opacity: 0;
+  background: rgba(8, 8, 8, 0);
+  backdrop-filter: blur(0);
+}
+
+.dictionary-study-motivation-adhd {
+  pointer-events: none;
+}
+
+.dictionary-study-motivation-exit {
+  pointer-events: none;
+  opacity: 0;
+  background: rgba(8, 8, 8, 0);
+  backdrop-filter: blur(0);
+  transition-duration: 420ms;
+}
+
+.dictionary-study-motivation-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  user-select: none;
+  pointer-events: none;
+  opacity: 1;
+  transform: scale(1) translateY(0);
+  transition:
+    opacity 980ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 980ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: opacity, transform;
+}
+
+.dictionary-study-motivation-entering .dictionary-study-motivation-image {
+  opacity: 0;
+  transform: scale(0.992) translateY(0.1rem);
+}
+
+.dictionary-study-motivation-exit .dictionary-study-motivation-image {
+  opacity: 0;
+  transform: scale(1.004) translateY(-0.04rem);
+  transition-duration: 420ms;
+}
+
+.dictionary-study-motivation-next {
+  position: absolute;
+  left: var(--dictionary-study-panel-padding);
+  right: var(--dictionary-study-panel-padding);
+  bottom: var(--dictionary-study-panel-padding);
+  z-index: 1;
+  width: auto;
+  min-width: 0;
+  min-height: 3.2rem;
+  border-color: #eeeeee;
+  background: rgba(238, 238, 238, 0.94);
+  color: #151515;
+  font-size: 1.05rem;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.36);
 }
 
 @keyframes dictionary-card-enter {
@@ -2156,8 +2601,11 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .dictionary-study-card-content {
+  .dictionary-study-card-content,
+  .dictionary-study-motivation,
+  .dictionary-study-motivation-image {
     animation: none;
+    transition: none;
   }
 }
 
@@ -2410,6 +2858,230 @@ body {
   transform: translateX(1px);
 }
 
+.search-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.65rem;
+}
+
+.search-tab {
+  flex: 0 0 auto;
+}
+
+.search-tab-active {
+  border-color: #4b6a20;
+  background: #bdd39f;
+}
+
+.dictionary-global-search-modal {
+  height: min(86vh, 54rem);
+  max-height: min(86vh, 54rem);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.dictionary-global-search-settings {
+  display: grid;
+  grid-template-columns: minmax(14rem, 0.85fr) minmax(18rem, 1.4fr);
+  gap: 0.55rem;
+  align-items: end;
+}
+
+.dictionary-global-search-field,
+.dictionary-global-search-source-settings {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.24rem;
+}
+
+.dictionary-global-search-scope-row,
+.dictionary-global-search-type-row {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.dictionary-global-search-type-row .dictionary-editor-toggle {
+  min-height: 2.1rem;
+}
+
+.dictionary-global-search-status {
+  min-height: 1.45rem;
+  margin: 0.55rem 0 0.45rem;
+  color: #202020;
+  font-size: 0.8rem;
+  font-weight: 900;
+}
+
+.dictionary-global-search-status-error {
+  color: #6a1313;
+}
+
+.dictionary-global-search-table-wrap {
+  border: 1px solid #6a6a6a;
+  background: #dcdcdc;
+  overflow: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.dictionary-global-search-table {
+  min-width: 68rem;
+}
+
+.dictionary-global-search-table th:last-child,
+.dictionary-global-search-table td:last-child {
+  width: 17rem;
+}
+
+.dictionary-global-search-cell {
+  min-height: 2.35rem;
+  border: 1px solid transparent;
+  background: #efefef;
+  color: #1f1f1f;
+  padding: 0.42rem 0.5rem;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.dictionary-global-search-source {
+  width: 100%;
+  min-height: 2.35rem;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 0.12rem;
+  text-align: left;
+  white-space: normal;
+}
+
+.dictionary-global-search-source span,
+.dictionary-global-search-source small {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.dictionary-global-search-source small {
+  color: #303030;
+  font-size: 0.72rem;
+  font-weight: 800;
+  line-height: 1.15;
+}
+
+.dictionary-group-modal {
+  height: min(90vh, 58rem);
+  max-height: min(90vh, 58rem);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.dictionary-group-settings {
+  display: grid;
+  grid-template-columns: minmax(12rem, 0.8fr) minmax(14rem, 1.2fr) auto;
+  gap: 0.55rem;
+  align-items: end;
+}
+
+.dictionary-group-save {
+  min-height: 2.35rem;
+}
+
+.dictionary-group-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.8rem;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.dictionary-group-section {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.dictionary-group-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0.45rem 0 0.35rem;
+}
+
+.dictionary-group-table-wrap {
+  min-height: 8rem;
+}
+
+.dictionary-group-table {
+  min-width: 74rem;
+}
+
+.dictionary-group-table th:last-child,
+.dictionary-group-table td:last-child {
+  width: 8.5rem;
+}
+
+.dictionary-group-remove,
+.dictionary-group-add {
+  width: 100%;
+  min-height: 2.35rem;
+}
+
+.dictionary-group-static-source {
+  border: 1px solid #6f6f6f;
+  background: #d6d6d6;
+}
+
+.dictionary-group-stale-row .dictionary-global-search-cell {
+  background: #dddddd;
+  color: #5b5b5b;
+}
+
+.dictionary-group-current-row .dictionary-global-search-cell {
+  border-color: #4f6636;
+  background: #d8e3c1;
+}
+
+.dictionary-group-empty-table {
+  border: 1px solid #777777;
+  background: #eeeeee;
+  padding: 0.7rem;
+  color: #3b3b3b;
+  font-size: 0.9rem;
+  font-weight: 900;
+}
+
+.dictionary-group-search-settings {
+  grid-template-columns: minmax(14rem, 1fr);
+  align-items: stretch;
+}
+
+.dictionary-similar-modal {
+  z-index: 1;
+}
+
+.dictionary-similar-groups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.dictionary-similar-groups span {
+  border: 1px solid #5f6d3c;
+  background: #d8e3c1;
+  padding: 0.22rem 0.5rem;
+  color: #263315;
+  font-size: 0.78rem;
+  font-weight: 900;
+}
+
 .menu-3d {
   border: 2px solid #656565;
   background: #9a9a9a;
@@ -2445,6 +3117,220 @@ body {
   background-repeat: no-repeat;
   background-position: center;
   background-size: cover;
+}
+
+.account-window-overlay {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: clamp(0.75rem, 2vw, 1.4rem);
+}
+
+.account-window-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: rgba(14, 14, 14, 0.58);
+}
+
+.account-window {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  width: min(64rem, 100%);
+  max-height: min(88vh, 46rem);
+  min-height: min(36rem, 86vh);
+  border: 2px solid #666666;
+  background: #adadad;
+  padding: clamp(0.75rem, 2vw, 1.1rem);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.35);
+}
+
+.account-window-head,
+.account-window-footer,
+.motivation-panel-head,
+.account-window-actions,
+.account-profile-actions,
+.motivation-panel-actions,
+.friend-identity {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.account-window-head,
+.account-window-footer,
+.motivation-panel-head {
+  justify-content: space-between;
+}
+
+.account-window-kicker {
+  margin: 0;
+  color: #2c2c2c;
+  font-size: 0.78rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.account-window-title {
+  margin: 0;
+  color: #141414;
+  font-size: clamp(2.4rem, 7vw, 4.6rem);
+  line-height: 0.9;
+}
+
+.account-window-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.75rem;
+}
+
+.account-window-tab {
+  min-height: 2.25rem;
+}
+
+.account-window-tab-active {
+  background: #dce6c6;
+  border-color: #5a693e;
+}
+
+.account-window-body {
+  min-height: 0;
+  overflow-y: auto;
+  margin-top: 0.85rem;
+  padding-right: 0.2rem;
+}
+
+.account-profile-grid,
+.account-settings-grid,
+.account-friends-layout {
+  display: grid;
+  grid-template-columns: minmax(12rem, 18rem) minmax(0, 1fr);
+  gap: 0.85rem;
+}
+
+.account-settings-grid,
+.account-friends-layout {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.account-profile-card,
+.account-profile-form,
+.account-window-section,
+.motivation-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  border: 1px solid #6b6b6b;
+  background: #d0d0d0;
+  padding: 0.7rem;
+}
+
+.account-window-avatar {
+  width: min(13rem, 100%);
+  height: auto;
+  aspect-ratio: 1;
+}
+
+.account-profile-actions,
+.account-window-actions,
+.motivation-panel-actions {
+  flex-wrap: wrap;
+}
+
+.account-window-footer {
+  flex-wrap: wrap;
+  border-top: 1px solid #6c6c6c;
+  margin-top: 0.9rem;
+  padding-top: 0.75rem;
+}
+
+.motivation-panel {
+  min-height: 24rem;
+}
+
+.motivation-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+  gap: 0.65rem;
+}
+
+.motivation-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid #676767;
+  background: #e3e3e3;
+}
+
+.motivation-card-image {
+  aspect-ratio: 4 / 3;
+  background-color: #222222;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: cover;
+}
+
+.motivation-card-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.45rem;
+  padding: 0.45rem;
+  color: #272727;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.friend-avatar {
+  flex: 0 0 2.45rem;
+  width: 2.45rem;
+  height: 2.45rem;
+  border: 1px solid #686868;
+  background: #d8d8d8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  color: #222222;
+  font-weight: 900;
+}
+
+.friend-avatar-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: cover;
+}
+
+@media (max-width: 760px) {
+  .account-window {
+    min-height: min(42rem, 92vh);
+    max-height: 92vh;
+  }
+
+  .account-profile-grid,
+  .account-settings-grid,
+  .account-friends-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .account-window-footer {
+    align-items: stretch;
+  }
+
+  .account-window-footer > * {
+    width: 100%;
+  }
+
+  .motivation-panel-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
 }
 
 .mobile-only {
@@ -2575,6 +3461,20 @@ body {
     grid-template-columns: 1fr;
   }
 
+  .dictionary-editor-motivation-settings {
+    grid-template-columns: 1fr;
+  }
+
+  .dictionary-global-search-settings {
+    grid-template-columns: 1fr;
+  }
+
+  .dictionary-global-search-source-settings,
+  .dictionary-global-search-field,
+  .dictionary-global-search-scope-row .mini-action {
+    width: 100%;
+  }
+
   .dictionary-editor-transfer-head,
   .dictionary-editor-transfer-footer {
     align-items: stretch;
@@ -2615,18 +3515,57 @@ body {
   }
 
   .dictionary-study-actions {
-    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 0.38rem;
+  }
+
+  .dictionary-study-progress-actions {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+
+  .dictionary-study-grade-row {
+    gap: 0.45rem;
+  }
+
+  .dictionary-study-grade-wide.tool-button {
+    min-width: 0;
+    height: 3.2rem;
+    font-size: 0.95rem;
+  }
+
+  .dictionary-study-doomscroll-button {
+    min-height: 3.15rem;
+    font-size: 1rem;
   }
 
   .dictionary-study-reveal {
     grid-column: auto;
     order: 0;
+    width: 100%;
     min-width: 0;
+    min-height: 3.2rem;
+    padding: 0.28rem 0.3rem;
+    font-size: 0.82rem;
   }
 
   .dictionary-study-arrow,
   .dictionary-study-speak {
-    width: clamp(3.2rem, 18vw, 4.1rem);
+    width: 100%;
+    min-width: 0;
+    height: 3.2rem;
+    font-size: 1.45rem;
+  }
+
+  .dictionary-study-similar {
+    width: 100%;
+    min-width: 0;
+    min-height: 3.2rem;
+    padding: 0.28rem 0.3rem;
+    font-size: 0.78rem;
+  }
+
+  .dictionary-group-settings {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -3255,10 +4194,11 @@ body {
   }
 
   .dictionary-study-panel {
+    --dictionary-study-panel-padding: 0.7rem;
     width: 100%;
     height: calc(100dvh - 1rem - env(safe-area-inset-top) - env(safe-area-inset-bottom));
     max-height: calc(100dvh - 1rem - env(safe-area-inset-top) - env(safe-area-inset-bottom));
-    padding: 0.7rem;
+    padding: var(--dictionary-study-panel-padding);
     gap: 0.55rem;
   }
 

@@ -4,6 +4,7 @@ import { getAccountStore } from "@/lib/account-store";
 import { getInitialCategoryId } from "@/lib/categories";
 import { getCategoryStore } from "@/lib/category-store";
 import { getCollaborationStore } from "@/lib/collaboration-store";
+import { getDictionaryGroupStore } from "@/lib/dictionary-groups";
 import { toErrorMessage } from "@/lib/errors";
 import { getProjectStore } from "@/lib/project-store";
 import { getRequestUser } from "@/lib/request-user";
@@ -31,16 +32,25 @@ export async function GET(request: NextRequest) {
 
     const accountStore = await getAccountStore();
     const categoryStore = await getCategoryStore(user.id);
+    const dictionaryGroupStore = await getDictionaryGroupStore(user.id);
     const projectStore = await getProjectStore(user.id);
     const collaborationStore = await getCollaborationStore();
 
-    const [availability, activeMigrationCode, categories, projects, friends] =
+    const [
+      availability,
+      activeMigrationCode,
+      categories,
+      projects,
+      friends,
+      dictionaryGroups,
+    ] =
       await Promise.all([
         accountStore.getUserIdChangeAvailability(user.id),
         accountStore.getActiveMigrationCode(user.id),
         categoryStore.list(),
         projectStore.list(),
         collaborationStore.listFriends(user.id),
+        dictionaryGroupStore.list(),
       ]);
 
     const initialCategoryId = getInitialCategoryId(categories) ?? categories[0]?.id ?? null;
@@ -75,6 +85,7 @@ export async function GET(request: NextRequest) {
           categories,
           projects,
           friends,
+          dictionaryGroups,
           initialCategoryId,
           initialMessages,
           publicPanel,

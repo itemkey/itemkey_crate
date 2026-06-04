@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { createServer } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -8,8 +9,10 @@ const rootDir = path.resolve(scriptDir, "..");
 const nextBin = path.join(rootDir, "node_modules", "next", "dist", "bin", "next");
 
 const host = process.env.PUBLIC_HOST?.trim() || "127.0.0.1";
-const port = process.env.PUBLIC_PORT?.trim() || process.env.PORT?.trim() || "3000";
-const localUrl = `http://${host}:${port}`;
+const requestedPort =
+  process.env.PUBLIC_PORT?.trim() || process.env.PORT?.trim() || "3000";
+let port = requestedPort;
+let localUrl = `http://${host}:${port}`;
 const cloudflaredBin = process.env.CLOUDFLARED_BIN?.trim() || "cloudflared";
 const tryCloudflareUrlPattern = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i;
 
@@ -69,6 +72,50 @@ async function ensureCloudflared() {
     printCloudflaredInstallHint();
     throw new Error("Install cloudflared and rerun npm.cmd run public.");
   }
+}
+
+function isPortAvailable(candidatePort) {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+
+    server.once("error", (serverError) => {
+      if (serverError?.code === "EADDRINUSE" || serverError?.code === "EACCES") {
+        resolve(false);
+        return;
+      }
+
+      reject(serverError);
+    });
+
+    server.once("listening", () => {
+      server.close(() => resolve(true));
+    });
+
+    server.listen(candidatePort, host);
+  });
+}
+
+async function configureLocalEndpoint() {
+  const parsedPort = Number.parseInt(requestedPort, 10);
+  if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+    throw new Error(`Invalid public port: ${requestedPort}`);
+  }
+
+  let candidatePort = parsedPort;
+  for (let attempt = 0; attempt < 50 && candidatePort <= 65535; attempt += 1) {
+    if (await isPortAvailable(candidatePort)) {
+      port = String(candidatePort);
+      localUrl = `http://${host}:${port}`;
+      if (port !== requestedPort) {
+        info(`Port ${requestedPort} is busy; using ${port} instead.`);
+      }
+      return;
+    }
+
+    candidatePort += 1;
+  }
+
+  throw new Error(`No free local port found near ${requestedPort}.`);
 }
 
 async function runNextBuild() {
@@ -222,6 +269,7 @@ process.on("SIGTERM", () => shutdown("Received termination signal.", 0));
 
 try {
   await ensureCloudflared();
+  await configureLocalEndpoint();
   await runNextBuild();
   startTunnel();
 } catch (caughtError) {

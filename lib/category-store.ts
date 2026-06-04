@@ -78,6 +78,9 @@ export type CategoryStore = {
     messages: MessageRow[];
   }>;
   listMessages(categoryId: string): Promise<MessageRow[]>;
+  listMessagesForCategories(
+    categories: Pick<CategoryRow, "id" | "workspace_id">[]
+  ): Promise<Record<string, MessageRow[]>>;
   createMessage(input: MessageCreate): Promise<MessageRow>;
   updateMessage(id: string, patch: MessagePatch): Promise<MessageRow>;
   removeMessage(id: string): Promise<void>;
@@ -402,6 +405,29 @@ async function fetchCategoryMessagesForPostgres(
       order by position asc, created_at asc
     `,
     [workspaceId, categoryId]
+  );
+
+  return rows.map(normalizeMessage);
+}
+
+async function fetchCategoryMessagesForCategoriesForPostgres(
+  executor: SqlExecutor,
+  workspaceId: string,
+  categoryIds: string[]
+): Promise<MessageRow[]> {
+  if (categoryIds.length === 0) {
+    return [];
+  }
+
+  const { rows } = await executor.query<MessageRow>(
+    `
+      select ${MESSAGE_COLUMNS}
+      from public.category_messages
+      where workspace_id = $1::uuid
+        and category_id = any($2::uuid[])
+      order by category_id asc, position asc, created_at asc
+    `,
+    [workspaceId, categoryIds]
   );
 
   return rows.map(normalizeMessage);
@@ -1422,6 +1448,37 @@ function createPostgresStore(userId: string): CategoryStore {
         categoryId
       );
       return fetchCategoryMessagesForPostgres(pool, access.workspaceId, categoryId);
+    },
+    async listMessagesForCategories(categories) {
+      const result: Record<string, MessageRow[]> = {};
+      const categoryIdsByWorkspaceId = new Map<string, string[]>();
+
+      for (const category of categories) {
+        result[category.id] = [];
+        const workspaceCategoryIds =
+          categoryIdsByWorkspaceId.get(category.workspace_id) ?? [];
+        workspaceCategoryIds.push(category.id);
+        categoryIdsByWorkspaceId.set(category.workspace_id, workspaceCategoryIds);
+      }
+
+      const messageChunks = await Promise.all(
+        Array.from(categoryIdsByWorkspaceId.entries()).map(
+          ([workspaceId, categoryIds]) =>
+            fetchCategoryMessagesForCategoriesForPostgres(
+              pool,
+              workspaceId,
+              categoryIds
+            )
+        )
+      );
+
+      for (const message of messageChunks.flat()) {
+        const categoryMessages = result[message.category_id] ?? [];
+        categoryMessages.push(message);
+        result[message.category_id] = categoryMessages;
+      }
+
+      return result;
     },
     async createMessage(input) {
       const ownWorkspaceId = await workspacePromise;

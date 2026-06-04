@@ -9,10 +9,13 @@ drop table if exists public.public_category_members cascade;
 drop table if exists public.public_category_roots cascade;
 drop table if exists public.friendships cascade;
 drop table if exists public.projects cascade;
+drop table if exists public.dictionary_word_group_items cascade;
+drop table if exists public.dictionary_word_groups cascade;
 drop table if exists public.category_messages cascade;
 drop table if exists public.categories cascade;
 drop table if exists public.workspaces cascade;
 drop table if exists public.migration_codes cascade;
+drop table if exists public.account_images cascade;
 drop table if exists public.auth_identities cascade;
 drop table if exists public.app_users cascade;
 
@@ -44,6 +47,26 @@ create unique index app_users_email_unique_idx
 create unique index app_users_user_id_unique_idx
   on public.app_users(user_id)
   where user_id is not null;
+
+create table public.account_images (
+  id uuid primary key default gen_random_uuid(),
+  app_user_id uuid not null references public.app_users(id) on delete cascade,
+  kind text not null,
+  mime_type text not null,
+  size_bytes integer not null,
+  image_data bytea not null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint account_images_kind_check
+    check (kind in ('avatar', 'motivation')),
+  constraint account_images_mime_type_check
+    check (mime_type in ('image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp')),
+  constraint account_images_size_check
+    check (size_bytes > 0 and size_bytes <= 5242880)
+);
+
+create index account_images_user_kind_idx
+  on public.account_images(app_user_id, kind, created_at desc);
 
 create table public.app_sessions (
   id uuid primary key default gen_random_uuid(),
@@ -208,6 +231,64 @@ create table public.category_messages (
 create index category_messages_workspace_category_position_idx
   on public.category_messages(workspace_id, category_id, position, created_at);
 
+create table public.dictionary_word_groups (
+  id uuid primary key default gen_random_uuid(),
+  workspace_id uuid not null references public.workspaces(id) on delete cascade,
+  title text not null check (char_length(trim(title)) > 0),
+  description text not null default '',
+  position integer not null default 0,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (workspace_id, id)
+);
+
+create index dictionary_word_groups_workspace_position_idx
+  on public.dictionary_word_groups(workspace_id, position, created_at);
+
+create table public.dictionary_word_group_items (
+  id uuid primary key default gen_random_uuid(),
+  workspace_id uuid not null references public.workspaces(id) on delete cascade,
+  group_id uuid not null,
+  source_category_id uuid not null,
+  source_message_id uuid null,
+  dictionary_id text null,
+  entry_id text not null check (char_length(trim(entry_id)) > 0),
+  entry_snapshot jsonb not null default '{}'::jsonb,
+  position integer not null default 0,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint dictionary_word_group_items_group_fk
+    foreign key (workspace_id, group_id)
+    references public.dictionary_word_groups(workspace_id, id)
+    on delete cascade,
+  constraint dictionary_word_group_items_category_fk
+    foreign key (workspace_id, source_category_id)
+    references public.categories(workspace_id, id)
+    on delete cascade,
+  constraint dictionary_word_group_items_message_fk
+    foreign key (workspace_id, source_message_id)
+    references public.category_messages(workspace_id, id)
+    on delete cascade,
+  constraint dictionary_word_group_items_source_check check (
+    (source_message_id is not null and dictionary_id is null)
+    or (source_message_id is null and dictionary_id is not null)
+  )
+);
+
+create unique index dictionary_word_group_items_block_unique_idx
+  on public.dictionary_word_group_items(group_id, source_category_id, source_message_id, entry_id)
+  where source_message_id is not null and dictionary_id is null;
+
+create unique index dictionary_word_group_items_continuous_unique_idx
+  on public.dictionary_word_group_items(group_id, source_category_id, dictionary_id, entry_id)
+  where source_message_id is null and dictionary_id is not null;
+
+create index dictionary_word_group_items_group_position_idx
+  on public.dictionary_word_group_items(workspace_id, group_id, position, created_at);
+
+create index dictionary_word_group_items_lookup_idx
+  on public.dictionary_word_group_items(workspace_id, source_category_id, source_message_id, dictionary_id, entry_id);
+
 create table public.friendships (
   id uuid primary key default gen_random_uuid(),
   requester_user_id uuid not null references public.app_users(id) on delete cascade,
@@ -308,6 +389,10 @@ $$;
 
 create trigger trg_app_users_updated_at
 before update on public.app_users
+for each row execute function public.set_updated_at();
+
+create trigger trg_account_images_updated_at
+before update on public.account_images
 for each row execute function public.set_updated_at();
 
 create trigger trg_workspaces_updated_at

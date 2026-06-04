@@ -28,6 +28,14 @@ import {
   CATEGORY_TREE_SCHEMA_VERSION,
   type CategoryTreeDocument,
 } from "@/lib/category-transfer";
+import { storePdfViewerFile } from "@/lib/pdf-viewer-store";
+import type {
+  DictionaryEntryIdentity as SharedDictionaryEntryIdentity,
+  DictionaryEntryField as SharedDictionaryEntryField,
+  DictionaryGroupResolvedResult,
+  DictionarySearchResult as GlobalDictionarySearchResult,
+  DictionaryWordGroup,
+} from "@/lib/dictionaries";
 import { normalizeUserId, validateUserId } from "@/lib/account-user-id";
 import { toErrorMessage } from "@/lib/errors";
 import type {
@@ -158,6 +166,26 @@ type UserIdAvailabilityPayload = {
   error?: string;
 };
 
+type AccountImageMeta = {
+  id: string;
+  kind?: "avatar" | "motivation";
+  url: string;
+  createdAt: string;
+  sizeBytes: number;
+};
+
+type AccountImagesPayload = {
+  data?: AccountImageMeta[];
+  source?: DataSource;
+  error?: string;
+};
+
+type AccountImagePayload = {
+  data?: AccountImageMeta;
+  source?: DataSource;
+  error?: string;
+};
+
 type AuthSessionPayload = {
   data?: {
     id: string;
@@ -248,6 +276,7 @@ type WorkspaceBootstrapPayload = {
     categories?: CategoryRow[];
     projects?: ProjectRow[];
     friends?: FriendRow[];
+    dictionaryGroups?: DictionaryWordGroup[];
     initialCategoryId?: string | null;
     initialMessages?: MessageRow[];
     publicPanel?: PublicCategoryPanel | null;
@@ -264,6 +293,44 @@ type SearchResult = {
   title: string;
   path: string;
   preview: string;
+};
+
+type DictionaryGlobalSearchScope = "workspace" | "project" | "category";
+
+type DictionarySearchPayload = {
+  data?: GlobalDictionarySearchResult[];
+  source?: DataSource;
+  error?: string;
+};
+
+type DictionaryGroupsPayload = {
+  data?: DictionaryWordGroup[];
+  source?: DataSource;
+  error?: string;
+};
+
+type DictionaryGroupPayload = {
+  data?: DictionaryWordGroup;
+  source?: DataSource;
+  error?: string;
+};
+
+type DictionaryGroupSimilarPayload = {
+  data?: {
+    groups: Array<{
+      id: string;
+      title: string;
+    }>;
+    results: DictionaryGroupResolvedResult[];
+  };
+  source?: DataSource;
+  error?: string;
+};
+
+type PendingDictionarySearchSource = {
+  sourceCategoryId: string;
+  sourceMessageId: string | null;
+  dictionaryId: string | null;
 };
 
 type ChecklistItemOrderMode = "auto" | "custom";
@@ -331,6 +398,11 @@ type ChecklistDragItem = {
 };
 
 type DictionaryPromptSide = "side1" | "side2";
+type DictionaryMotivationAdvanceMode = "auto" | "manual";
+type DictionaryStudyAnswerResult = "correct" | "wrong";
+type DictionaryMotivationDismissAction = "advance" | "clear";
+type DictionaryMotivationShowResult = "shown" | "skipped" | "canceled";
+type DictionaryMotivationPhase = "entering" | "visible" | "exiting";
 
 type DictionaryEntry = {
   id: string;
@@ -357,6 +429,12 @@ type DictionaryBlock = {
   autoSpeak: boolean;
   autoSpeakFields: DictionaryEntryField[];
   manualSpeakFields: DictionaryEntryField[];
+  progressMode: boolean;
+  motivateOnCorrect: boolean;
+  cardMode: boolean;
+  adhdMode: boolean;
+  motivationAdvanceMode: DictionaryMotivationAdvanceMode;
+  motivationAutoSeconds: number;
   labels: DictionaryFieldLabels;
   entries: DictionaryEntry[];
 };
@@ -369,6 +447,12 @@ type MessageDictionaryPayload = {
   autoSpeak: boolean;
   autoSpeakFields: DictionaryEntryField[];
   manualSpeakFields: DictionaryEntryField[];
+  progressMode: boolean;
+  motivateOnCorrect: boolean;
+  cardMode: boolean;
+  adhdMode: boolean;
+  motivationAdvanceMode: DictionaryMotivationAdvanceMode;
+  motivationAutoSeconds: number;
   labels: DictionaryFieldLabels;
   entries: DictionaryEntry[];
 };
@@ -386,6 +470,12 @@ type DictionaryEditorState = {
   autoSpeak: boolean;
   autoSpeakFields: DictionaryEntryField[];
   manualSpeakFields: DictionaryEntryField[];
+  progressMode: boolean;
+  motivateOnCorrect: boolean;
+  cardMode: boolean;
+  adhdMode: boolean;
+  motivationAdvanceMode: DictionaryMotivationAdvanceMode;
+  motivationAutoSeconds: number;
   labels: DictionaryFieldLabels;
   entries: DictionaryEntry[];
 };
@@ -403,9 +493,25 @@ type DictionaryStudyState = {
   autoSpeak: boolean;
   autoSpeakFields: DictionaryEntryField[];
   manualSpeakFields: DictionaryEntryField[];
+  progressMode: boolean;
+  motivateOnCorrect: boolean;
+  cardMode: boolean;
+  adhdMode: boolean;
+  motivationAdvanceMode: DictionaryMotivationAdvanceMode;
+  motivationAutoSeconds: number;
   progressKey: string;
   currentIndex: number;
   isAnswerRevealed: boolean;
+  progressStartedAt: number;
+  progressCompletedAt: number | null;
+  correctCount: number;
+  wrongCount: number;
+  answerResultsByEntryId: Record<string, DictionaryStudyAnswerResult>;
+  isProgressComplete: boolean;
+  motivationImageUrl: string | null;
+  motivationDismissAction: DictionaryMotivationDismissAction;
+  motivationPhase: DictionaryMotivationPhase;
+  motivationImageKey: number;
   transitionKey: number;
 };
 
@@ -414,11 +520,19 @@ type DictionaryStudyProgress = {
   isAnswerRevealed: boolean;
   cardIds: string[];
   shuffle: boolean;
+  progressMode: boolean;
+  progressStartedAt: number;
+  progressCompletedAt: number | null;
+  correctCount: number;
+  wrongCount: number;
+  answerResultsByEntryId: Record<string, DictionaryStudyAnswerResult>;
+  isProgressComplete: boolean;
 };
 
 type DictionaryEntryField = Exclude<keyof DictionaryEntry, "id">;
 type DictionaryLabelField = keyof DictionaryFieldLabels;
 type DictionaryEditorTab = "entries" | "transfer" | "general";
+type AccountWindowTab = "account" | "settings" | "friends" | "motivation";
 
 type DictionaryEditorSearchMatch = {
   entryId: string;
@@ -426,6 +540,19 @@ type DictionaryEditorSearchMatch = {
   start: number;
   end: number;
   isFuzzy: boolean;
+};
+
+type SidebarTab = "categories" | "dictionaryGroups";
+
+type DictionarySimilarPopupState = {
+  identity: SharedDictionaryEntryIdentity;
+  groups: Array<{
+    id: string;
+    title: string;
+  }>;
+  results: DictionaryGroupResolvedResult[];
+  isLoading: boolean;
+  error: string | null;
 };
 
 type CategoryFormState = {
@@ -458,6 +585,11 @@ type RichImageSelection = {
 type RichFileSelection = {
   scope: RichEditorScope;
   fileId: string;
+};
+
+type RichFileObjectUrlCacheEntry = {
+  source: string;
+  objectUrl: string;
 };
 
 type DraggedRichImage = {
@@ -588,6 +720,7 @@ const DEFAULT_RICH_IMAGE_WIDTH = 320;
 const MIN_RICH_IMAGE_WIDTH = 92;
 const MAX_RICH_IMAGE_WIDTH = 1400;
 const MAX_RICH_IMAGE_FILE_BYTES = 8 * 1024 * 1024;
+const ACCOUNT_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 const RICH_IMAGE_EDGE_HIT_SIZE = 12;
 const MIN_RICH_IMAGE_DELETE_OVERLAY_WIDTH = 184;
 const MIN_RICH_IMAGE_DELETE_OVERLAY_HEIGHT = 124;
@@ -599,6 +732,9 @@ const EDITOR_INPUT_SYNC_DELAY_MS = 180;
 export default function CategoryWorkspace() {
   const [categories, setCategories] = useState<CategoryRow[]>([]);
   const [projects, setProjects] = useState<ProjectRow[]>([]);
+  const [dictionaryGroups, setDictionaryGroups] = useState<DictionaryWordGroup[]>(
+    []
+  );
   const [messagesByCategory, setMessagesByCategory] = useState<
     Record<string, MessageRow[]>
   >({});
@@ -635,8 +771,13 @@ export default function CategoryWorkspace() {
   const [undoRevision, setUndoRevision] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [showSearch, setShowSearch] = useState(false);
+  const [showDictionaryGlobalSearch, setShowDictionaryGlobalSearch] =
+    useState(false);
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>("categories");
   const [showMenu, setShowMenu] = useState(false);
   const [menuPanel, setMenuPanel] = useState<MenuPanel>("main");
+  const [accountWindowTab, setAccountWindowTab] =
+    useState<AccountWindowTab | null>(null);
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>(null);
   const [showCategoryTagSuggestions, setShowCategoryTagSuggestions] =
     useState(false);
@@ -648,8 +789,12 @@ export default function CategoryWorkspace() {
     useState<DictionaryEditorState | null>(null);
   const [dictionaryEditorTab, setDictionaryEditorTab] =
     useState<DictionaryEditorTab>("entries");
+  const [dictionaryGroupEditor, setDictionaryGroupEditor] =
+    useState<DictionaryWordGroup | null>(null);
   const [dictionaryStudy, setDictionaryStudy] =
     useState<DictionaryStudyState | null>(null);
+  const [dictionarySimilarPopup, setDictionarySimilarPopup] =
+    useState<DictionarySimilarPopupState | null>(null);
   const [dictionaryStudyCardScale, setDictionaryStudyCardScale] = useState(1);
   const [dictionaryImportDraft, setDictionaryImportDraft] = useState("");
   const dictionaryImportPreview = useMemo(
@@ -666,8 +811,6 @@ export default function CategoryWorkspace() {
     setDictionarySearchNavigationVersion,
   ] = useState(0);
   const [checklistTagSearchQuery, setChecklistTagSearchQuery] = useState("");
-  const [searchQuery, setSearchQuery] = useState("");
-  const normalizedSearchQuery = searchQuery.trim().toLowerCase();
   const [projectTagSearchQuery, setProjectTagSearchQuery] = useState("");
   const [projectTagSelection, setProjectTagSelection] = useState<string[]>([]);
   const [projectTitleDraft, setProjectTitleDraft] = useState("");
@@ -734,6 +877,15 @@ export default function CategoryWorkspace() {
   const [accountAvatarUrlDraft, setAccountAvatarUrlDraft] = useState("");
   const [accountAvatarUrl, setAccountAvatarUrl] = useState<string | null>(null);
   const [isSavingAccountProfile, setIsSavingAccountProfile] = useState(false);
+  const [isUploadingAccountAvatar, setIsUploadingAccountAvatar] = useState(false);
+  const [isDeletingAccountAvatar, setIsDeletingAccountAvatar] = useState(false);
+  const [motivationImages, setMotivationImages] = useState<AccountImageMeta[]>([]);
+  const [isLoadingMotivationImages, setIsLoadingMotivationImages] = useState(false);
+  const [isUploadingMotivationImage, setIsUploadingMotivationImage] =
+    useState(false);
+  const [deletingMotivationImageIds, setDeletingMotivationImageIds] = useState<
+    string[]
+  >([]);
   const [activeMigrationCodeMeta, setActiveMigrationCodeMeta] = useState<{
     codeHint: string;
     expiresAt: string;
@@ -770,6 +922,8 @@ export default function CategoryWorkspace() {
 
   const importFileRef = useRef<HTMLInputElement | null>(null);
   const dictionaryImportFileRef = useRef<HTMLInputElement | null>(null);
+  const accountAvatarFileRef = useRef<HTMLInputElement | null>(null);
+  const motivationImageFileRef = useRef<HTMLInputElement | null>(null);
   const dictionaryStudyCardShellRef = useRef<HTMLDivElement | null>(null);
   const dictionaryStudyCardContentRef = useRef<HTMLDivElement | null>(null);
   const dictionaryStudyCardFitRef = useRef<HTMLDivElement | null>(null);
@@ -778,8 +932,21 @@ export default function CategoryWorkspace() {
   >({});
   const dictionarySearchShouldFocusRef = useRef(false);
   const dictionaryAutoSpeechTimerRef = useRef<number | null>(null);
+  const dictionaryMotivationTimerRef = useRef<number | null>(null);
+  const dictionaryMotivationExitTimerRef = useRef<number | null>(null);
+  const dictionaryMotivationEnterFrameRef = useRef<number | null>(null);
+  const loadedMotivationImageUrlsRef = useRef<Set<string>>(new Set());
+  const readyMotivationImageSrcByUrlRef = useRef<Map<string, string>>(new Map());
+  const loadingMotivationImagePromisesRef = useRef<
+    Map<string, Promise<string | null>>
+  >(new Map());
+  const dictionaryMotivationRequestIdRef = useRef(0);
+  const dictionaryDoomscrollClickInFlightRef = useRef(false);
   const richImageFileRef = useRef<HTMLInputElement | null>(null);
   const richFileRef = useRef<HTMLInputElement | null>(null);
+  const richFileObjectUrlsRef = useRef<Map<string, RichFileObjectUrlCacheEntry>>(
+    new Map()
+  );
   const categoryTagInputRef = useRef<HTMLInputElement | null>(null);
   const continuousEditorRef = useRef<HTMLDivElement | null>(null);
   const blockEditorRefsRef = useRef<Record<string, HTMLDivElement | null>>({});
@@ -834,6 +1001,7 @@ export default function CategoryWorkspace() {
       void _friendAppUserId;
     },
     loadProjects: async () => {},
+    loadDictionaryGroups: async () => {},
     refreshCategoriesFromServer: async () => {},
     loadCategoryMessages: async (_categoryId: string) => {
       void _categoryId;
@@ -888,6 +1056,8 @@ export default function CategoryWorkspace() {
   const messageDraftVersionRef = useRef<Record<string, number>>({});
   const messageAckVersionRef = useRef<Record<string, number>>({});
   const pendingMessageSelectionRef = useRef<string | null>(null);
+  const pendingDictionarySearchSourceRef =
+    useRef<PendingDictionarySearchSource | null>(null);
   const syncedContinuousCategoryIdRef = useRef<string | null>(null);
   const didAutoOpenMobileCategoriesRef = useRef(false);
   const [, startEditorTransition] = useTransition();
@@ -1300,44 +1470,16 @@ export default function CategoryWorkspace() {
 
   const accountAvatarPreviewUrl = useMemo(() => {
     const draft = accountAvatarUrlDraft.trim();
-    if (draft && isValidHttpUrl(draft)) {
+    if (draft && isDisplayImageUrl(draft)) {
       return draft;
     }
 
-    if (accountAvatarUrl && isValidHttpUrl(accountAvatarUrl)) {
+    if (accountAvatarUrl && isDisplayImageUrl(accountAvatarUrl)) {
       return accountAvatarUrl;
     }
 
     return null;
   }, [accountAvatarUrl, accountAvatarUrlDraft]);
-
-  const categoryPlainContentById = useMemo(() => {
-    if (!normalizedSearchQuery) {
-      return new Map<string, string>();
-    }
-
-    const map = new Map<string, string>();
-
-    for (const category of categories) {
-      if (category.format === "continuous") {
-        const document = parseContinuousContent(category.content);
-        const dictionaryText = document.dictionaries
-          .map((dictionary) =>
-            `${dictionary.title}\n${dictionaryPayloadToPlainText(dictionary)}`
-          )
-          .join("\n");
-        map.set(
-          category.id,
-          `${richTextToPlainText(document.text)}\n${dictionaryText}`.trim()
-        );
-        continue;
-      }
-
-      map.set(category.id, richTextToPlainText(category.content));
-    }
-
-    return map;
-  }, [categories, normalizedSearchQuery]);
 
   const deferredContinuousChecklists = useDeferredValue(continuousChecklists);
   const deferredChecklistCategories = useDeferredValue(categories);
@@ -1520,81 +1662,6 @@ export default function CategoryWorkspace() {
     currentCategory,
   ]);
 
-  const allLoadedMessages = useMemo(() => {
-    if (!normalizedSearchQuery) {
-      return [];
-    }
-
-    return Object.values(messagesByCategory).flat();
-  }, [messagesByCategory, normalizedSearchQuery]);
-
-  const searchResults = useMemo(() => {
-    if (!normalizedSearchQuery) {
-      return [];
-    }
-
-    const categoryHits: SearchResult[] = visibleCategories
-      .filter((category) => {
-        const plainContent = categoryPlainContentById.get(category.id) ?? "";
-        const text = `${category.title} ${category.description} ${category.tag} ${plainContent}`.toLowerCase();
-        return text.includes(normalizedSearchQuery);
-      })
-      .map((category) => ({
-        id: `category-${category.id}`,
-        kind: "category",
-        categoryId: category.id,
-        title: category.title,
-        path: buildCategoryPath(visibleCategories, category.id)
-          .map((part) => part.title)
-          .join(" / "),
-        preview: makePreview(
-          `${category.description || (categoryPlainContentById.get(category.id) ?? "") || category.tag}`,
-          normalizedSearchQuery
-        ),
-      }));
-
-    const messageHits: SearchResult[] = [];
-    for (const message of allLoadedMessages) {
-      const checklistPayload = parseMessageChecklistContent(message.content);
-      const dictionaryPayload = parseMessageDictionaryContent(message.content);
-      const plainContent = checklistPayload
-        ? ""
-        : dictionaryPayload
-          ? dictionaryPayloadToPlainText(dictionaryPayload)
-          : richTextToPlainText(message.content);
-      const messageText = `${message.title} ${plainContent}`.toLowerCase();
-      if (!messageText.includes(normalizedSearchQuery)) {
-        continue;
-      }
-
-      if (!visibleCategoriesById.has(message.category_id)) {
-        continue;
-      }
-
-      const titleFromMessage = message.title || "Новый блок";
-
-      messageHits.push({
-        id: `message-${message.id}`,
-        kind: "message",
-        categoryId: message.category_id,
-        messageId: message.id,
-        title: titleFromMessage,
-        path: `${buildCategoryPath(visibleCategories, message.category_id)
-          .map((part) => part.title)
-          .join(" / ")} / сообщение`,
-        preview: makePreview(plainContent, normalizedSearchQuery),
-      });
-    }
-
-    return [...categoryHits, ...messageHits].slice(0, 45);
-  }, [
-    allLoadedMessages,
-    categoryPlainContentById,
-    normalizedSearchQuery,
-    visibleCategories,
-    visibleCategoriesById,
-  ]);
-
   const dictionarySearchMatches = useMemo(() => {
     if (!dictionaryEditor) {
       return [] as DictionaryEditorSearchMatch[];
@@ -1605,16 +1672,16 @@ export default function CategoryWorkspace() {
       return [] as DictionaryEditorSearchMatch[];
     }
 
-    const queryTokens = getDictionarySearchTokens(query).map((token) => token.text);
+    const compiledQuery = compileDictionarySearchQuery(query);
+    if (!compiledQuery) {
+      return [] as DictionaryEditorSearchMatch[];
+    }
+
     const matches: DictionaryEditorSearchMatch[] = [];
 
     for (const entry of dictionaryEditor.entries) {
       for (const field of DICTIONARY_EDITOR_SEARCH_FIELDS) {
-        const match = findDictionaryEditorSearchMatch(
-          entry[field],
-          query,
-          queryTokens
-        );
+        const match = findDictionaryEditorSearchMatch(entry[field], compiledQuery);
 
         if (!match) {
           continue;
@@ -1726,10 +1793,12 @@ export default function CategoryWorkspace() {
     messageDraftVersionRef.current = {};
     messageAckVersionRef.current = {};
     pendingMessageSelectionRef.current = null;
+    pendingDictionarySearchSourceRef.current = null;
     syncedContinuousCategoryIdRef.current = null;
     savedRichSelectionRef.current = null;
     draggedRichImageRef.current = null;
     draggedRichFileRef.current = null;
+    revokeRichFileObjectUrlCache(richFileObjectUrlsRef.current);
     richImageResizeStateRef.current = null;
     blockEditorRefsRef.current = {};
 
@@ -1740,6 +1809,7 @@ export default function CategoryWorkspace() {
 
     setCategories([]);
     setProjects([]);
+    setDictionaryGroups([]);
     setMessagesByCategory({});
     setCurrentCategoryId(null);
     setInsertionTargetId(null);
@@ -1748,7 +1818,10 @@ export default function CategoryWorkspace() {
     setDragChecklistItem(null);
     setDragDictionaryId(null);
     setShowSearch(false);
+    setShowDictionaryGlobalSearch(false);
+    setSidebarTab("categories");
     setShowMenu(false);
+    setAccountWindowTab(null);
     setMobilePanel(null);
     setShowCategoryTagLibrary(false);
     setShowCategoryTagSuggestions(false);
@@ -1782,7 +1855,9 @@ export default function CategoryWorkspace() {
     setRichFileDeleteConfirmRect(null);
     setChecklistEditor(null);
     setDictionaryEditor(null);
+    setDictionaryGroupEditor(null);
     setDictionaryStudy(null);
+    setDictionarySimilarPopup(null);
     setChecklistTagSearchQuery("");
     setSource("unknown");
     setLoadError(null);
@@ -1807,6 +1882,21 @@ export default function CategoryWorkspace() {
     setAccountProfileDescriptionDraft("");
     setAccountAvatarUrlDraft("");
     setAccountAvatarUrl(null);
+    setIsUploadingAccountAvatar(false);
+    setIsDeletingAccountAvatar(false);
+    setMotivationImages([]);
+    for (const readySrc of readyMotivationImageSrcByUrlRef.current.values()) {
+      if (typeof window !== "undefined" && readySrc.startsWith("blob:")) {
+        window.URL.revokeObjectURL(readySrc);
+      }
+    }
+    readyMotivationImageSrcByUrlRef.current.clear();
+    loadedMotivationImageUrlsRef.current.clear();
+    loadingMotivationImagePromisesRef.current.clear();
+    dictionaryMotivationRequestIdRef.current += 1;
+    setIsLoadingMotivationImages(false);
+    setIsUploadingMotivationImage(false);
+    setDeletingMotivationImageIds([]);
     setActiveMigrationCodeMeta(null);
     setIssuedMigrationCode(null);
     setIsSavingAccountProfile(false);
@@ -1990,6 +2080,7 @@ export default function CategoryWorkspace() {
       messageDraftVersionRef.current = {};
       messageAckVersionRef.current = {};
       pendingMessageSelectionRef.current = null;
+      pendingDictionarySearchSourceRef.current = null;
       syncedContinuousCategoryIdRef.current = null;
       draggedRichImageRef.current = null;
       draggedRichFileRef.current = null;
@@ -2027,6 +2118,9 @@ export default function CategoryWorkspace() {
       setAuthError(null);
       setCategories(rows);
       setProjects((payload.data.projects ?? []).map(normalizeProjectRow));
+      setDictionaryGroups(
+        (payload.data.dictionaryGroups ?? []).map(normalizeDictionaryWordGroup)
+      );
       setFriends(payload.data.friends ?? []);
       setCurrentCategoryId(initialId);
       setInsertionTargetId(initialId);
@@ -2148,6 +2242,7 @@ export default function CategoryWorkspace() {
       messageDraftVersionRef.current = {};
       messageAckVersionRef.current = {};
       pendingMessageSelectionRef.current = null;
+      pendingDictionarySearchSourceRef.current = null;
       syncedContinuousCategoryIdRef.current = null;
       draggedRichImageRef.current = null;
       draggedRichFileRef.current = null;
@@ -2259,6 +2354,34 @@ export default function CategoryWorkspace() {
     }
   }, [authorizedFetch, pushNotice]);
 
+  const loadDictionaryGroups = useCallback(async () => {
+    try {
+      const response = await authorizedFetch("/api/dictionary-groups", {
+        cache: "no-store",
+      });
+      const payload = (await response.json()) as DictionaryGroupsPayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(
+          payload.error ?? "Не удалось загрузить группы словарей."
+        );
+      }
+
+      const groups = payload.data.map(normalizeDictionaryWordGroup);
+      setDictionaryGroups(groups);
+      setDictionaryGroupEditor((prev) =>
+        prev
+          ? groups.find((group) => group.id === prev.id) ?? null
+          : null
+      );
+      setSource((prev) => payload.source ?? prev);
+    } catch (error) {
+      pushNotice(
+        toErrorMessage(error, "Не удалось загрузить группы словарей."),
+        "error"
+      );
+    }
+  }, [authorizedFetch, pushNotice]);
+
   const loadAccountProfile = useCallback(async () => {
     try {
       const response = await authorizedFetch("/api/account", { cache: "no-store" });
@@ -2284,6 +2407,124 @@ export default function CategoryWorkspace() {
 
   void loadAccountProfile;
 
+  function revokeMotivationImageObjectUrl(src: string) {
+    if (typeof window !== "undefined" && src.startsWith("blob:")) {
+      window.URL.revokeObjectURL(src);
+    }
+  }
+
+  function releaseMotivationImageMemoryCache(url: string) {
+    const readySrc = readyMotivationImageSrcByUrlRef.current.get(url);
+    if (readySrc) {
+      revokeMotivationImageObjectUrl(readySrc);
+    }
+    readyMotivationImageSrcByUrlRef.current.delete(url);
+    loadedMotivationImageUrlsRef.current.delete(url);
+    loadingMotivationImagePromisesRef.current.delete(url);
+  }
+
+  const decodeMotivationImageSrc = useCallback((src: string) => {
+    if (typeof window === "undefined" || !src) {
+      return Promise.resolve(false);
+    }
+
+    const preloadImage = new window.Image();
+    preloadImage.decoding = "async";
+
+    return new Promise<boolean>((resolve) => {
+      let isSettled = false;
+      const settle = (isLoaded: boolean) => {
+        if (isSettled) {
+          return;
+        }
+
+        isSettled = true;
+        resolve(isLoaded);
+      };
+
+      preloadImage.onload = () => {
+        void preloadImage
+          .decode()
+          .then(() => settle(true))
+          .catch(() => settle(true));
+      };
+      preloadImage.onerror = () => settle(false);
+      preloadImage.src = src;
+    });
+  }, []);
+
+  const ensureMotivationImageLoaded = useCallback(async (url: string) => {
+    if (typeof window === "undefined" || !url) {
+      return null;
+    }
+
+    const readySrc = readyMotivationImageSrcByUrlRef.current.get(url);
+    if (readySrc) {
+      return readySrc;
+    }
+
+    const pendingLoad = loadingMotivationImagePromisesRef.current.get(url);
+    if (pendingLoad) {
+      return pendingLoad;
+    }
+
+    const loadPromise = (async () => {
+      let objectUrl: string | null = null;
+      try {
+        const response = await authorizedFetch(url, {
+          cache: "force-cache",
+        });
+        if (response.ok) {
+          const blob = await response.blob();
+          objectUrl = window.URL.createObjectURL(blob);
+          const isBlobDecoded = await decodeMotivationImageSrc(objectUrl);
+          if (isBlobDecoded) {
+            readyMotivationImageSrcByUrlRef.current.set(url, objectUrl);
+            loadedMotivationImageUrlsRef.current.add(url);
+            return objectUrl;
+          }
+        }
+      } catch {
+        // Fall back to the regular browser image cache below.
+      }
+
+      if (objectUrl) {
+        revokeMotivationImageObjectUrl(objectUrl);
+      }
+
+      const isOriginalDecoded = await decodeMotivationImageSrc(url);
+      if (isOriginalDecoded) {
+        readyMotivationImageSrcByUrlRef.current.set(url, url);
+        loadedMotivationImageUrlsRef.current.add(url);
+        return url;
+      }
+
+      return null;
+    })().finally(() => {
+      loadingMotivationImagePromisesRef.current.delete(url);
+    });
+
+    loadingMotivationImagePromisesRef.current.set(url, loadPromise);
+    return loadPromise;
+  }, [authorizedFetch, decodeMotivationImageSrc]);
+
+  const preloadMotivationImages = useCallback(
+    (images: AccountImageMeta[]) => {
+      if (typeof window === "undefined") {
+        return;
+      }
+
+      for (const image of images) {
+        if (!image.url) {
+          continue;
+        }
+
+        void ensureMotivationImageLoaded(image.url);
+      }
+    },
+    [ensureMotivationImageLoaded]
+  );
+
   const loadFriends = useCallback(async () => {
     try {
       const response = await authorizedFetch("/api/friends", { cache: "no-store" });
@@ -2298,6 +2539,59 @@ export default function CategoryWorkspace() {
       pushNotice(toErrorMessage(error, "Не удалось загрузить друзей."), "error");
     }
   }, [authorizedFetch, pushNotice]);
+
+  const loadMotivationImages = useCallback(async () => {
+    setIsLoadingMotivationImages(true);
+    try {
+      const response = await authorizedFetch("/api/account/motivation-images", {
+        cache: "no-store",
+      });
+      const payload = (await response.json()) as AccountImagesPayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Не удалось загрузить мотивационные фото.");
+      }
+
+      setSource((prev) => payload.source ?? prev);
+      const nextUrls = new Set(
+        payload.data
+          .map((image) => image.url)
+          .filter((url): url is string => Boolean(url))
+      );
+      for (const cachedUrl of readyMotivationImageSrcByUrlRef.current.keys()) {
+        if (!nextUrls.has(cachedUrl)) {
+          const readySrc = readyMotivationImageSrcByUrlRef.current.get(cachedUrl);
+          if (readySrc && readySrc.startsWith("blob:")) {
+            window.URL.revokeObjectURL(readySrc);
+          }
+          readyMotivationImageSrcByUrlRef.current.delete(cachedUrl);
+          loadedMotivationImageUrlsRef.current.delete(cachedUrl);
+          loadingMotivationImagePromisesRef.current.delete(cachedUrl);
+        }
+      }
+      setMotivationImages(payload.data);
+      preloadMotivationImages(payload.data);
+    } catch (error) {
+      pushNotice(
+        toErrorMessage(error, "Не удалось загрузить мотивационные фото."),
+        "error"
+      );
+    } finally {
+      setIsLoadingMotivationImages(false);
+    }
+  }, [authorizedFetch, preloadMotivationImages, pushNotice]);
+
+  useEffect(() => {
+    if (!dictionaryStudy?.motivateOnCorrect && !dictionaryStudy?.adhdMode) {
+      return;
+    }
+
+    preloadMotivationImages(motivationImages);
+  }, [
+    dictionaryStudy?.adhdMode,
+    dictionaryStudy?.motivateOnCorrect,
+    motivationImages,
+    preloadMotivationImages,
+  ]);
 
   const loadFriendInbox = useCallback(
     async (friendAppUserId: string) => {
@@ -2450,6 +2744,7 @@ export default function CategoryWorkspace() {
       loadFriends,
       loadFriendInbox,
       loadProjects,
+      loadDictionaryGroups,
       refreshCategoriesFromServer,
       loadCategoryMessages,
       loadCurrentPublicPanel,
@@ -2457,6 +2752,7 @@ export default function CategoryWorkspace() {
   }, [
     loadCategoryMessages,
     loadCurrentPublicPanel,
+    loadDictionaryGroups,
     loadFriendInbox,
     loadFriends,
     loadProjects,
@@ -2515,6 +2811,7 @@ export default function CategoryWorkspace() {
       ) {
         void realtimeHandlersRef.current.refreshCategoriesFromServer();
         void realtimeHandlersRef.current.loadProjects();
+        void realtimeHandlersRef.current.loadDictionaryGroups();
         const activeCategoryId = currentCategoryIdRef.current;
         if (activeCategoryId) {
           void realtimeHandlersRef.current.loadCategoryMessages(activeCategoryId);
@@ -2578,6 +2875,14 @@ export default function CategoryWorkspace() {
       return;
     }
 
+    void loadMotivationImages();
+  }, [isAuthenticated, loadMotivationImages]);
+
+  useEffect(() => {
+    if (!isAuthenticated) {
+      return;
+    }
+
     const refreshCollaboration = () => {
       if (document.visibilityState === "hidden") {
         return;
@@ -2590,13 +2895,13 @@ export default function CategoryWorkspace() {
       }
     };
 
-    if (showMenu && menuPanel === "friends") {
+    if (accountWindowTab === "friends") {
       refreshCollaboration();
     }
 
     const interval = window.setInterval(
       refreshCollaboration,
-      showMenu && menuPanel === "friends" ? 2500 : 8000
+      accountWindowTab === "friends" ? 2500 : 8000
     );
 
     const handleVisibilityChange = () => {
@@ -2611,7 +2916,7 @@ export default function CategoryWorkspace() {
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [isAuthenticated, loadFriendInbox, loadFriends, menuPanel, showMenu]);
+  }, [accountWindowTab, isAuthenticated, loadFriendInbox, loadFriends]);
 
   useEffect(() => {
     if (!isAuthenticated || !currentCategoryId) {
@@ -2812,6 +3117,127 @@ export default function CategoryWorkspace() {
     setContinuousChecklists(parsedContinuous.checklists);
     setContinuousDictionaries(parsedContinuous.dictionaries);
   }, [currentCategory]);
+
+  useEffect(() => {
+    const pending = pendingDictionarySearchSourceRef.current;
+    if (!pending || currentCategory?.id !== pending.sourceCategoryId) {
+      return;
+    }
+
+    if (pending.dictionaryId) {
+      if (currentCategory.format !== "continuous") {
+        pendingDictionarySearchSourceRef.current = null;
+        pushNotice("Источник #DICT больше не является сплошной категорией.", "warn");
+        return;
+      }
+
+      const exists = continuousDictionaries.some(
+        (dictionary) => dictionary.id === pending.dictionaryId
+      );
+      if (!exists) {
+        return;
+      }
+
+      pendingDictionarySearchSourceRef.current = null;
+      setChecklistEditor(null);
+      setChecklistTagSearchQuery("");
+      setDictionaryStudy(null);
+      setDictionaryImportDraft("");
+      dictionarySearchShouldFocusRef.current = false;
+      setDictionarySearchQuery("");
+      setDictionarySearchActiveIndex(0);
+      setDictionaryMobileSearchOpen(false);
+      setDictionaryEditorTab("entries");
+      const dictionary = continuousDictionaries.find(
+        (item) => item.id === pending.dictionaryId
+      );
+      if (!dictionary) {
+        return;
+      }
+      setDictionaryEditor({
+        source: "continuous",
+        sourceCategoryId: currentCategory.id,
+        sourceMessageId: null,
+        dictionaryId: dictionary.id,
+        titleDraft: dictionary.title,
+        descriptionDraft: dictionary.description,
+        tagsDraft: serializeDictionaryTags(dictionary.tags),
+        promptSide: dictionary.promptSide,
+        shuffle: dictionary.shuffle,
+        autoSpeak: dictionary.autoSpeak,
+        autoSpeakFields: normalizeDictionaryAutoSpeakFields(
+          dictionary.autoSpeakFields
+        ),
+        manualSpeakFields: normalizeDictionaryManualSpeakFields(
+          dictionary.manualSpeakFields
+        ),
+        progressMode: dictionary.progressMode,
+        motivateOnCorrect: dictionary.motivateOnCorrect,
+        cardMode: dictionary.cardMode,
+        adhdMode: dictionary.adhdMode,
+        motivationAdvanceMode: dictionary.motivationAdvanceMode,
+        motivationAutoSeconds: dictionary.motivationAutoSeconds,
+        labels: normalizeDictionaryLabels(dictionary.labels),
+        entries: makeDictionaryEditorEntries(dictionary),
+      });
+      return;
+    }
+
+    if (!pending.sourceMessageId) {
+      pendingDictionarySearchSourceRef.current = null;
+      return;
+    }
+
+    const message = (messagesByCategory[pending.sourceCategoryId] ?? []).find(
+      (item) => item.id === pending.sourceMessageId
+    );
+    if (!message) {
+      return;
+    }
+
+    const payload = parseMessageDictionaryContent(message.content);
+    if (!payload) {
+      pendingDictionarySearchSourceRef.current = null;
+      pushNotice("Источник #DICT больше не найден.", "warn");
+      return;
+    }
+
+    pendingDictionarySearchSourceRef.current = null;
+    setChecklistEditor(null);
+    setChecklistTagSearchQuery("");
+    setDictionaryStudy(null);
+    setDictionaryImportDraft("");
+    dictionarySearchShouldFocusRef.current = false;
+    setDictionarySearchQuery("");
+    setDictionarySearchActiveIndex(0);
+    setDictionaryMobileSearchOpen(false);
+    setDictionaryEditorTab("entries");
+    setSelectedMessageId(message.id);
+    setDictionaryEditor({
+      source: "block-message",
+      sourceCategoryId: pending.sourceCategoryId,
+      sourceMessageId: message.id,
+      dictionaryId: null,
+      titleDraft: message.title,
+      descriptionDraft: payload.description,
+      tagsDraft: serializeDictionaryTags(payload.tags),
+      promptSide: payload.promptSide,
+      shuffle: payload.shuffle,
+      autoSpeak: payload.autoSpeak,
+      autoSpeakFields: normalizeDictionaryAutoSpeakFields(payload.autoSpeakFields),
+      manualSpeakFields: normalizeDictionaryManualSpeakFields(
+        payload.manualSpeakFields
+      ),
+      progressMode: payload.progressMode,
+      motivateOnCorrect: payload.motivateOnCorrect,
+      cardMode: payload.cardMode,
+      adhdMode: payload.adhdMode,
+      motivationAdvanceMode: payload.motivationAdvanceMode,
+      motivationAutoSeconds: payload.motivationAutoSeconds,
+      labels: normalizeDictionaryLabels(payload.labels),
+      entries: makeDictionaryEditorEntries(payload),
+    });
+  }, [currentCategory, continuousDictionaries, messagesByCategory, pushNotice]);
 
   useEffect(() => {
     if (currentCategory?.format !== "block" && selectedMessageId) {
@@ -3360,6 +3786,7 @@ export default function CategoryWorkspace() {
 
         setConfirmDialog(null);
         setShowSearch(false);
+        setShowDictionaryGlobalSearch(false);
         setShowMenu(false);
         setMobilePanel(null);
         setShowCategoryTagLibrary(false);
@@ -3584,6 +4011,7 @@ export default function CategoryWorkspace() {
     const categoryInputSyncTimers = categoryInputSyncTimersRef.current;
     const messageSaveTimers = messageSaveTimersRef.current;
     const messageInputSyncTimers = messageInputSyncTimersRef.current;
+    const richFileObjectUrls = richFileObjectUrlsRef.current;
 
     return () => {
       if (confirmResolverRef.current) {
@@ -3617,6 +4045,7 @@ export default function CategoryWorkspace() {
       richImageResizeStateRef.current = null;
       draggedRichImageRef.current = null;
       draggedRichFileRef.current = null;
+      revokeRichFileObjectUrlCache(richFileObjectUrls);
     };
   }, []);
 
@@ -5234,6 +5663,7 @@ export default function CategoryWorkspace() {
     pushEditorUndoSnapshot(selection.scope);
     removableNode.remove();
     trailingBreak?.remove();
+    releaseRichFileObjectUrl(richFileObjectUrlsRef.current, selection.fileId);
 
     if (selectionApi) {
       const nextRange = document.createRange();
@@ -6461,9 +6891,60 @@ export default function CategoryWorkspace() {
       return;
     }
 
-    const opened = window.open(safeHref, "_blank", "noopener,noreferrer");
-    if (!opened) {
-      pushNotice("Браузер заблокировал открытие файла в новой вкладке.", "warn");
+    if (safeHref.startsWith("data:") && isRichFilePdf(fileLink)) {
+      const pdfBlob = richFileDataUrlToBlob(safeHref);
+      if (!pdfBlob) {
+        pushNotice("Не удалось открыть PDF: файл повреждён.", "warn");
+        return;
+      }
+
+      const fileName = getRichFileLinkName(fileLink);
+      const viewerId = crypto.randomUUID();
+      const viewerHref = buildPdfViewerHref(viewerId, fileName);
+      const viewerWindow = openPendingPdfViewerWindow(fileName);
+      if (!viewerWindow) {
+        pushNotice("Не удалось открыть PDF: браузер не создал вкладку.", "warn");
+        return;
+      }
+
+      void storePdfViewerFile({
+        id: viewerId,
+        fileName,
+        mimeType: "application/pdf",
+        sizeBytes:
+          normalizeRichFileSizeBytes(
+            fileLink.getAttribute("data-rich-file-size-bytes") ?? ""
+          ) ?? pdfBlob.size,
+        blob: pdfBlob,
+        createdAt: Date.now(),
+      })
+        .then(() => {
+          viewerWindow.location.href = viewerHref;
+          try {
+            viewerWindow.opener = null;
+          } catch {
+            return;
+          }
+        })
+        .catch(() => {
+          try {
+            viewerWindow.close();
+          } catch {
+            return;
+          }
+          pushNotice("Не удалось передать PDF в новую вкладку. Попробуй открыть ещё раз.", "warn");
+        });
+      return;
+    }
+
+    const fileId = fileLink.getAttribute("data-rich-file-id")?.trim() ?? "";
+    const openHref = getRichFileOpenHref(
+      richFileObjectUrlsRef.current,
+      fileId,
+      safeHref
+    );
+    if (!openHref || !openRichFileHref(fileLink.ownerDocument, openHref)) {
+      pushNotice("Не удалось открыть файл: ссылка повреждена.", "warn");
     }
   }
 
@@ -7198,6 +7679,7 @@ export default function CategoryWorkspace() {
       setSelectedMessageId(null);
     }
     setShowSearch(false);
+    setShowDictionaryGlobalSearch(false);
     if (!options?.keepMobilePanel) {
       setMobilePanel(null);
     }
@@ -7223,25 +7705,41 @@ export default function CategoryWorkspace() {
     setMenuPanel("main");
   }
 
-  function openMenuPanel(panel: Exclude<MenuPanel, "main">) {
-    setMenuPanel(panel);
+  function openMenuPanel(panel: AccountWindowTab) {
+    setShowMenu(false);
+    setMenuPanel("main");
+    setAccountWindowTab(panel);
     if (panel === "friends") {
       void loadFriends();
+    }
+    if (panel === "motivation") {
+      void loadMotivationImages();
     }
     pushNotice(
       panel === "account"
         ? "Открыт раздел «Аккаунт»."
-        : "Открыт раздел «Настройки»."
+        : panel === "friends"
+          ? "Открыт раздел «Друзья»."
+          : panel === "motivation"
+            ? "Открыта мотивационная панель."
+            : "Открыт раздел «Настройки»."
     );
   }
 
+  function closeAccountWindow() {
+    setAccountWindowTab(null);
+    setSelectedFriendInboxId(null);
+  }
+
   function goToEntryMenu() {
+    setAccountWindowTab(null);
     closeMenu();
     window.location.assign("/");
   }
 
   function toggleMenu() {
     setMobilePanel(null);
+    setAccountWindowTab(null);
     setShowMenu((prev) => {
       const next = !prev;
       if (next) {
@@ -9011,6 +9509,12 @@ export default function CategoryWorkspace() {
       autoSpeak: false,
       autoSpeakFields: [...DEFAULT_DICTIONARY_AUTO_SPEAK_FIELDS],
       manualSpeakFields: [...DEFAULT_DICTIONARY_MANUAL_SPEAK_FIELDS],
+      progressMode: false,
+      motivateOnCorrect: false,
+      cardMode: false,
+      adhdMode: false,
+      motivationAdvanceMode: DEFAULT_DICTIONARY_MOTIVATION_ADVANCE_MODE,
+      motivationAutoSeconds: DEFAULT_DICTIONARY_MOTIVATION_AUTO_SECONDS,
       labels: createDefaultDictionaryLabels(),
       entries: [createEmptyDictionaryEntry()],
     });
@@ -9045,6 +9549,12 @@ export default function CategoryWorkspace() {
       manualSpeakFields: normalizeDictionaryManualSpeakFields(
         payload.manualSpeakFields
       ),
+      progressMode: payload.progressMode,
+      motivateOnCorrect: payload.motivateOnCorrect,
+      cardMode: payload.cardMode,
+      adhdMode: payload.adhdMode,
+      motivationAdvanceMode: payload.motivationAdvanceMode,
+      motivationAutoSeconds: payload.motivationAutoSeconds,
       labels: normalizeDictionaryLabels(payload.labels),
       entries: makeDictionaryEditorEntries(payload),
     });
@@ -9081,6 +9591,12 @@ export default function CategoryWorkspace() {
       manualSpeakFields: normalizeDictionaryManualSpeakFields(
         dictionary.manualSpeakFields
       ),
+      progressMode: dictionary.progressMode,
+      motivateOnCorrect: dictionary.motivateOnCorrect,
+      cardMode: dictionary.cardMode,
+      adhdMode: dictionary.adhdMode,
+      motivationAdvanceMode: dictionary.motivationAdvanceMode,
+      motivationAutoSeconds: dictionary.motivationAutoSeconds,
       labels: normalizeDictionaryLabels(dictionary.labels),
       entries: makeDictionaryEditorEntries(dictionary),
     });
@@ -9267,6 +9783,62 @@ export default function CategoryWorkspace() {
 
       return { ...prev, autoSpeak, autoSpeakFields };
     });
+  }
+
+  function updateDictionaryEditorProgressMode(progressMode: boolean) {
+    setDictionaryEditor((prev) =>
+      prev
+        ? {
+            ...prev,
+            progressMode,
+          }
+        : prev
+    );
+  }
+
+  function updateDictionaryEditorMotivateOnCorrect(motivateOnCorrect: boolean) {
+    setDictionaryEditor((prev) =>
+      prev
+        ? {
+            ...prev,
+            motivateOnCorrect,
+          }
+        : prev
+    );
+  }
+
+  function updateDictionaryEditorCardMode(cardMode: boolean) {
+    setDictionaryEditor((prev) => (prev ? { ...prev, cardMode } : prev));
+  }
+
+  function updateDictionaryEditorAdhdMode(adhdMode: boolean) {
+    setDictionaryEditor((prev) => (prev ? { ...prev, adhdMode } : prev));
+  }
+
+  function updateDictionaryEditorMotivationAdvanceMode(
+    motivationAdvanceMode: DictionaryMotivationAdvanceMode
+  ) {
+    setDictionaryEditor((prev) =>
+      prev
+        ? {
+            ...prev,
+            motivationAdvanceMode: normalizeDictionaryMotivationAdvanceMode(
+              motivationAdvanceMode
+            ),
+          }
+        : prev
+    );
+  }
+
+  function updateDictionaryEditorMotivationAutoSeconds(value: string) {
+    setDictionaryEditor((prev) =>
+      prev
+        ? {
+            ...prev,
+            motivationAutoSeconds: normalizeDictionaryMotivationAutoSeconds(value),
+          }
+        : prev
+    );
   }
 
   function toggleDictionaryEditorAutoSpeakField(field: DictionaryEntryField) {
@@ -9459,6 +10031,12 @@ export default function CategoryWorkspace() {
         autoSpeak: dictionaryEditor.autoSpeak,
         autoSpeakFields,
         manualSpeakFields,
+        progressMode: dictionaryEditor.progressMode,
+        motivateOnCorrect: dictionaryEditor.motivateOnCorrect,
+        cardMode: dictionaryEditor.cardMode,
+        adhdMode: dictionaryEditor.adhdMode,
+        motivationAdvanceMode: dictionaryEditor.motivationAdvanceMode,
+        motivationAutoSeconds: dictionaryEditor.motivationAutoSeconds,
         labels: normalizeDictionaryLabels(dictionaryEditor.labels),
         entries: validation.entries,
       },
@@ -9647,6 +10225,14 @@ export default function CategoryWorkspace() {
               manualSpeakFields: normalizeDictionaryManualSpeakFields(
                 dictionaryImportPreview.payload.manualSpeakFields
               ),
+              progressMode: dictionaryImportPreview.payload.progressMode,
+              motivateOnCorrect: dictionaryImportPreview.payload.motivateOnCorrect,
+              cardMode: dictionaryImportPreview.payload.cardMode,
+              adhdMode: dictionaryImportPreview.payload.adhdMode,
+              motivationAdvanceMode:
+                dictionaryImportPreview.payload.motivationAdvanceMode,
+              motivationAutoSeconds:
+                dictionaryImportPreview.payload.motivationAutoSeconds,
               labels: normalizeDictionaryLabels(dictionaryImportPreview.payload.labels),
               entries: makeDictionaryEditorEntries(dictionaryImportPreview.payload),
             }
@@ -9712,6 +10298,12 @@ export default function CategoryWorkspace() {
       autoSpeak: dictionaryEditor.autoSpeak,
       autoSpeakFields,
       manualSpeakFields,
+      progressMode: dictionaryEditor.progressMode,
+      motivateOnCorrect: dictionaryEditor.motivateOnCorrect,
+      cardMode: dictionaryEditor.cardMode,
+      adhdMode: dictionaryEditor.adhdMode,
+      motivationAdvanceMode: dictionaryEditor.motivationAdvanceMode,
+      motivationAutoSeconds: dictionaryEditor.motivationAutoSeconds,
       labels: normalizeDictionaryLabels(dictionaryEditor.labels),
       entries: validation.entries,
     };
@@ -10000,6 +10592,22 @@ export default function CategoryWorkspace() {
     }
   }
 
+  function clearDictionaryMotivationTimer() {
+    dictionaryMotivationRequestIdRef.current += 1;
+    if (dictionaryMotivationTimerRef.current) {
+      clearTimeout(dictionaryMotivationTimerRef.current);
+      dictionaryMotivationTimerRef.current = null;
+    }
+    if (dictionaryMotivationExitTimerRef.current) {
+      clearTimeout(dictionaryMotivationExitTimerRef.current);
+      dictionaryMotivationExitTimerRef.current = null;
+    }
+    if (dictionaryMotivationEnterFrameRef.current) {
+      cancelAnimationFrame(dictionaryMotivationEnterFrameRef.current);
+      dictionaryMotivationEnterFrameRef.current = null;
+    }
+  }
+
   function cancelDictionarySpeech() {
     if (dictionaryAutoSpeechTimerRef.current) {
       clearTimeout(dictionaryAutoSpeechTimerRef.current);
@@ -10026,7 +10634,12 @@ export default function CategoryWorkspace() {
   }
 
   function queueDictionaryAutoSpeech(study: DictionaryStudyState) {
-    if (!study.autoSpeak || typeof window === "undefined") {
+    if (
+      !study.autoSpeak ||
+      study.isProgressComplete ||
+      study.motivationImageUrl ||
+      typeof window === "undefined"
+    ) {
       return;
     }
 
@@ -10069,7 +10682,8 @@ export default function CategoryWorkspace() {
       readDictionaryStudyProgress(progressKey),
       baseCards,
       defaultCards,
-      payload.shuffle
+      payload.shuffle,
+      payload.progressMode
     );
     const nextStudy: DictionaryStudyState = {
       sourceCategoryId: options.sourceCategoryId,
@@ -10086,22 +10700,106 @@ export default function CategoryWorkspace() {
       manualSpeakFields: normalizeDictionaryManualSpeakFields(
         payload.manualSpeakFields
       ),
+      progressMode: payload.progressMode,
+      motivateOnCorrect: payload.motivateOnCorrect,
+      cardMode: payload.cardMode,
+      adhdMode: payload.adhdMode,
+      motivationAdvanceMode: payload.motivationAdvanceMode,
+      motivationAutoSeconds: payload.motivationAutoSeconds,
       progressKey,
       currentIndex: restoredProgress.currentIndex,
       isAnswerRevealed: restoredProgress.isAnswerRevealed,
+      progressStartedAt: restoredProgress.progressStartedAt,
+      progressCompletedAt: restoredProgress.progressCompletedAt,
+      correctCount: restoredProgress.correctCount,
+      wrongCount: restoredProgress.wrongCount,
+      answerResultsByEntryId: restoredProgress.answerResultsByEntryId,
+      isProgressComplete: restoredProgress.isProgressComplete,
+      motivationImageUrl: null,
+      motivationDismissAction: "clear",
+      motivationPhase: "visible",
+      motivationImageKey: 0,
       transitionKey: 0,
     };
 
     cancelDictionarySpeech();
+    clearDictionaryMotivationTimer();
     setChecklistEditor(null);
     setDictionaryEditor(null);
     setDictionaryImportDraft("");
-    commitDictionaryStudyState(nextStudy, { autoSpeak: true });
+    if ((nextStudy.motivateOnCorrect || nextStudy.adhdMode) && motivationImages.length === 0) {
+      void loadMotivationImages();
+    } else if (nextStudy.motivateOnCorrect || nextStudy.adhdMode) {
+      preloadMotivationImages(motivationImages);
+    }
+
+    if (nextStudy.adhdMode && !nextStudy.isProgressComplete) {
+      void showDictionaryStudyMotivation(nextStudy, "clear", {
+        autoSpeakOnEmpty: true,
+      });
+      return;
+    }
+
+    commitDictionaryStudyState(nextStudy, {
+      autoSpeak: !nextStudy.isProgressComplete,
+    });
   }
 
   function closeDictionaryStudy() {
     cancelDictionarySpeech();
+    clearDictionaryMotivationTimer();
+    setDictionarySimilarPopup(null);
     setDictionaryStudy(null);
+  }
+
+  async function openDictionaryStudySimilar(identity: SharedDictionaryEntryIdentity) {
+    setDictionarySimilarPopup({
+      identity,
+      groups: [],
+      results: [],
+      isLoading: true,
+      error: null,
+    });
+
+    try {
+      const params = new URLSearchParams({
+        sourceCategoryId: identity.sourceCategoryId,
+        entryId: identity.entryId,
+      });
+      if (identity.sourceMessageId) {
+        params.set("sourceMessageId", identity.sourceMessageId);
+      }
+      if (identity.dictionaryId) {
+        params.set("dictionaryId", identity.dictionaryId);
+      }
+
+      const response = await authorizedFetch(
+        `/api/dictionary-groups/similar?${params.toString()}`,
+        {
+          cache: "no-store",
+        }
+      );
+      const payload = (await response.json()) as DictionaryGroupSimilarPayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Не удалось загрузить похожие слова.");
+      }
+
+      setDictionarySimilarPopup({
+        identity,
+        groups: payload.data.groups,
+        results: payload.data.results,
+        isLoading: false,
+        error: null,
+      });
+    } catch (error) {
+      setDictionarySimilarPopup({
+        identity,
+        groups: [],
+        results: [],
+        isLoading: false,
+        error: toErrorMessage(error, "Не удалось загрузить похожие слова."),
+      });
+    }
   }
 
   function openDictionaryEditorFromStudy() {
@@ -10146,6 +10844,12 @@ export default function CategoryWorkspace() {
         manualSpeakFields: normalizeDictionaryManualSpeakFields(
           dictionary.manualSpeakFields
         ),
+        progressMode: dictionary.progressMode,
+        motivateOnCorrect: dictionary.motivateOnCorrect,
+        cardMode: dictionary.cardMode,
+        adhdMode: dictionary.adhdMode,
+        motivationAdvanceMode: dictionary.motivationAdvanceMode,
+        motivationAutoSeconds: dictionary.motivationAutoSeconds,
         labels: normalizeDictionaryLabels(dictionary.labels),
         entries: makeDictionaryEditorEntries(dictionary),
       });
@@ -10183,6 +10887,12 @@ export default function CategoryWorkspace() {
       manualSpeakFields: normalizeDictionaryManualSpeakFields(
         payload.manualSpeakFields
       ),
+      progressMode: payload.progressMode,
+      motivateOnCorrect: payload.motivateOnCorrect,
+      cardMode: payload.cardMode,
+      adhdMode: payload.adhdMode,
+      motivationAdvanceMode: payload.motivationAdvanceMode,
+      motivationAutoSeconds: payload.motivationAutoSeconds,
       labels: normalizeDictionaryLabels(payload.labels),
       entries: makeDictionaryEditorEntries(payload),
     });
@@ -10190,6 +10900,18 @@ export default function CategoryWorkspace() {
 
   function toggleDictionaryStudySide() {
     if (!dictionaryStudy) {
+      return;
+    }
+    if (dictionaryStudy.isProgressComplete || dictionaryStudy.motivationImageUrl) {
+      return;
+    }
+
+    const currentEntry = dictionaryStudy.cards[dictionaryStudy.currentIndex] ?? null;
+    if (
+      dictionaryStudy.progressMode &&
+      currentEntry &&
+      dictionaryStudy.answerResultsByEntryId[currentEntry.id]
+    ) {
       return;
     }
 
@@ -10208,20 +10930,101 @@ export default function CategoryWorkspace() {
     if (!dictionaryStudy || dictionaryStudy.cards.length === 0) {
       return;
     }
+    if (dictionaryStudy.motivationImageUrl) {
+      return;
+    }
+    clearDictionaryMotivationTimer();
+
+    if (dictionaryStudy.progressMode) {
+      moveDictionaryProgressStudy(offset);
+      return;
+    }
 
     cancelDictionarySpeech();
     const nextIndex =
       (dictionaryStudy.currentIndex + offset + dictionaryStudy.cards.length) %
       dictionaryStudy.cards.length;
+    const nextStudy: DictionaryStudyState = {
+      ...dictionaryStudy,
+      currentIndex: nextIndex,
+      isAnswerRevealed: false,
+      motivationImageUrl: null,
+      motivationDismissAction: "clear",
+      motivationPhase: "visible",
+      transitionKey: dictionaryStudy.transitionKey + 1,
+    };
+
+    if (dictionaryStudy.adhdMode || dictionaryStudy.motivateOnCorrect) {
+      void showDictionaryStudyMotivation(nextStudy, "clear", {
+        autoSpeakOnEmpty: true,
+      });
+      return;
+    }
+
+    commitDictionaryStudyState(nextStudy, { autoSpeak: true });
+  }
+
+  function moveDictionaryProgressStudy(offset: number) {
+    if (!dictionaryStudy || dictionaryStudy.isProgressComplete || offset === 0) {
+      return;
+    }
+
+    const currentEntry = dictionaryStudy.cards[dictionaryStudy.currentIndex] ?? null;
+    const currentAnswerResult = currentEntry
+      ? dictionaryStudy.answerResultsByEntryId[currentEntry.id] ?? null
+      : null;
+
+    if (offset > 0 && !currentAnswerResult) {
+      return;
+    }
+
+    if (offset < 0 && dictionaryStudy.currentIndex <= 0) {
+      return;
+    }
+
+    if (offset > 0 && dictionaryStudy.currentIndex >= dictionaryStudy.cards.length - 1) {
+      const counts = getDictionaryStudyAnswerResultCounts(
+        dictionaryStudy.answerResultsByEntryId,
+        dictionaryStudy.cards
+      );
+      if (counts.answered >= dictionaryStudy.cards.length) {
+        commitDictionaryStudyState({
+          ...dictionaryStudy,
+          correctCount: counts.correct,
+          wrongCount: counts.wrong,
+          isProgressComplete: true,
+          progressCompletedAt: dictionaryStudy.progressCompletedAt ?? Date.now(),
+          motivationImageUrl: null,
+          motivationDismissAction: "clear",
+          motivationPhase: "visible",
+          transitionKey: dictionaryStudy.transitionKey + 1,
+        });
+      }
+      return;
+    }
+
+    cancelDictionarySpeech();
+    clearDictionaryMotivationTimer();
+    const nextIndex = Math.min(
+      dictionaryStudy.cards.length - 1,
+      Math.max(0, dictionaryStudy.currentIndex + offset)
+    );
+    const nextEntry = dictionaryStudy.cards[nextIndex] ?? null;
+    const nextAnswerResult = nextEntry
+      ? dictionaryStudy.answerResultsByEntryId[nextEntry.id] ?? null
+      : null;
 
     commitDictionaryStudyState(
       {
         ...dictionaryStudy,
         currentIndex: nextIndex,
-        isAnswerRevealed: false,
+        isAnswerRevealed: Boolean(nextAnswerResult),
+        motivationImageUrl: null,
+        motivationDismissAction: "clear",
+        motivationPhase: "visible",
         transitionKey: dictionaryStudy.transitionKey + 1,
       },
-      { autoSpeak: true }
+      { autoSpeak: !nextAnswerResult }
     );
   }
 
@@ -10231,21 +11034,74 @@ export default function CategoryWorkspace() {
     }
 
     cancelDictionarySpeech();
+    clearDictionaryMotivationTimer();
     const nextCards =
       shuffle && dictionaryStudy.baseCards.length > 1
         ? shuffleDictionaryEntries(dictionaryStudy.baseCards)
         : [...dictionaryStudy.baseCards];
+    const now = Date.now();
+    const nextStudy: DictionaryStudyState = {
+      ...dictionaryStudy,
+      cards: nextCards,
+      shuffle,
+      currentIndex: 0,
+      isAnswerRevealed: false,
+      progressStartedAt: now,
+      progressCompletedAt: null,
+      correctCount: 0,
+      wrongCount: 0,
+      answerResultsByEntryId: {},
+      isProgressComplete: false,
+      motivationImageUrl: null,
+      motivationDismissAction: "clear",
+      motivationPhase: "visible",
+      transitionKey: dictionaryStudy.transitionKey + 1,
+    };
+
+    if (nextStudy.adhdMode) {
+      void showDictionaryStudyMotivation(nextStudy, "clear", {
+        autoSpeakOnEmpty: true,
+      });
+      return;
+    }
+
+    commitDictionaryStudyState(nextStudy, { autoSpeak: true });
+  }
+
+  function setDictionaryStudyAdhdMode(adhdMode: boolean) {
+    if (!dictionaryStudy || dictionaryStudy.adhdMode === adhdMode) {
+      return;
+    }
+
+    cancelDictionarySpeech();
+
+    if (adhdMode) {
+      if (motivationImages.length === 0) {
+        void loadMotivationImages();
+      } else {
+        preloadMotivationImages(motivationImages);
+      }
+    } else {
+      clearDictionaryMotivationTimer();
+    }
 
     commitDictionaryStudyState(
       {
         ...dictionaryStudy,
-        cards: nextCards,
-        shuffle,
-        currentIndex: 0,
-        isAnswerRevealed: false,
+        adhdMode,
+        motivationImageUrl: adhdMode ? dictionaryStudy.motivationImageUrl : null,
+        motivationDismissAction: adhdMode
+          ? dictionaryStudy.motivationDismissAction
+          : "clear",
+        motivationPhase: "visible",
         transitionKey: dictionaryStudy.transitionKey + 1,
       },
-      { autoSpeak: true }
+      {
+        autoSpeak:
+          !adhdMode &&
+          Boolean(dictionaryStudy.motivationImageUrl) &&
+          !dictionaryStudy.isProgressComplete,
+      }
     );
   }
 
@@ -10255,21 +11111,336 @@ export default function CategoryWorkspace() {
     }
 
     cancelDictionarySpeech();
+    clearDictionaryMotivationTimer();
     const nextCards =
       dictionaryStudy.shuffle && dictionaryStudy.baseCards.length > 1
         ? shuffleDictionaryEntries(dictionaryStudy.baseCards)
         : [...dictionaryStudy.baseCards];
+    const now = Date.now();
+    const nextStudy: DictionaryStudyState = {
+      ...dictionaryStudy,
+      cards: nextCards,
+      currentIndex: 0,
+      isAnswerRevealed: false,
+      progressStartedAt: now,
+      progressCompletedAt: null,
+      correctCount: 0,
+      wrongCount: 0,
+      answerResultsByEntryId: {},
+      isProgressComplete: false,
+      motivationImageUrl: null,
+      motivationDismissAction: "clear",
+      motivationPhase: "visible",
+      transitionKey: dictionaryStudy.transitionKey + 1,
+    };
 
-    commitDictionaryStudyState(
-      {
-        ...dictionaryStudy,
-        cards: nextCards,
-        currentIndex: 0,
-        isAnswerRevealed: false,
-        transitionKey: dictionaryStudy.transitionKey + 1,
-      },
-      { autoSpeak: true }
+    if (nextStudy.adhdMode) {
+      void showDictionaryStudyMotivation(nextStudy, "clear", {
+        autoSpeakOnEmpty: true,
+      });
+      return;
+    }
+
+    commitDictionaryStudyState(nextStudy, { autoSpeak: true });
+  }
+
+  function getRandomReadyMotivationImageSrc(): string | null {
+    const availableImageUrls = motivationImages
+      .map((image) => image.url)
+      .filter((url): url is string => Boolean(url));
+    if (availableImageUrls.length === 0) {
+      return null;
+    }
+
+    preloadMotivationImages(motivationImages);
+    const readyImageSrcs = availableImageUrls
+      .map((url) => readyMotivationImageSrcByUrlRef.current.get(url) ?? null)
+      .filter((src): src is string => Boolean(src));
+    if (readyImageSrcs.length === 0) {
+      return null;
+    }
+
+    const index = Math.floor(Math.random() * readyImageSrcs.length);
+    return readyImageSrcs[index] ?? null;
+  }
+
+  function makeDictionaryStudyMotivationState(
+    study: DictionaryStudyState,
+    dismissAction: DictionaryMotivationDismissAction
+  ): DictionaryStudyState | null {
+    const motivationImageSrc = getRandomReadyMotivationImageSrc();
+    if (!motivationImageSrc) {
+      return null;
+    }
+
+    return {
+      ...study,
+      motivationImageUrl: motivationImageSrc,
+      motivationDismissAction: dismissAction,
+      motivationPhase: "visible",
+      motivationImageKey: study.motivationImageKey + 1,
+    };
+  }
+
+  function scheduleDictionaryStudyMotivation(motivatedStudy: DictionaryStudyState) {
+    if (
+      motivatedStudy.motivationAdvanceMode !== "auto" ||
+      typeof window === "undefined"
+    ) {
+      return;
+    }
+
+    dictionaryMotivationTimerRef.current = window.setTimeout(() => {
+      dictionaryMotivationTimerRef.current = null;
+      dismissDictionaryMotivation(motivatedStudy);
+    }, getDictionaryMotivationAutoDelayMs(motivatedStudy.motivationAutoSeconds));
+  }
+
+  function showDictionaryStudyMotivation(
+    study: DictionaryStudyState,
+    dismissAction: DictionaryMotivationDismissAction,
+    options: { autoSpeakOnEmpty?: boolean; commitOnSkip?: boolean } = {}
+  ): DictionaryMotivationShowResult {
+    clearDictionaryMotivationTimer();
+    const motivatedStudy = makeDictionaryStudyMotivationState(study, dismissAction);
+    if (!motivatedStudy) {
+      if (options.commitOnSkip ?? true) {
+        commitDictionaryStudyState(study, {
+          autoSpeak: Boolean(options.autoSpeakOnEmpty && !study.isProgressComplete),
+        });
+      }
+      return "skipped";
+    }
+
+    commitDictionaryStudyState(motivatedStudy);
+    scheduleDictionaryStudyMotivation(motivatedStudy);
+    return "shown";
+  }
+
+  function makeAdvancedDictionaryProgressStudy(
+    markedStudy: DictionaryStudyState
+  ): DictionaryStudyState {
+    const nextIndex = markedStudy.currentIndex + 1;
+    const counts = getDictionaryStudyAnswerResultCounts(
+      markedStudy.answerResultsByEntryId,
+      markedStudy.cards
     );
+    const isComplete =
+      nextIndex >= markedStudy.cards.length && counts.answered >= markedStudy.cards.length;
+    const nextEntry = isComplete ? null : (markedStudy.cards[nextIndex] ?? null);
+    const nextAnswerResult = nextEntry
+      ? markedStudy.answerResultsByEntryId[nextEntry.id] ?? null
+      : null;
+    const nextStudy: DictionaryStudyState = {
+      ...markedStudy,
+      currentIndex: isComplete ? markedStudy.currentIndex : nextIndex,
+      isAnswerRevealed: Boolean(nextAnswerResult),
+      correctCount: counts.correct,
+      wrongCount: counts.wrong,
+      isProgressComplete: isComplete,
+      progressCompletedAt: isComplete ? Date.now() : null,
+      motivationImageUrl: null,
+      motivationDismissAction: "clear",
+      motivationPhase: "visible",
+      transitionKey: markedStudy.transitionKey + 1,
+    };
+
+    return nextStudy;
+  }
+
+  function advanceDictionaryProgressStudy(markedStudy: DictionaryStudyState) {
+    const nextStudy = makeAdvancedDictionaryProgressStudy(markedStudy);
+
+    commitDictionaryStudyState(nextStudy, {
+      autoSpeak: !nextStudy.isProgressComplete && !nextStudy.isAnswerRevealed,
+    });
+  }
+
+  async function markDictionaryStudyAnswer(isCorrect: boolean) {
+    if (!dictionaryStudy || !dictionaryStudy.progressMode) {
+      return;
+    }
+
+    if (
+      dictionaryStudy.isProgressComplete ||
+      dictionaryStudy.motivationImageUrl ||
+      !dictionaryStudy.isAnswerRevealed
+    ) {
+      return;
+    }
+
+    const currentEntry = dictionaryStudy.cards[dictionaryStudy.currentIndex] ?? null;
+    if (
+      !currentEntry ||
+      dictionaryStudy.answerResultsByEntryId[currentEntry.id]
+    ) {
+      return;
+    }
+
+    cancelDictionarySpeech();
+    clearDictionaryMotivationTimer();
+
+    const answerResultsByEntryId: Record<string, DictionaryStudyAnswerResult> = {
+      ...dictionaryStudy.answerResultsByEntryId,
+      [currentEntry.id]: isCorrect ? "correct" : "wrong",
+    };
+    const counts = getDictionaryStudyAnswerResultCounts(
+      answerResultsByEntryId,
+      dictionaryStudy.cards
+    );
+    const markedStudy: DictionaryStudyState = {
+      ...dictionaryStudy,
+      correctCount: counts.correct,
+      wrongCount: counts.wrong,
+      answerResultsByEntryId,
+      motivationImageUrl: null,
+      motivationDismissAction: "clear",
+      motivationPhase: "visible",
+      transitionKey: dictionaryStudy.transitionKey + 1,
+    };
+    const shouldShowMotivation =
+      dictionaryStudy.adhdMode ||
+      (isCorrect && dictionaryStudy.motivateOnCorrect);
+
+    if (shouldShowMotivation) {
+      const nextStudy = makeAdvancedDictionaryProgressStudy(markedStudy);
+      const motivationResult = await showDictionaryStudyMotivation(
+        nextStudy,
+        "clear",
+        { commitOnSkip: false }
+      );
+      if (motivationResult === "shown" || motivationResult === "canceled") {
+        return;
+      }
+
+      commitDictionaryStudyState(nextStudy, {
+        autoSpeak: !nextStudy.isProgressComplete && !nextStudy.isAnswerRevealed,
+      });
+      return;
+    }
+
+    commitDictionaryStudyState(markedStudy);
+    advanceDictionaryProgressStudy(markedStudy);
+  }
+
+  function dismissDictionaryMotivation(study = dictionaryStudy) {
+    if (!study?.motivationImageUrl) {
+      return;
+    }
+
+    runAfterDictionaryMotivationExit(study, (exitedStudy) => {
+      commitDictionaryStudyState(
+        {
+          ...exitedStudy,
+          motivationImageUrl: null,
+          motivationDismissAction: "clear",
+          motivationPhase: "visible",
+        },
+        {
+          autoSpeak:
+            !exitedStudy.isProgressComplete && !exitedStudy.isAnswerRevealed,
+        }
+      );
+    });
+  }
+
+  function continueDictionaryMotivation() {
+    dismissDictionaryMotivation();
+  }
+
+  function getDictionaryMotivationExitDelayMs() {
+    if (typeof window === "undefined") {
+      return 0;
+    }
+
+    return window.matchMedia("(prefers-reduced-motion: reduce)").matches
+      ? 0
+      : DICTIONARY_MOTIVATION_EXIT_MS;
+  }
+
+  function runAfterDictionaryMotivationExit(
+    study: DictionaryStudyState,
+    onExited: (exitedStudy: DictionaryStudyState) => void
+  ) {
+    if (study.motivationPhase === "exiting") {
+      return;
+    }
+
+    clearDictionaryMotivationTimer();
+    const exitingStudy: DictionaryStudyState = {
+      ...study,
+      motivationPhase: "exiting",
+    };
+    commitDictionaryStudyState(exitingStudy);
+
+    const finishExit = () => {
+      dictionaryMotivationExitTimerRef.current = null;
+      onExited(exitingStudy);
+    };
+    const exitDelayMs = getDictionaryMotivationExitDelayMs();
+    if (exitDelayMs <= 0 || typeof window === "undefined") {
+      finishExit();
+      return;
+    }
+
+    dictionaryMotivationExitTimerRef.current = window.setTimeout(
+      finishExit,
+      exitDelayMs
+    );
+  }
+
+  function releaseDictionaryDoomscrollClickGuard() {
+    if (typeof window === "undefined") {
+      dictionaryDoomscrollClickInFlightRef.current = false;
+      return;
+    }
+
+    window.setTimeout(() => {
+      dictionaryDoomscrollClickInFlightRef.current = false;
+    }, 140);
+  }
+
+  async function handleDictionaryDoomscrollClick() {
+    if (!dictionaryStudy || dictionaryDoomscrollClickInFlightRef.current) {
+      return;
+    }
+
+    dictionaryDoomscrollClickInFlightRef.current = true;
+    try {
+      if (dictionaryStudy.motivationImageUrl) {
+        continueDictionaryMotivation();
+        return;
+      }
+
+      if (dictionaryStudy.isProgressComplete) {
+        return;
+      }
+
+      const currentEntry =
+        dictionaryStudy.cards[dictionaryStudy.currentIndex] ?? null;
+      const currentAnswerResult = currentEntry
+        ? dictionaryStudy.answerResultsByEntryId[currentEntry.id] ?? null
+        : null;
+
+      if (!dictionaryStudy.isAnswerRevealed) {
+        toggleDictionaryStudySide();
+        return;
+      }
+
+      if (dictionaryStudy.progressMode) {
+        if (currentAnswerResult) {
+          moveDictionaryStudy(1);
+          return;
+        }
+
+        await markDictionaryStudyAnswer(true);
+        return;
+      }
+
+      moveDictionaryStudy(1);
+    } finally {
+      releaseDictionaryDoomscrollClickGuard();
+    }
   }
 
   function resolveDictionarySpeechLanguage(text: string): string {
@@ -10314,7 +11485,7 @@ export default function CategoryWorkspace() {
   }
 
   function speakDictionaryStudyCurrentCard() {
-    if (!dictionaryStudy) {
+    if (!dictionaryStudy || dictionaryStudy.isProgressComplete) {
       return;
     }
 
@@ -10929,6 +12100,168 @@ export default function CategoryWorkspace() {
     openCategory(result.categoryId);
   }
 
+  function openDictionaryGlobalSearch() {
+    setShowSearch(false);
+    setShowDictionaryGlobalSearch(true);
+  }
+
+  function handleDictionaryGroupUpdated(group: DictionaryWordGroup) {
+    const normalized = normalizeDictionaryWordGroup(group);
+    setDictionaryGroups((prev) =>
+      [...prev.filter((item) => item.id !== normalized.id), normalized].sort(
+        sortDictionaryWordGroups
+      )
+    );
+    setDictionaryGroupEditor((prev) =>
+      prev?.id === normalized.id ? normalized : prev
+    );
+  }
+
+  function openDictionaryGroupEditor(group: DictionaryWordGroup) {
+    setChecklistEditor(null);
+    setDictionaryEditor(null);
+    setDictionaryStudy(null);
+    setDictionarySimilarPopup(null);
+    setDictionaryGroupEditor(normalizeDictionaryWordGroup(group));
+    setSidebarTab("dictionaryGroups");
+  }
+
+  function closeDictionaryGroupEditor() {
+    setDictionaryGroupEditor(null);
+  }
+
+  async function handleCreateDictionaryGroup() {
+    setIsMutating(true);
+    try {
+      const response = await authorizedFetch("/api/dictionary-groups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "Группа слов",
+        }),
+      });
+      const payload = (await response.json()) as DictionaryGroupPayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Не удалось создать группу словарей.");
+      }
+
+      const created = normalizeDictionaryWordGroup(payload.data);
+      setDictionaryGroups((prev) => [...prev, created].sort(sortDictionaryWordGroups));
+      setDictionaryGroupEditor(created);
+      setSidebarTab("dictionaryGroups");
+      setSource((prev) => payload.source ?? prev);
+      pushNotice("Группа словарей создана.");
+    } catch (error) {
+      pushNotice(
+        toErrorMessage(error, "Не удалось создать группу словарей."),
+        "error"
+      );
+    } finally {
+      setIsMutating(false);
+    }
+  }
+
+  async function handleDeleteDictionaryGroup(group: DictionaryWordGroup) {
+    const confirmed = await requestConfirmation({
+      title: "Удалить группу",
+      message: `Удалить группу «${group.title}»?`,
+      confirmLabel: "удалить",
+      cancelLabel: "отмена",
+      tone: "danger",
+    });
+    if (!confirmed) {
+      return;
+    }
+
+    setIsMutating(true);
+    try {
+      const response = await authorizedFetch(`/api/dictionary-groups/${group.id}`, {
+        method: "DELETE",
+      });
+      const payload = (await response.json()) as {
+        ok?: boolean;
+        source?: DataSource;
+        error?: string;
+      };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Не удалось удалить группу словарей.");
+      }
+
+      setDictionaryGroups((prev) => prev.filter((item) => item.id !== group.id));
+      setDictionaryGroupEditor((prev) => (prev?.id === group.id ? null : prev));
+      setSource((prev) => payload.source ?? prev);
+      pushNotice("Группа словарей удалена.");
+    } catch (error) {
+      pushNotice(
+        toErrorMessage(error, "Не удалось удалить группу словарей."),
+        "error"
+      );
+    } finally {
+      setIsMutating(false);
+    }
+  }
+
+  function handleDictionaryGlobalSearchOpenSource(
+    result: GlobalDictionarySearchResult
+  ) {
+    const sourceCategory = categories.find(
+      (category) => category.id === result.sourceCategoryId
+    );
+    if (!sourceCategory) {
+      pushNotice("Категория источника не найдена.", "warn");
+      return;
+    }
+
+    pendingDictionarySearchSourceRef.current = {
+      sourceCategoryId: result.sourceCategoryId,
+      sourceMessageId: result.sourceMessageId,
+      dictionaryId: result.dictionaryId,
+    };
+
+    setShowDictionaryGlobalSearch(false);
+    setShowSearch(false);
+    if (activeProjectId && !visibleCategoriesById.has(result.sourceCategoryId)) {
+      setActiveProjectId(null);
+    }
+    openCategory(result.sourceCategoryId, result.sourceMessageId ?? undefined);
+  }
+
+  function handleDictionarySimilarOpenSource(result: DictionaryGroupResolvedResult) {
+    cancelDictionarySpeech();
+    setDictionarySimilarPopup(null);
+    setDictionaryStudy(null);
+    handleDictionaryGlobalSearchOpenSource({
+      id: result.id,
+      entry: result.entry,
+      labels: result.labels,
+      matchedFields: [],
+      hasFuzzyMatch: false,
+      sourceCategoryId: result.sourceCategoryId,
+      sourceMessageId: result.sourceMessageId,
+      dictionaryId: result.dictionaryId,
+      dictionaryTitle: result.dictionaryTitle,
+      categoryPath: result.categoryPath,
+    });
+  }
+
+  function handleDictionaryGroupEditorOpenSource(
+    result: DictionaryGroupResolvedResult
+  ) {
+    setDictionaryGroupEditor(null);
+    handleDictionaryGlobalSearchOpenSource({
+      id: result.id,
+      entry: result.entry,
+      labels: result.labels,
+      matchedFields: [],
+      hasFuzzyMatch: false,
+      sourceCategoryId: result.sourceCategoryId,
+      sourceMessageId: result.sourceMessageId,
+      dictionaryId: result.dictionaryId,
+      dictionaryTitle: result.dictionaryTitle,
+      categoryPath: result.categoryPath,
+    });
+  }
+
   function handleCategoryTitleBlur() {
     if (!currentCategory) {
       return;
@@ -11375,7 +12708,6 @@ export default function CategoryWorkspace() {
   async function handleSaveAccountProfile() {
     const nickname = accountNicknameDraft.trim();
     const profileDescription = accountProfileDescriptionDraft.trim();
-    const avatarUrl = accountAvatarUrlDraft.trim();
 
     if (!nickname) {
       pushNotice("Ник не может быть пустым.", "warn");
@@ -11392,11 +12724,6 @@ export default function CategoryWorkspace() {
       return;
     }
 
-    if (avatarUrl && !isValidHttpUrl(avatarUrl)) {
-      pushNotice("Ссылка на аватар должна начинаться с http:// или https://", "warn");
-      return;
-    }
-
     setIsSavingAccountProfile(true);
     try {
       const response = await authorizedFetch("/api/account", {
@@ -11405,7 +12732,6 @@ export default function CategoryWorkspace() {
         body: JSON.stringify({
           nickname,
           profileDescription,
-          avatarUrl: avatarUrl || null,
         }),
       });
 
@@ -11574,6 +12900,184 @@ export default function CategoryWorkspace() {
       pushNotice(toErrorMessage(error, "Не удалось выпустить migration-код."), "error");
     } finally {
       setIsIssuingMigrationCode(false);
+    }
+  }
+
+  async function handleAccountAvatarFileChange(
+    event: ChangeEvent<HTMLInputElement>
+  ) {
+    const file = event.target.files?.[0] ?? null;
+    event.target.value = "";
+
+    if (!file) {
+      return;
+    }
+
+    if (!isSupportedAccountImageFile(file)) {
+      pushNotice("Поддерживаются PNG, JPG, WebP, GIF и BMP.", "warn");
+      return;
+    }
+
+    if (file.size > ACCOUNT_IMAGE_MAX_BYTES) {
+      pushNotice("Аватар должен быть не больше 5 МБ.", "warn");
+      return;
+    }
+
+    setIsUploadingAccountAvatar(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const response = await authorizedFetch("/api/account/avatar", {
+        method: "POST",
+        body: formData,
+      });
+      const payload = (await response.json()) as AccountPayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Не удалось загрузить аватар.");
+      }
+
+      setSource((prev) => payload.source ?? prev);
+      setAccountUserId(payload.data.userId ?? null);
+      setAccountUserIdDraft(payload.data.userId ?? "");
+      setAccountNicknameDraft(payload.data.nickname);
+      setAccountProfileDescriptionDraft(payload.data.profileDescription);
+      setAccountAvatarUrlDraft(payload.data.avatarUrl ?? "");
+      setAccountAvatarUrl(payload.data.avatarUrl ?? null);
+      setAccountCanChangeUserIdNow(Boolean(payload.data.canChangeUserIdNow));
+      setAccountNextUserIdChangeAt(payload.data.nextUserIdChangeAt ?? null);
+      setActiveMigrationCodeMeta(payload.data.activeMigrationCode ?? null);
+      setIssuedMigrationCode(null);
+      pushNotice("Аватар обновлен.");
+    } catch (error) {
+      pushNotice(toErrorMessage(error, "Не удалось загрузить аватар."), "error");
+    } finally {
+      setIsUploadingAccountAvatar(false);
+    }
+  }
+
+  async function handleDeleteAccountAvatar() {
+    if (!accountAvatarUrl) {
+      return;
+    }
+
+    setIsDeletingAccountAvatar(true);
+    try {
+      const response = await authorizedFetch("/api/account/avatar", {
+        method: "DELETE",
+      });
+      const payload = (await response.json()) as AccountPayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Не удалось удалить аватар.");
+      }
+
+      setSource((prev) => payload.source ?? prev);
+      setAccountUserId(payload.data.userId ?? null);
+      setAccountUserIdDraft(payload.data.userId ?? "");
+      setAccountNicknameDraft(payload.data.nickname);
+      setAccountProfileDescriptionDraft(payload.data.profileDescription);
+      setAccountAvatarUrlDraft(payload.data.avatarUrl ?? "");
+      setAccountAvatarUrl(payload.data.avatarUrl ?? null);
+      setAccountCanChangeUserIdNow(Boolean(payload.data.canChangeUserIdNow));
+      setAccountNextUserIdChangeAt(payload.data.nextUserIdChangeAt ?? null);
+      setActiveMigrationCodeMeta(payload.data.activeMigrationCode ?? null);
+      setIssuedMigrationCode(null);
+      pushNotice("Аватар удален.");
+    } catch (error) {
+      pushNotice(toErrorMessage(error, "Не удалось удалить аватар."), "error");
+    } finally {
+      setIsDeletingAccountAvatar(false);
+    }
+  }
+
+  async function handleMotivationImageFileChange(
+    event: ChangeEvent<HTMLInputElement>
+  ) {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+
+    if (files.length === 0) {
+      return;
+    }
+
+    setIsUploadingMotivationImage(true);
+    try {
+      const createdImages: AccountImageMeta[] = [];
+      for (const file of files) {
+        if (!isSupportedAccountImageFile(file)) {
+          pushNotice(`${file.name}: поддерживаются PNG, JPG, WebP, GIF и BMP.`, "warn");
+          continue;
+        }
+
+        if (file.size > ACCOUNT_IMAGE_MAX_BYTES) {
+          pushNotice(`${file.name}: максимум 5 МБ.`, "warn");
+          continue;
+        }
+
+        const formData = new FormData();
+        formData.append("file", file);
+        const response = await authorizedFetch("/api/account/motivation-images", {
+          method: "POST",
+          body: formData,
+        });
+        const payload = (await response.json()) as AccountImagePayload;
+        if (!response.ok || !payload.data) {
+          throw new Error(payload.error ?? "Не удалось загрузить фото.");
+        }
+
+        setSource((prev) => payload.source ?? prev);
+        createdImages.push(payload.data);
+      }
+
+      if (createdImages.length > 0) {
+        setMotivationImages((prev) => {
+          const nextImages = [...createdImages, ...prev].slice(0, 24);
+          preloadMotivationImages(nextImages);
+          return nextImages;
+        });
+        pushNotice(`Добавлено мотивационных фото: ${createdImages.length}.`);
+      }
+    } catch (error) {
+      pushNotice(
+        toErrorMessage(error, "Не удалось загрузить мотивационное фото."),
+        "error"
+      );
+      void loadMotivationImages();
+    } finally {
+      setIsUploadingMotivationImage(false);
+    }
+  }
+
+  async function handleDeleteMotivationImage(imageId: string) {
+    setDeletingMotivationImageIds((prev) =>
+      prev.includes(imageId) ? prev : [...prev, imageId]
+    );
+    try {
+      const response = await authorizedFetch(
+        `/api/account/motivation-images/${imageId}`,
+        { method: "DELETE" }
+      );
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "Не удалось удалить фото.");
+      }
+
+      setMotivationImages((prev) => {
+        const deletedImage = prev.find((image) => image.id === imageId);
+        if (deletedImage?.url) {
+          releaseMotivationImageMemoryCache(deletedImage.url);
+        }
+        return prev.filter((image) => image.id !== imageId);
+      });
+      pushNotice("Мотивационное фото удалено.");
+    } catch (error) {
+      pushNotice(
+        toErrorMessage(error, "Не удалось удалить мотивационное фото."),
+        "error"
+      );
+    } finally {
+      setDeletingMotivationImageIds((prev) =>
+        prev.filter((id) => id !== imageId)
+      );
     }
   }
 
@@ -12622,53 +14126,128 @@ export default function CategoryWorkspace() {
                 x
               </button>
             </div>
+            <div className="sidebar-tab-strip" role="tablist" aria-label="Левая панель">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={sidebarTab === "categories"}
+                className={`sidebar-tab ${
+                  sidebarTab === "categories" ? "sidebar-tab-active" : ""
+                }`}
+                onClick={() => setSidebarTab("categories")}
+              >
+                Категории
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={sidebarTab === "dictionaryGroups"}
+                className={`sidebar-tab ${
+                  sidebarTab === "dictionaryGroups" ? "sidebar-tab-active" : ""
+                }`}
+                onClick={() => setSidebarTab("dictionaryGroups")}
+              >
+                Группы словарей
+              </button>
+            </div>
             <div className="sidebar-scroll flex-1">
-              {childCategories.map((node) => {
-                const isActive = insertionTargetId === node.id;
-                const canDeleteNode = canDeleteCategoryNode(node);
+              {sidebarTab === "categories" ? (
+                <>
+                  {childCategories.map((node) => {
+                    const isActive = insertionTargetId === node.id;
+                    const canDeleteNode = canDeleteCategoryNode(node);
 
-                return (
-                  <div
-                    key={node.id}
-                    className={`sidebar-item-row ${isActive ? "sidebar-item-row-active" : ""}`}
+                    return (
+                      <div
+                        key={node.id}
+                        className={`sidebar-item-row ${isActive ? "sidebar-item-row-active" : ""}`}
+                      >
+                        <button
+                          type="button"
+                          className={`sidebar-item sidebar-item-main w-full border-x-0 border-t-0 text-left font-display text-[1.7rem] leading-none sm:text-[1.95rem] ${
+                            isActive ? "sidebar-item-active" : ""
+                          }`}
+                          onClick={() =>
+                            openCategory(node.id, undefined, {
+                              keepMobilePanel: mobilePanel === "categories",
+                            })
+                          }
+                        >
+                          <span className="sidebar-item-title">{node.title}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          className="sidebar-delete mobile-only"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void handleDeleteCategoryFromPanel(node.id);
+                          }}
+                          disabled={!canDeleteNode || isMutating || isLoading}
+                          aria-label={`Delete category ${node.title}`}
+                        >
+                          -
+                        </button>
+                      </div>
+                    );
+                  })}
+
+                  {Array.from({ length: sidebarFillerCount }).map((_, index) => (
+                    <div
+                      key={`filler-${index}`}
+                      className="sidebar-item pointer-events-none w-full border-x-0 border-t-0 opacity-45"
+                      aria-hidden="true"
+                    />
+                  ))}
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    className="sidebar-item dictionary-group-create w-full border-x-0 border-t-0 text-left font-display text-[1.35rem] leading-none"
+                    onClick={() => void handleCreateDictionaryGroup()}
+                    disabled={isMutating || isLoading}
                   >
-                    <button
-                      type="button"
-                      className={`sidebar-item sidebar-item-main w-full border-x-0 border-t-0 text-left font-display text-[1.7rem] leading-none sm:text-[1.95rem] ${
-                        isActive ? "sidebar-item-active" : ""
-                      }`}
-                      onClick={() =>
-                        openCategory(node.id, undefined, {
-                          keepMobilePanel: mobilePanel === "categories",
-                        })
-                      }
-                    >
-                      <span className="sidebar-item-title">{node.title}</span>
-                    </button>
+                    + группа
+                  </button>
+                  {dictionaryGroups.map((group) => {
+                    const isActive = dictionaryGroupEditor?.id === group.id;
 
-                    <button
-                      type="button"
-                      className="sidebar-delete mobile-only"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void handleDeleteCategoryFromPanel(node.id);
-                      }}
-                      disabled={!canDeleteNode || isMutating || isLoading}
-                      aria-label={`Delete category ${node.title}`}
-                    >
-                      -
-                    </button>
-                  </div>
-                );
-              })}
-
-              {Array.from({ length: sidebarFillerCount }).map((_, index) => (
-                <div
-                  key={`filler-${index}`}
-                  className="sidebar-item pointer-events-none w-full border-x-0 border-t-0 opacity-45"
-                  aria-hidden="true"
-                />
-              ))}
+                    return (
+                      <div
+                        key={group.id}
+                        className={`sidebar-item-row ${isActive ? "sidebar-item-row-active" : ""}`}
+                      >
+                        <button
+                          type="button"
+                          className={`sidebar-item sidebar-item-main dictionary-group-sidebar-item w-full border-x-0 border-t-0 text-left font-display text-[1.35rem] leading-none ${
+                            isActive ? "sidebar-item-active" : ""
+                          }`}
+                          onClick={() => openDictionaryGroupEditor(group)}
+                        >
+                          <span className="sidebar-item-title">{group.title}</span>
+                          <small>{group.items.length} слов</small>
+                        </button>
+                        <button
+                          type="button"
+                          className="sidebar-delete dictionary-group-delete"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void handleDeleteDictionaryGroup(group);
+                          }}
+                          disabled={isMutating || isLoading}
+                          aria-label={`Удалить группу ${group.title}`}
+                        >
+                          -
+                        </button>
+                      </div>
+                    );
+                  })}
+                  {dictionaryGroups.length === 0 && (
+                    <p className="dictionary-group-empty">пока нет групп</p>
+                  )}
+                </>
+              )}
             </div>
           </aside>
 
@@ -14092,11 +15671,33 @@ export default function CategoryWorkspace() {
                         {publicPanel.members.length === 0 ? (
                           <p className="settings-hint">В user:panel пока нет участников.</p>
                         ) : (
-                          publicPanel.members.map((member) => (
+                          publicPanel.members.map((member) => {
+                            const memberName =
+                              member.nickname || member.userId || member.appUserId;
+                            const memberInitial =
+                              memberName.trim().charAt(0).toUpperCase() || "U";
+
+                            return (
                             <div key={member.id} className="public-member-item">
-                              <span className="public-member-name">
-                                {member.nickname || member.userId || member.appUserId}
-                              </span>
+                              <div className="friend-identity">
+                                <div className="friend-avatar">
+                                  {member.avatarUrl &&
+                                  isDisplayImageUrl(member.avatarUrl) ? (
+                                    <span
+                                      className="friend-avatar-image"
+                                      style={{
+                                        backgroundImage: `url(${member.avatarUrl})`,
+                                      }}
+                                      aria-label="Аватар участника"
+                                    />
+                                  ) : (
+                                    <span>{memberInitial}</span>
+                                  )}
+                                </div>
+                                <span className="public-member-name">
+                                  {memberName}
+                                </span>
+                              </div>
                               <select
                                 value={member.role}
                                 className="settings-input public-member-role"
@@ -14120,7 +15721,8 @@ export default function CategoryWorkspace() {
                                 удалить
                               </button>
                             </div>
-                          ))
+                            );
+                          })
                         )}
                       </div>
                     </>
@@ -14350,6 +15952,7 @@ export default function CategoryWorkspace() {
               className="tool-button tool-blue"
               onClick={() => {
                 closeMobilePanel();
+                setShowDictionaryGlobalSearch(false);
                 setShowSearch(true);
               }}
               disabled={isLoading || Boolean(loadError)}
@@ -15308,6 +16911,107 @@ export default function CategoryWorkspace() {
                       <label className="dictionary-editor-toggle">
                         <input
                           type="checkbox"
+                          checked={dictionaryEditor.progressMode}
+                          onChange={(event) =>
+                            updateDictionaryEditorProgressMode(event.target.checked)
+                          }
+                        />
+                        <span>режим прогресса</span>
+                      </label>
+
+                      <label className="dictionary-editor-toggle">
+                        <input
+                          type="checkbox"
+                          checked={dictionaryEditor.cardMode}
+                          onChange={(event) =>
+                            updateDictionaryEditorCardMode(event.target.checked)
+                          }
+                        />
+                        <span>режим карточек</span>
+                      </label>
+
+                      <label className="dictionary-editor-toggle">
+                        <input
+                          type="checkbox"
+                          checked={dictionaryEditor.motivateOnCorrect}
+                          onChange={(event) =>
+                            updateDictionaryEditorMotivateOnCorrect(
+                              event.target.checked
+                            )
+                          }
+                        />
+                        <span>показывать мотивацию</span>
+                      </label>
+
+                      <label className="dictionary-editor-toggle">
+                        <input
+                          type="checkbox"
+                          checked={dictionaryEditor.adhdMode}
+                          onChange={(event) =>
+                            updateDictionaryEditorAdhdMode(event.target.checked)
+                          }
+                        />
+                        <span>Режим СДВГ</span>
+                      </label>
+
+                      <div
+                        className={`dictionary-editor-motivation-settings ${
+                          !(dictionaryEditor.motivateOnCorrect || dictionaryEditor.adhdMode)
+                            ? "dictionary-editor-motivation-settings-disabled"
+                            : ""
+                        }`}
+                      >
+                        <label className="dictionary-editor-field">
+                          <span className="settings-label">
+                            смена мотивационного фото
+                          </span>
+                          <select
+                            value={dictionaryEditor.motivationAdvanceMode}
+                            className="settings-input"
+                            disabled={
+                              !(dictionaryEditor.motivateOnCorrect || dictionaryEditor.adhdMode)
+                            }
+                            onChange={(event) =>
+                              updateDictionaryEditorMotivationAdvanceMode(
+                                normalizeDictionaryMotivationAdvanceMode(
+                                  event.target.value
+                                )
+                              )
+                            }
+                          >
+                            <option value="auto">авто</option>
+                            <option value="manual">ручное</option>
+                          </select>
+                        </label>
+
+                        {dictionaryEditor.motivationAdvanceMode === "auto" && (
+                          <label className="dictionary-editor-field">
+                            <span className="settings-label">
+                              убрать через, сек.
+                            </span>
+                            <input
+                              type="number"
+                              min={MIN_DICTIONARY_MOTIVATION_AUTO_SECONDS}
+                              max={MAX_DICTIONARY_MOTIVATION_AUTO_SECONDS}
+                              step="0.5"
+                              value={dictionaryEditor.motivationAutoSeconds}
+                              className="settings-input"
+                              disabled={
+                                !(dictionaryEditor.motivateOnCorrect || dictionaryEditor.adhdMode)
+                              }
+                              onChange={(event) =>
+                                updateDictionaryEditorMotivationAutoSeconds(
+                                  event.target.value
+                                )
+                              }
+                            />
+                          </label>
+                        )}
+                      </div>
+
+                      <label className="dictionary-editor-toggle">
+                        <input
+                          type="checkbox"
                           checked={dictionaryEditor.autoSpeak}
                           onChange={(event) =>
                             updateDictionaryEditorAutoSpeak(event.target.checked)
@@ -15548,10 +17252,6 @@ export default function CategoryWorkspace() {
               hiddenSide,
               dictionaryStudy.labels
             );
-            const activeNoteLabel = toDictionaryNoteSideLabel(
-              activeSide,
-              dictionaryStudy.labels
-            );
             const autoSpeakFieldLabels = normalizeDictionaryAutoSpeakFields(
               dictionaryStudy.autoSpeakFields
             )
@@ -15559,6 +17259,40 @@ export default function CategoryWorkspace() {
               .join(" + ");
             const activeText = getDictionaryEntrySideText(currentEntry, activeSide);
             const activeNote = getDictionaryEntrySideNote(currentEntry, activeSide);
+            const progressStats =
+              getDictionaryStudyProgressStats(dictionaryStudy);
+            const currentAnswerResult =
+              dictionaryStudy.answerResultsByEntryId[currentEntry.id] ?? null;
+            const canGradeDictionaryAnswer =
+              dictionaryStudy.progressMode &&
+              dictionaryStudy.isAnswerRevealed &&
+              !dictionaryStudy.isProgressComplete &&
+              !dictionaryStudy.motivationImageUrl &&
+              !currentAnswerResult;
+            const canToggleDictionarySide =
+              !dictionaryStudy.isProgressComplete &&
+              !dictionaryStudy.motivationImageUrl &&
+              !currentAnswerResult;
+            const canMoveDictionaryPrevious =
+              !dictionaryStudy.isProgressComplete &&
+              !dictionaryStudy.motivationImageUrl &&
+              dictionaryStudy.currentIndex > 0;
+            const canMoveDictionaryNext =
+              !dictionaryStudy.isProgressComplete &&
+              !dictionaryStudy.motivationImageUrl &&
+              (!dictionaryStudy.progressMode || Boolean(currentAnswerResult));
+            const currentEntryIdentity = makeDictionaryStudyEntryIdentity(
+              dictionaryStudy,
+              currentEntry
+            );
+            const currentSimilarGroups = findDictionaryGroupsForIdentity(
+              dictionaryGroups,
+              currentEntryIdentity
+            );
+            const canOpenSimilarDictionaryWords =
+              currentSimilarGroups.length > 0 &&
+              !dictionaryStudy.isProgressComplete &&
+              !dictionaryStudy.motivationImageUrl;
 
             return (
               <div className="dictionary-study-overlay absolute inset-0 z-[80]">
@@ -15594,9 +17328,21 @@ export default function CategoryWorkspace() {
 
                   <div className="dictionary-study-meta-row">
                     <div className="dictionary-study-counter">
-                      {dictionaryStudy.currentIndex + 1} / {dictionaryStudy.cards.length}
+                      {dictionaryStudy.isProgressComplete
+                        ? "готово"
+                        : `${dictionaryStudy.currentIndex + 1} / ${dictionaryStudy.cards.length}`}
                     </div>
-                    <label className="dictionary-study-shuffle-toggle">
+                    <label className="dictionary-study-toggle dictionary-study-adhd-toggle">
+                      <input
+                        type="checkbox"
+                        checked={dictionaryStudy.adhdMode}
+                        onChange={(event) =>
+                          setDictionaryStudyAdhdMode(event.target.checked)
+                        }
+                      />
+                      <span>режим сдвг</span>
+                    </label>
+                    <label className="dictionary-study-toggle dictionary-study-shuffle-toggle">
                       <input
                         type="checkbox"
                         checked={dictionaryStudy.shuffle}
@@ -15614,6 +17360,12 @@ export default function CategoryWorkspace() {
                     >
                       {dictionaryStudy.shuffle ? "перемешать" : "сбросить прогресс"}
                     </button>
+                    {dictionaryStudy.progressMode && (
+                      <span className="dictionary-study-progress-badge">
+                        верно {dictionaryStudy.correctCount} / неверно{" "}
+                        {dictionaryStudy.wrongCount}
+                      </span>
+                    )}
                     {dictionaryStudy.autoSpeak && (
                       <span className="dictionary-study-autospeak-badge">
                         автоозвучка: {autoSpeakFieldLabels}
@@ -15623,7 +17375,39 @@ export default function CategoryWorkspace() {
 
                   <div
                     ref={dictionaryStudyCardShellRef}
-                    className="dictionary-study-card-shell"
+                    className={`dictionary-study-card-shell ${
+                      dictionaryStudy.cardMode && canToggleDictionarySide
+                        ? "dictionary-study-card-shell-flippable"
+                        : ""
+                    }`}
+                    onClick={
+                      dictionaryStudy.cardMode && canToggleDictionarySide
+                        ? toggleDictionaryStudySide
+                        : undefined
+                    }
+                    onKeyDown={(event) => {
+                      if (!dictionaryStudy.cardMode || !canToggleDictionarySide) {
+                        return;
+                      }
+
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        toggleDictionaryStudySide();
+                      }
+                    }}
+                    role={
+                      dictionaryStudy.cardMode && canToggleDictionarySide
+                        ? "button"
+                        : undefined
+                    }
+                    tabIndex={
+                      dictionaryStudy.cardMode && canToggleDictionarySide ? 0 : undefined
+                    }
+                    aria-label={
+                      dictionaryStudy.cardMode && canToggleDictionarySide
+                        ? `Показать ${hiddenSideLabel}`
+                        : undefined
+                    }
                   >
                     <div
                       ref={dictionaryStudyCardContentRef}
@@ -15638,101 +17422,295 @@ export default function CategoryWorkspace() {
                         ref={dictionaryStudyCardFitRef}
                         className="dictionary-study-card-fit"
                       >
-                        <p className="dictionary-study-side">{activeSideLabel}</p>
-                        <div className="dictionary-study-word">{activeText}</div>
-                        {activeNote ? (
-                          <div className="dictionary-study-note">{activeNote}</div>
-                        ) : (
-                          <div className="dictionary-study-note dictionary-study-note-empty">
-                            без {activeNoteLabel.toLocaleLowerCase()}
+                        {dictionaryStudy.isProgressComplete ? (
+                          <div className="dictionary-study-results">
+                            <p className="dictionary-study-side">статистика</p>
+                            <div className="dictionary-study-result-score">
+                              {progressStats.percent}%
+                            </div>
+                            <div className="dictionary-study-result-grid">
+                              <span>слов</span>
+                              <strong>{progressStats.total}</strong>
+                              <span>правильно</span>
+                              <strong>{progressStats.correct}</strong>
+                              <span>не правильно</span>
+                              <strong>{progressStats.wrong}</strong>
+                              <span>время</span>
+                              <strong>{progressStats.elapsed}</strong>
+                              <span>среднее</span>
+                              <strong>{progressStats.average}</strong>
+                            </div>
                           </div>
+                        ) : (
+                          <>
+                            <p className="dictionary-study-side">{activeSideLabel}</p>
+                            <div className="dictionary-study-word">{activeText}</div>
+                            {activeNote ? (
+                              <div className="dictionary-study-note">{activeNote}</div>
+                            ) : null}
+                            {dictionaryStudy.progressMode && currentAnswerResult && (
+                              <div
+                                className={`dictionary-study-answer-status dictionary-study-answer-status-${currentAnswerResult}`}
+                              >
+                                ответ:{" "}
+                                {currentAnswerResult === "correct"
+                                  ? "верно"
+                                  : "неверно"}
+                              </div>
+                            )}
+                          </>
                         )}
                       </div>
                     </div>
                   </div>
 
-                  <div className="dictionary-study-actions">
-                    <button
-                      type="button"
-                      className="tool-button tool-blue dictionary-study-arrow"
-                      onClick={() => moveDictionaryStudy(-1)}
-                      aria-label="Предыдущая карточка"
+                  {dictionaryStudy.motivationImageUrl && (
+                    <div
+                      key={dictionaryStudy.motivationImageKey}
+                      className={`dictionary-study-motivation ${
+                        dictionaryStudy.adhdMode
+                          ? "dictionary-study-motivation-adhd"
+                          : ""
+                      } ${
+                        dictionaryStudy.motivationPhase === "entering"
+                          ? "dictionary-study-motivation-entering"
+                          : ""
+                      } ${
+                        dictionaryStudy.motivationPhase === "exiting"
+                          ? "dictionary-study-motivation-exit"
+                          : ""
+                      }`}
                     >
-                      &lt;
-                    </button>
-                    <button
-                      type="button"
-                      className="mini-action dictionary-study-reveal"
-                      onClick={toggleDictionaryStudySide}
-                    >
-                      {hiddenSideLabel}
-                    </button>
-                    <button
-                      type="button"
-                      className="tool-button tool-yellow dictionary-study-speak"
-                      onClick={speakDictionaryStudyCurrentCard}
-                      aria-label={`Озвучить ${activeSideLabel}`}
-                      title={`Озвучить ${activeSideLabel}`}
-                    >
-                      <SpeakerIcon />
-                    </button>
-                    <button
-                      type="button"
-                      className="tool-button tool-green dictionary-study-arrow"
-                      onClick={() => moveDictionaryStudy(1)}
-                      aria-label="Следующая карточка"
-                    >
-                      &gt;
-                    </button>
-                  </div>
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        className="dictionary-study-motivation-image"
+                        src={dictionaryStudy.motivationImageUrl}
+                        alt="Мотивация"
+                        loading="eager"
+                        decoding="sync"
+                        draggable={false}
+                      />
+                      {!dictionaryStudy.adhdMode &&
+                        dictionaryStudy.motivationAdvanceMode === "manual" && (
+                        <button
+                          type="button"
+                          className="mini-action dictionary-study-motivation-next"
+                          onClick={continueDictionaryMotivation}
+                        >
+                          дальше
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {dictionaryStudy.isProgressComplete ? (
+                    <div className="dictionary-study-actions dictionary-study-complete-actions">
+                      <button
+                        type="button"
+                        className="mini-action dictionary-study-reveal"
+                        onClick={resetDictionaryStudyProgress}
+                      >
+                        пройти заново
+                      </button>
+                    </div>
+                  ) : dictionaryStudy.progressMode ? (
+                    <div className="dictionary-study-progress-action-stack">
+                      <div className="dictionary-study-actions dictionary-study-progress-actions">
+                        <button
+                          type="button"
+                          className="tool-button tool-blue dictionary-study-arrow"
+                          onClick={() => moveDictionaryStudy(-1)}
+                          disabled={!canMoveDictionaryPrevious}
+                          aria-label="Предыдущая карточка"
+                        >
+                          &lt;
+                        </button>
+                        <button
+                          type="button"
+                          className={`mini-action dictionary-study-similar ${
+                            canOpenSimilarDictionaryWords
+                              ? "dictionary-study-similar-active"
+                              : "dictionary-study-similar-empty"
+                          }`}
+                          onClick={() =>
+                            void openDictionaryStudySimilar(currentEntryIdentity)
+                          }
+                          disabled={!canOpenSimilarDictionaryWords}
+                          title={
+                            canOpenSimilarDictionaryWords
+                              ? currentSimilarGroups
+                                  .map((group) => group.title)
+                                  .join(", ")
+                              : "Слово не состоит в группе"
+                          }
+                        >
+                          похожее
+                        </button>
+                        <button
+                          type="button"
+                          className="tool-button tool-yellow dictionary-study-speak"
+                          onClick={speakDictionaryStudyCurrentCard}
+                          aria-label={`Озвучить ${activeSideLabel}`}
+                          title={`Озвучить ${activeSideLabel}`}
+                          disabled={Boolean(dictionaryStudy.motivationImageUrl)}
+                        >
+                          <SpeakerIcon />
+                        </button>
+                        <button
+                          type="button"
+                          className="mini-action dictionary-study-reveal"
+                          onClick={toggleDictionaryStudySide}
+                          disabled={!canToggleDictionarySide}
+                        >
+                          {hiddenSideLabel}
+                        </button>
+                        <button
+                          type="button"
+                          className="tool-button tool-green dictionary-study-arrow"
+                          onClick={() => moveDictionaryStudy(1)}
+                          disabled={!canMoveDictionaryNext}
+                          aria-label="Следующая карточка"
+                        >
+                          &gt;
+                        </button>
+                      </div>
+                      <div className="dictionary-study-grade-row">
+                        <button
+                          type="button"
+                          className="tool-button tool-red dictionary-study-grade-wide"
+                          onClick={() => void markDictionaryStudyAnswer(false)}
+                          disabled={!canGradeDictionaryAnswer}
+                          aria-label="Ответ неправильный"
+                        >
+                          × неверно
+                        </button>
+                        <button
+                          type="button"
+                          className="tool-button tool-green dictionary-study-grade-wide"
+                          onClick={() => void markDictionaryStudyAnswer(true)}
+                          disabled={!canGradeDictionaryAnswer}
+                          aria-label="Ответ правильный"
+                        >
+                          ✓ верно
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="dictionary-study-actions">
+                      <button
+                        type="button"
+                        className="tool-button tool-blue dictionary-study-arrow"
+                        onClick={() => moveDictionaryStudy(-1)}
+                        aria-label="Предыдущая карточка"
+                      >
+                        &lt;
+                      </button>
+                      <button
+                        type="button"
+                        className={`mini-action dictionary-study-similar ${
+                          canOpenSimilarDictionaryWords
+                            ? "dictionary-study-similar-active"
+                            : "dictionary-study-similar-empty"
+                        }`}
+                        onClick={() =>
+                          void openDictionaryStudySimilar(currentEntryIdentity)
+                        }
+                        disabled={!canOpenSimilarDictionaryWords}
+                        title={
+                          canOpenSimilarDictionaryWords
+                            ? currentSimilarGroups.map((group) => group.title).join(", ")
+                            : "Слово не состоит в группе"
+                        }
+                      >
+                        похожее
+                      </button>
+                      <button
+                        type="button"
+                        className="tool-button tool-yellow dictionary-study-speak"
+                        onClick={speakDictionaryStudyCurrentCard}
+                        aria-label={`Озвучить ${activeSideLabel}`}
+                        title={`Озвучить ${activeSideLabel}`}
+                      >
+                        <SpeakerIcon />
+                      </button>
+                      <button
+                        type="button"
+                        className="mini-action dictionary-study-reveal"
+                        onClick={toggleDictionaryStudySide}
+                        disabled={!canToggleDictionarySide}
+                      >
+                        {hiddenSideLabel}
+                      </button>
+                      <button
+                        type="button"
+                        className="tool-button tool-green dictionary-study-arrow"
+                        onClick={() => moveDictionaryStudy(1)}
+                        disabled={!canMoveDictionaryNext}
+                        aria-label="Следующая карточка"
+                      >
+                        &gt;
+                      </button>
+                    </div>
+                  )}
+                  {dictionaryStudy.adhdMode &&
+                    (!dictionaryStudy.isProgressComplete ||
+                      Boolean(dictionaryStudy.motivationImageUrl)) && (
+                      <div className="dictionary-study-doomscroll-row">
+                        <button
+                          type="button"
+                          className="mini-action dictionary-study-doomscroll-button"
+                          onClick={() => void handleDictionaryDoomscrollClick()}
+                          aria-label="Пошаговый режим СДВГ"
+                        >
+                          клик
+                        </button>
+                      </div>
+                    )}
                 </div>
               </div>
             );
           })()}
 
+        {dictionarySimilarPopup && (
+          <DictionarySimilarPopup
+            state={dictionarySimilarPopup}
+            onClose={() => setDictionarySimilarPopup(null)}
+            onOpenSource={handleDictionarySimilarOpenSource}
+          />
+        )}
+
+        {dictionaryGroupEditor && (
+          <DictionaryGroupEditorPopup
+            group={dictionaryGroupEditor}
+            authorizedFetch={authorizedFetch}
+            onClose={closeDictionaryGroupEditor}
+            onGroupUpdated={handleDictionaryGroupUpdated}
+            onOpenSource={handleDictionaryGroupEditorOpenSource}
+          />
+        )}
+
         {showSearch && (
-          <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/35 p-3">
-            <div className="search-modal popup-3d w-full max-w-3xl p-4 sm:p-5">
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <h2 className="font-display text-4xl leading-none">Search</h2>
-                <button
-                  type="button"
-                  className="menu-action h-9 w-9 text-xl"
-                  onClick={() => setShowSearch(false)}
-                  aria-label="Закрыть поиск"
-                >
-                  x
-                </button>
-              </div>
+          <SiteSearchPopup
+            visibleCategories={visibleCategories}
+            visibleCategoriesById={visibleCategoriesById}
+            messagesByCategory={messagesByCategory}
+            onClose={() => setShowSearch(false)}
+            onOpenResult={handleSearchOpenCategory}
+            onOpenDictionarySearch={openDictionaryGlobalSearch}
+          />
+        )}
 
-              <input
-                autoFocus
-                value={searchQuery}
-                onChange={(event) => setSearchQuery(event.target.value)}
-                placeholder="Введи текст для поиска..."
-                className="w-full border-2 border-[#4a4a4a] bg-[#efefef] px-3 py-2 text-base text-[#1a1a1a] outline-none focus:border-[#355faa]"
-              />
-
-              <div className="mt-3 max-h-[22rem] space-y-2 overflow-y-auto pr-1">
-                {searchResults.length === 0 && searchQuery.trim().length > 0 && (
-                  <p className="px-2 text-sm text-[#2e2e2e]">Ничего не найдено.</p>
-                )}
-
-                {searchResults.map((result) => (
-                  <button
-                    key={result.id}
-                    type="button"
-                    className="search-item w-full px-3 py-2 text-left"
-                    onClick={() => handleSearchOpenCategory(result)}
-                  >
-                    <p className="font-display text-3xl leading-none">{result.title}</p>
-                    <p className="mt-1 text-xs text-[#2f2f2f]">{result.path}</p>
-                    <p className="mt-1 text-sm text-[#232323]">{result.preview}</p>
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
+        {showDictionaryGlobalSearch && (
+          <DictionaryGlobalSearchPopup
+            activeProject={activeProject}
+            currentCategory={currentCategory}
+            onClose={() => setShowDictionaryGlobalSearch(false)}
+            onOpenSiteSearch={() => {
+              setShowDictionaryGlobalSearch(false);
+              setShowSearch(true);
+            }}
+            onOpenSource={handleDictionaryGlobalSearchOpenSource}
+          />
         )}
 
         {showCategoryTagLibrary && (
@@ -15870,6 +17848,14 @@ export default function CategoryWorkspace() {
                     onClick={() => openMenuPanel("friends")}
                   >
                     Друзья
+                  </button>
+
+                  <button
+                    type="button"
+                    className="menu-action px-4 py-3 text-left text-lg font-semibold"
+                    onClick={() => openMenuPanel("motivation")}
+                  >
+                    Мотивационная панель
                   </button>
 
                   <button
@@ -16298,8 +18284,1733 @@ export default function CategoryWorkspace() {
             </aside>
           </div>
         )}
+
+        {accountWindowTab && (
+          <div className="account-window-overlay absolute inset-0 z-[70]">
+            <button
+              type="button"
+              className="account-window-backdrop"
+              onClick={closeAccountWindow}
+              aria-label="Закрыть окно аккаунта"
+            />
+
+            <section className="account-window popup-3d" aria-modal="true" role="dialog">
+              <header className="account-window-head">
+                <div>
+                  <p className="account-window-kicker">профиль</p>
+                  <h2 className="account-window-title font-display">
+                    {accountWindowTab === "account"
+                      ? "Аккаунт"
+                      : accountWindowTab === "settings"
+                        ? "Настройки"
+                        : accountWindowTab === "friends"
+                          ? "Друзья"
+                          : "Мотивация"}
+                  </h2>
+                </div>
+                <button
+                  type="button"
+                  className="menu-action h-9 w-9 text-xl"
+                  onClick={closeAccountWindow}
+                  aria-label="Закрыть окно аккаунта"
+                >
+                  x
+                </button>
+              </header>
+
+              <nav className="account-window-tabs" aria-label="Разделы аккаунта">
+                <button
+                  type="button"
+                  className={`mini-action account-window-tab ${
+                    accountWindowTab === "account" ? "account-window-tab-active" : ""
+                  }`}
+                  onClick={() => openMenuPanel("account")}
+                >
+                  аккаунт
+                </button>
+                <button
+                  type="button"
+                  className={`mini-action account-window-tab ${
+                    accountWindowTab === "settings" ? "account-window-tab-active" : ""
+                  }`}
+                  onClick={() => openMenuPanel("settings")}
+                >
+                  настройки
+                </button>
+                <button
+                  type="button"
+                  className={`mini-action account-window-tab ${
+                    accountWindowTab === "friends" ? "account-window-tab-active" : ""
+                  }`}
+                  onClick={() => openMenuPanel("friends")}
+                >
+                  друзья
+                </button>
+                <button
+                  type="button"
+                  className={`mini-action account-window-tab ${
+                    accountWindowTab === "motivation"
+                      ? "account-window-tab-active"
+                      : ""
+                  }`}
+                  onClick={() => openMenuPanel("motivation")}
+                >
+                  мотивация
+                </button>
+              </nav>
+
+              <div className="account-window-body">
+                {accountWindowTab === "account" && (
+                  <div className="account-profile-grid">
+                    <section className="account-profile-card">
+                      <div className="account-avatar-shell account-window-avatar">
+                        {accountAvatarPreviewUrl ? (
+                          <div
+                            className="account-avatar-image"
+                            style={{
+                              backgroundImage: `url(${accountAvatarPreviewUrl})`,
+                            }}
+                            aria-label="Аватар профиля"
+                          />
+                        ) : (
+                          <span className="font-display text-6xl leading-none text-[#1f1f1f]">
+                            {accountAvatarInitial}
+                          </span>
+                        )}
+                      </div>
+                      <div className="account-profile-actions">
+                        <button
+                          type="button"
+                          className="mini-action"
+                          onClick={() => accountAvatarFileRef.current?.click()}
+                          disabled={isUploadingAccountAvatar || isDeletingAccountAvatar}
+                        >
+                          загрузить аватар
+                        </button>
+                        <button
+                          type="button"
+                          className="danger-action"
+                          onClick={() => void handleDeleteAccountAvatar()}
+                          disabled={
+                            !accountAvatarUrl ||
+                            isUploadingAccountAvatar ||
+                            isDeletingAccountAvatar
+                          }
+                        >
+                          удалить
+                        </button>
+                      </div>
+                      <input
+                        ref={accountAvatarFileRef}
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp,image/gif,image/bmp"
+                        className="sr-only"
+                        onChange={(event) => void handleAccountAvatarFileChange(event)}
+                      />
+                      <p className="settings-hint">
+                        PNG, JPG, WebP, GIF или BMP. Максимум 5 МБ.
+                      </p>
+                    </section>
+
+                    <section className="account-profile-form">
+                      <label className="settings-label">Ник</label>
+                      <input
+                        value={accountNicknameDraft}
+                        onChange={(event) =>
+                          setAccountNicknameDraft(event.target.value)
+                        }
+                        className="settings-input"
+                        placeholder="Как тебя отображать"
+                        maxLength={40}
+                      />
+
+                      <label className="settings-label">user-id</label>
+                      <p className="settings-hint break-all">
+                        {accountUserId
+                          ? `Текущий user-id: ${accountUserId}`
+                          : "Сейчас user-id не задан."}
+                      </p>
+
+                      <label className="settings-label">Описание профиля</label>
+                      <textarea
+                        value={accountProfileDescriptionDraft}
+                        onChange={(event) =>
+                          setAccountProfileDescriptionDraft(event.target.value)
+                        }
+                        className="settings-input settings-textarea"
+                        placeholder="Коротко о себе"
+                        maxLength={320}
+                      />
+
+                      <div className="account-window-actions">
+                        <button
+                          type="button"
+                          className="mini-action"
+                          onClick={() => void handleSaveAccountProfile()}
+                          disabled={isSavingAccountProfile || isAuthBusy}
+                        >
+                          сохранить профиль
+                        </button>
+                        <button
+                          type="button"
+                          className="mini-action"
+                          onClick={() => openMenuPanel("settings")}
+                        >
+                          открыть настройки
+                        </button>
+                      </div>
+                    </section>
+                  </div>
+                )}
+
+                {accountWindowTab === "settings" && (
+                  <div className="account-settings-grid">
+                    <section className="account-window-section">
+                      <label className="settings-label">Почта</label>
+                      <input value={accountEmailLabel} className="settings-input" readOnly />
+
+                      <label className="settings-label mt-2">Смена user-id</label>
+                      <input
+                        value={accountUserIdDraft}
+                        onChange={(event) => setAccountUserIdDraft(event.target.value)}
+                        className="settings-input"
+                        placeholder="my.user-id"
+                        autoComplete="username"
+                        spellCheck={false}
+                      />
+                      <button
+                        type="button"
+                        className="mini-action"
+                        onClick={() => void handleSaveAccountUserId()}
+                        disabled={isSavingAccountUserId || isAuthBusy}
+                      >
+                        сменить user-id
+                      </button>
+                      {!accountCanChangeUserIdNow && accountNextUserIdChangeAt && (
+                        <p className="settings-hint">
+                          Следующая смена user-id:{" "}
+                          {formatDateTime(accountNextUserIdChangeAt)}
+                        </p>
+                      )}
+                    </section>
+
+                    <section className="account-window-section">
+                      <label className="settings-label">Смена пароля</label>
+                      <input
+                        type="password"
+                        value={accountCurrentPasswordDraft}
+                        onChange={(event) =>
+                          setAccountCurrentPasswordDraft(event.target.value)
+                        }
+                        className="settings-input"
+                        placeholder="Текущий пароль"
+                        autoComplete="current-password"
+                      />
+                      <input
+                        type="password"
+                        value={accountNewPasswordDraft}
+                        onChange={(event) =>
+                          setAccountNewPasswordDraft(event.target.value)
+                        }
+                        className="settings-input"
+                        placeholder="Новый пароль"
+                        autoComplete="new-password"
+                      />
+                      <button
+                        type="button"
+                        className="mini-action"
+                        onClick={() => void handleChangeAccountPassword()}
+                        disabled={isSavingAccountPassword || isAuthBusy}
+                      >
+                        обновить пароль
+                      </button>
+                      <p className="settings-hint">
+                        После смены пароля сессии на других устройствах завершаются.
+                      </p>
+                    </section>
+
+                    <section className="account-window-section">
+                      <label className="settings-label">migration-код</label>
+                      <button
+                        type="button"
+                        className="mini-action"
+                        onClick={() => void handleIssueMigrationCode()}
+                        disabled={isIssuingMigrationCode || !accountUserId}
+                      >
+                        выпустить migration-код
+                      </button>
+                      {issuedMigrationCode && (
+                        <p className="settings-hint break-all">
+                          Новый код: {issuedMigrationCode.code} (до{" "}
+                          {formatDateTime(issuedMigrationCode.expiresAt)})
+                        </p>
+                      )}
+                      {!issuedMigrationCode && activeMigrationCodeMeta && (
+                        <p className="settings-hint break-all">
+                          Активный код: {activeMigrationCodeMeta.codeHint} (до{" "}
+                          {formatDateTime(activeMigrationCodeMeta.expiresAt)})
+                        </p>
+                      )}
+                    </section>
+                  </div>
+                )}
+
+                {accountWindowTab === "friends" && (
+                  <div className="account-friends-layout">
+                    <section className="friends-panel account-window-section">
+                      <label className="settings-label">пригласить в друзья</label>
+                      <div className="friend-action-row">
+                        <input
+                          value={friendRequestUserIdDraft}
+                          onChange={(event) =>
+                            setFriendRequestUserIdDraft(event.target.value)
+                          }
+                          className="settings-input"
+                          placeholder="user-id друга"
+                          autoComplete="off"
+                          spellCheck={false}
+                        />
+                        <button
+                          type="button"
+                          className="mini-action"
+                          onClick={() => void handleSendFriendRequest()}
+                          disabled={isSavingFriendAction}
+                        >
+                          отправить
+                        </button>
+                      </div>
+                    </section>
+
+                    <section className="friends-panel account-window-section">
+                      <div className="friends-panel-head">
+                        <span className="settings-label">список друзей</span>
+                        <button
+                          type="button"
+                          className="mini-action"
+                          onClick={() => void loadFriends()}
+                          disabled={isSavingFriendAction}
+                        >
+                          обновить
+                        </button>
+                      </div>
+
+                      {friends.length === 0 ? (
+                        <p className="settings-hint">
+                          Друзей и приглашений пока нет.
+                        </p>
+                      ) : (
+                        <div className="friend-list">
+                          {friends.map((friend) => {
+                            const friendName =
+                              friend.nickname ||
+                              friend.friendUserId ||
+                              friend.friendAppUserId;
+                            const statusLabel =
+                              friend.status === "accepted"
+                                ? "друг"
+                                : "приглашение отправлено";
+                            const inboxOpen =
+                              selectedFriendInboxId === friend.friendAppUserId;
+                            const inboxItems = inboxOpen
+                              ? selectedFriendInboxItems
+                              : friendInboxItems[friend.friendAppUserId] ?? [];
+                            const friendInitial =
+                              friendName.trim().charAt(0).toUpperCase() || "U";
+
+                            return (
+                              <div key={friend.friendshipId} className="friend-item">
+                                <div className="friend-item-main">
+                                  <div className="friend-identity">
+                                    <div className="friend-avatar">
+                                      {friend.avatarUrl &&
+                                      isDisplayImageUrl(friend.avatarUrl) ? (
+                                        <span
+                                          className="friend-avatar-image"
+                                          style={{
+                                            backgroundImage: `url(${friend.avatarUrl})`,
+                                          }}
+                                          aria-label="Аватар друга"
+                                        />
+                                      ) : (
+                                        <span>{friendInitial}</span>
+                                      )}
+                                    </div>
+                                    <div>
+                                      <p className="friend-name">{friendName}</p>
+                                      <p className="settings-hint break-all">
+                                        {friend.friendUserId ?? friend.friendAppUserId}
+                                      </p>
+                                    </div>
+                                  </div>
+                                  {friend.direction === "incoming" &&
+                                  friend.status === "pending" ? (
+                                    <div className="friend-request-actions">
+                                      <button
+                                        type="button"
+                                        className="mini-action"
+                                        onClick={() =>
+                                          void handleAcceptFriendRequest(friend)
+                                        }
+                                        disabled={isSavingFriendAction}
+                                      >
+                                        принять
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="danger-action"
+                                        onClick={() =>
+                                          void handleDeclineFriendRequest(friend)
+                                        }
+                                        disabled={isSavingFriendAction}
+                                      >
+                                        отклонить
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <span className="friend-status">{statusLabel}</span>
+                                  )}
+                                </div>
+
+                                {friend.status === "accepted" && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      className="mini-action friend-inbox-button"
+                                      onClick={() =>
+                                        handleToggleFriendInbox(friend.friendAppUserId)
+                                      }
+                                      disabled={isSavingInboxAction}
+                                    >
+                                      inbox
+                                      {friend.inboxPendingCount > 0
+                                        ? ` (${friend.inboxPendingCount})`
+                                        : ""}
+                                    </button>
+
+                                    {inboxOpen && (
+                                      <div className="friend-inbox-list">
+                                        {inboxItems.length === 0 ? (
+                                          <p className="settings-hint">Inbox пуст.</p>
+                                        ) : (
+                                          inboxItems.map((item) => (
+                                            <div
+                                              key={item.id}
+                                              className="friend-inbox-item"
+                                            >
+                                              <div>
+                                                <p className="friend-inbox-title">
+                                                  {item.title}
+                                                </p>
+                                                <p className="settings-hint">
+                                                  {item.type === "public_invite"
+                                                    ? "public-приглашение"
+                                                    : "копия категории"}
+                                                </p>
+                                              </div>
+
+                                              {(item.type === "category_share" ||
+                                                item.type === "public_invite") && (
+                                                <div className="friend-inbox-placement">
+                                                  <select
+                                                    value={
+                                                      inboxImportTargetIds[item.id] ?? ""
+                                                    }
+                                                    className="settings-input"
+                                                    onChange={(event) =>
+                                                      setInboxImportTargetIds(
+                                                        (prev) => ({
+                                                          ...prev,
+                                                          [item.id]:
+                                                            event.target.value,
+                                                        })
+                                                      )
+                                                    }
+                                                    disabled={
+                                                      localCategoryOptions.length ===
+                                                        0 || isSavingInboxAction
+                                                    }
+                                                  >
+                                                    <option value="">
+                                                      куда добавить
+                                                    </option>
+                                                    {localCategoryOptions.map(
+                                                      (option) => (
+                                                        <option
+                                                          key={`account-inbox-target-${item.id}-${option.id}`}
+                                                          value={option.id}
+                                                        >
+                                                          {option.label}
+                                                        </option>
+                                                      )
+                                                    )}
+                                                  </select>
+                                                  {item.type === "public_invite" && (
+                                                    <p className="settings-hint">
+                                                      Это общая public-категория, не
+                                                      копия.
+                                                    </p>
+                                                  )}
+                                                </div>
+                                              )}
+
+                                              <div className="friend-inbox-actions">
+                                                <button
+                                                  type="button"
+                                                  className="mini-action"
+                                                  onClick={() =>
+                                                    void handleAcceptInboxItem(item)
+                                                  }
+                                                  disabled={
+                                                    isSavingInboxAction ||
+                                                    ((item.type === "category_share" ||
+                                                      item.type ===
+                                                        "public_invite") &&
+                                                      !inboxImportTargetIds[item.id])
+                                                  }
+                                                >
+                                                  принять
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  className="danger-action"
+                                                  onClick={() =>
+                                                    void handleDeclineInboxItem(item)
+                                                  }
+                                                  disabled={isSavingInboxAction}
+                                                >
+                                                  отклонить
+                                                </button>
+                                              </div>
+                                            </div>
+                                          ))
+                                        )}
+                                      </div>
+                                    )}
+                                  </>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </section>
+                  </div>
+                )}
+
+                {accountWindowTab === "motivation" && (
+                  <div className="motivation-panel">
+                    <div className="motivation-panel-head">
+                      <div>
+                        <p className="settings-label">Мотивационная панель</p>
+                        <p className="settings-hint">
+                          Эти фото будут появляться в #DICT, когда включена мотивация.
+                        </p>
+                      </div>
+                      <div className="motivation-panel-actions">
+                        <button
+                          type="button"
+                          className="mini-action"
+                          onClick={() => motivationImageFileRef.current?.click()}
+                          disabled={
+                            isUploadingMotivationImage ||
+                            motivationImages.length >= 24
+                          }
+                        >
+                          загрузить фото
+                        </button>
+                        <button
+                          type="button"
+                          className="mini-action"
+                          onClick={() => void loadMotivationImages()}
+                          disabled={isLoadingMotivationImages}
+                        >
+                          обновить
+                        </button>
+                      </div>
+                    </div>
+                    <input
+                      ref={motivationImageFileRef}
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp,image/gif,image/bmp"
+                      className="sr-only"
+                      multiple
+                      onChange={(event) =>
+                        void handleMotivationImageFileChange(event)
+                      }
+                    />
+
+                    {isLoadingMotivationImages ? (
+                      <p className="settings-hint">Загружаем фото...</p>
+                    ) : motivationImages.length === 0 ? (
+                      <p className="settings-hint">
+                        Пока нет фото. Загрузи то, что помогает вернуться к учебе.
+                      </p>
+                    ) : (
+                      <div className="motivation-grid">
+                        {motivationImages.map((image) => {
+                          const deleting = deletingMotivationImageIds.includes(
+                            image.id
+                          );
+
+                          return (
+                            <article key={image.id} className="motivation-card">
+                              <div
+                                className="motivation-card-image"
+                                style={{ backgroundImage: `url(${image.url})` }}
+                              />
+                              <div className="motivation-card-meta">
+                                <span>{formatFileSize(image.sizeBytes)}</span>
+                                <button
+                                  type="button"
+                                  className="danger-action"
+                                  onClick={() =>
+                                    void handleDeleteMotivationImage(image.id)
+                                  }
+                                  disabled={deleting}
+                                >
+                                  удалить
+                                </button>
+                              </div>
+                            </article>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <footer className="account-window-footer">
+                <button
+                  type="button"
+                  className="menu-action px-4 py-3 text-left text-base font-semibold"
+                  onClick={goToEntryMenu}
+                  disabled={isAuthBusy}
+                >
+                  Главное меню
+                </button>
+                <button
+                  type="button"
+                  className="danger-action px-4 py-3 text-left text-base font-semibold"
+                  onClick={() => void handleAuthSignOut()}
+                  disabled={isAuthBusy}
+                >
+                  Выйти
+                </button>
+              </footer>
+            </section>
+          </div>
+        )}
       </div>
     </main>
+  );
+}
+
+type SiteSearchPlainTextCacheEntry = {
+  signature: string;
+  value: string;
+};
+
+const siteSearchCategoryPlainContentCache = new Map<
+  string,
+  SiteSearchPlainTextCacheEntry
+>();
+const siteSearchMessagePlainContentCache = new Map<
+  string,
+  SiteSearchPlainTextCacheEntry
+>();
+
+function getSiteSearchCategoryPlainContent(category: CategoryRow): string {
+  const signature = `${category.format}\n${category.updated_at}\n${category.content}`;
+  const cached = siteSearchCategoryPlainContentCache.get(category.id);
+  if (cached?.signature === signature) {
+    return cached.value;
+  }
+
+  const value =
+    category.format === "continuous"
+      ? (() => {
+          const document = parseContinuousContent(category.content);
+          const dictionaryText = document.dictionaries
+            .map((dictionary) =>
+              `${dictionary.title}\n${dictionaryPayloadToPlainText(dictionary)}`
+            )
+            .join("\n");
+          return `${richTextToPlainText(document.text)}\n${dictionaryText}`.trim();
+        })()
+      : richTextToPlainText(category.content);
+
+  siteSearchCategoryPlainContentCache.set(category.id, { signature, value });
+  return value;
+}
+
+function getSiteSearchMessagePlainContent(message: MessageRow): string {
+  const signature = `${message.updated_at}\n${message.content}`;
+  const cached = siteSearchMessagePlainContentCache.get(message.id);
+  if (cached?.signature === signature) {
+    return cached.value;
+  }
+
+  const checklistPayload = parseMessageChecklistContent(message.content);
+  const dictionaryPayload = parseMessageDictionaryContent(message.content);
+  const value = checklistPayload
+    ? ""
+    : dictionaryPayload
+      ? dictionaryPayloadToPlainText(dictionaryPayload)
+      : richTextToPlainText(message.content);
+
+  siteSearchMessagePlainContentCache.set(message.id, { signature, value });
+  return value;
+}
+
+function SiteSearchPopup({
+  visibleCategories,
+  visibleCategoriesById,
+  messagesByCategory,
+  onClose,
+  onOpenResult,
+  onOpenDictionarySearch,
+}: {
+  visibleCategories: CategoryRow[];
+  visibleCategoriesById: Map<string, CategoryRow>;
+  messagesByCategory: Record<string, MessageRow[]>;
+  onClose: () => void;
+  onOpenResult: (result: SearchResult) => void;
+  onOpenDictionarySearch: () => void;
+}) {
+  const [searchQuery, setSearchQuery] = useState("");
+  const deferredSearchQuery = useDeferredValue(searchQuery);
+  const normalizedSearchQuery = deferredSearchQuery.trim().toLowerCase();
+
+  const searchResults = useMemo(() => {
+    if (!normalizedSearchQuery) {
+      return [] as SearchResult[];
+    }
+
+    const resultLimit = 45;
+    const results: SearchResult[] = [];
+
+    for (const category of visibleCategories) {
+      const plainContent = getSiteSearchCategoryPlainContent(category);
+      const text =
+        `${category.title} ${category.description} ${category.tag} ${plainContent}`.toLowerCase();
+      if (!text.includes(normalizedSearchQuery)) {
+        continue;
+      }
+
+      results.push({
+        id: `category-${category.id}`,
+        kind: "category",
+        categoryId: category.id,
+        title: category.title,
+        path: buildCategoryPath(visibleCategories, category.id)
+          .map((part) => part.title)
+          .join(" / "),
+        preview: makePreview(
+          `${category.description || plainContent || category.tag}`,
+          normalizedSearchQuery
+        ),
+      });
+
+      if (results.length >= resultLimit) {
+        return results;
+      }
+    }
+
+    messageSearch: for (const messages of Object.values(messagesByCategory)) {
+      for (const message of messages) {
+        if (!visibleCategoriesById.has(message.category_id)) {
+          continue;
+        }
+
+        const plainContent = getSiteSearchMessagePlainContent(message);
+        const messageText = `${message.title} ${plainContent}`.toLowerCase();
+        if (!messageText.includes(normalizedSearchQuery)) {
+          continue;
+        }
+
+        const titleFromMessage = message.title || "Новый блок";
+
+        results.push({
+          id: `message-${message.id}`,
+          kind: "message",
+          categoryId: message.category_id,
+          messageId: message.id,
+          title: titleFromMessage,
+          path: `${buildCategoryPath(visibleCategories, message.category_id)
+            .map((part) => part.title)
+            .join(" / ")} / сообщение`,
+          preview: makePreview(plainContent, normalizedSearchQuery),
+        });
+
+        if (results.length >= resultLimit) {
+          break messageSearch;
+        }
+      }
+    }
+
+    return results;
+  }, [
+    messagesByCategory,
+    normalizedSearchQuery,
+    visibleCategories,
+    visibleCategoriesById,
+  ]);
+
+  return (
+    <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/35 p-3">
+      <div className="search-modal popup-3d w-full max-w-3xl p-4 sm:p-5">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <h2 className="font-display text-4xl leading-none">Search</h2>
+          <button
+            type="button"
+            className="menu-action h-9 w-9 text-xl"
+            onClick={onClose}
+            aria-label="Закрыть поиск"
+          >
+            x
+          </button>
+        </div>
+
+        <div className="search-tabs" role="tablist" aria-label="Режим поиска">
+          <button
+            type="button"
+            role="tab"
+            className="mini-action search-tab search-tab-active"
+            aria-selected="true"
+          >
+            по сайту
+          </button>
+          <button
+            type="button"
+            role="tab"
+            className="mini-action search-tab"
+            onClick={onOpenDictionarySearch}
+          >
+            по dict
+          </button>
+        </div>
+
+        <input
+          autoFocus
+          value={searchQuery}
+          onChange={(event) => setSearchQuery(event.target.value)}
+          placeholder="Введи текст для поиска..."
+          className="w-full border-2 border-[#4a4a4a] bg-[#efefef] px-3 py-2 text-base text-[#1a1a1a] outline-none focus:border-[#355faa]"
+        />
+
+        <div className="mt-3 max-h-[22rem] space-y-2 overflow-y-auto pr-1">
+          {searchResults.length === 0 && searchQuery.trim().length > 0 && (
+            <p className="px-2 text-sm text-[#2e2e2e]">Ничего не найдено.</p>
+          )}
+
+          {searchResults.map((result) => (
+            <button
+              key={result.id}
+              type="button"
+              className="search-item w-full px-3 py-2 text-left"
+              onClick={() => onOpenResult(result)}
+            >
+              <p className="font-display text-3xl leading-none">{result.title}</p>
+              <p className="mt-1 text-xs text-[#2f2f2f]">{result.path}</p>
+              <p className="mt-1 text-sm text-[#232323]">{result.preview}</p>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DictionaryGlobalSearchPopup({
+  activeProject,
+  currentCategory,
+  onClose,
+  onOpenSiteSearch,
+  onOpenSource,
+}: {
+  activeProject: ProjectRow | null;
+  currentCategory: CategoryRow | null;
+  onClose: () => void;
+  onOpenSiteSearch: () => void;
+  onOpenSource: (result: GlobalDictionarySearchResult) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const deferredQuery = useDeferredValue(query);
+  const [scope, setScope] = useState<DictionaryGlobalSearchScope>("workspace");
+  const [includeContinuous, setIncludeContinuous] = useState(true);
+  const [includeBlock, setIncludeBlock] = useState(true);
+  const [results, setResults] = useState<GlobalDictionarySearchResult[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const latestDictionarySearchRequestKeyRef = useRef("");
+  const trimmedQuery = deferredQuery.trim();
+  const compiledDictionaryQuery = useMemo(
+    () => compileDictionarySearchQuery(trimmedQuery),
+    [trimmedQuery]
+  );
+  const canSearchDictionaryQuery = Boolean(compiledDictionaryQuery);
+  const effectiveScope: DictionaryGlobalSearchScope =
+    scope === "project" && !activeProject
+      ? "workspace"
+      : scope === "category" && !currentCategory
+        ? "workspace"
+        : scope;
+
+  useEffect(() => {
+    if (!trimmedQuery || !canSearchDictionaryQuery) {
+      return;
+    }
+
+    const controller = new AbortController();
+    const requestKey = [
+      trimmedQuery,
+      effectiveScope,
+      includeContinuous,
+      includeBlock,
+      activeProject?.id ?? "",
+      currentCategory?.id ?? "",
+    ].join("\0");
+    latestDictionarySearchRequestKeyRef.current = requestKey;
+
+    const timer = setTimeout(() => {
+      const params = new URLSearchParams({
+        q: trimmedQuery,
+        scope: effectiveScope,
+        includeContinuous: String(includeContinuous),
+        includeBlock: String(includeBlock),
+      });
+
+      if (activeProject) {
+        params.set("projectId", activeProject.id);
+      }
+      if (currentCategory) {
+        params.set("categoryId", currentCategory.id);
+      }
+
+      setIsLoading(true);
+      setError(null);
+
+      void fetch(`/api/dictionaries/search?${params.toString()}`, {
+        cache: "no-store",
+        credentials: "same-origin",
+        signal: controller.signal,
+      })
+        .then(async (response) => {
+          const payload = (await response.json()) as DictionarySearchPayload;
+          if (!response.ok || !payload.data) {
+            throw new Error(payload.error ?? "Не удалось выполнить поиск.");
+          }
+          if (latestDictionarySearchRequestKeyRef.current !== requestKey) {
+            return;
+          }
+
+          setResults(payload.data);
+        })
+        .catch((fetchError) => {
+          if (
+            controller.signal.aborted ||
+            latestDictionarySearchRequestKeyRef.current !== requestKey
+          ) {
+            return;
+          }
+
+          setResults([]);
+          setError(toErrorMessage(fetchError, "Не удалось выполнить поиск."));
+        })
+        .finally(() => {
+          if (
+            !controller.signal.aborted &&
+            latestDictionarySearchRequestKeyRef.current === requestKey
+          ) {
+            setIsLoading(false);
+          }
+        });
+    }, 180);
+
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [
+    activeProject,
+    currentCategory,
+    includeBlock,
+    includeContinuous,
+    effectiveScope,
+    canSearchDictionaryQuery,
+    trimmedQuery,
+  ]);
+
+  function updateQuery(nextQuery: string) {
+    latestDictionarySearchRequestKeyRef.current = "";
+    setQuery(nextQuery);
+    setResults([]);
+    setError(null);
+    setIsLoading(Boolean(compileDictionarySearchQuery(nextQuery.trim())));
+  }
+
+  function resetDictionaryGlobalSearchResults() {
+    latestDictionarySearchRequestKeyRef.current = "";
+    setResults([]);
+    setError(null);
+    setIsLoading(canSearchDictionaryQuery);
+  }
+
+  function updateScope(nextScope: DictionaryGlobalSearchScope) {
+    if (scope === nextScope) {
+      return;
+    }
+
+    setScope(nextScope);
+    resetDictionaryGlobalSearchResults();
+  }
+
+  function toggleContinuous(nextChecked: boolean) {
+    if (!nextChecked && !includeBlock) {
+      return;
+    }
+
+    setIncludeContinuous(nextChecked);
+    resetDictionaryGlobalSearchResults();
+  }
+
+  function toggleBlock(nextChecked: boolean) {
+    if (!nextChecked && !includeContinuous) {
+      return;
+    }
+
+    setIncludeBlock(nextChecked);
+    resetDictionaryGlobalSearchResults();
+  }
+
+  const statusText = !query.trim()
+    ? "Введи слово или точную фразу."
+    : !canSearchDictionaryQuery
+      ? "Минимум 2 буквы для поиска."
+      : isLoading
+        ? "Ищу..."
+        : error
+          ? error
+          : results.length === 0
+            ? "Ничего не найдено."
+            : `${results.length} совпадений${results.some((result) => result.hasFuzzyMatch) ? " · опечатка" : ""}`;
+
+  return (
+    <div className="absolute inset-0 z-50 flex items-center justify-center p-3">
+      <button
+        type="button"
+        className="absolute inset-0 bg-black/45"
+        onClick={onClose}
+        aria-label="Закрыть поиск по #DICT"
+      />
+
+      <div className="project-create-modal dictionary-global-search-modal popup-3d relative z-10 w-full max-w-6xl p-4 sm:p-5">
+        <div className="dictionary-editor-header mb-3 flex justify-between gap-3">
+          <div className="dictionary-editor-title-wrap">
+            <h2 className="font-display text-4xl leading-none">Search</h2>
+            <span className="dictionary-editor-title-badge">по dict</span>
+          </div>
+          <button
+            type="button"
+            className="menu-action h-9 w-9 text-xl"
+            onClick={onClose}
+            aria-label="Закрыть поиск по #DICT"
+          >
+            x
+          </button>
+        </div>
+
+        <div className="search-tabs" role="tablist" aria-label="Режим поиска">
+          <button
+            type="button"
+            role="tab"
+            className="mini-action search-tab"
+            onClick={onOpenSiteSearch}
+          >
+            по сайту
+          </button>
+          <button
+            type="button"
+            role="tab"
+            className="mini-action search-tab search-tab-active"
+            aria-selected="true"
+          >
+            по dict
+          </button>
+        </div>
+
+        <div className="dictionary-global-search-settings">
+          <label className="dictionary-global-search-field">
+            <span className="settings-label">слово</span>
+            <input
+              autoFocus
+              value={query}
+              onChange={(event) => updateQuery(event.target.value)}
+              className="settings-input"
+              placeholder="слово или точная фраза..."
+            />
+          </label>
+
+          <div className="dictionary-global-search-source-settings">
+            <span className="settings-label">откуда брать слова</span>
+            <div className="dictionary-global-search-scope-row">
+              <button
+                type="button"
+                className={`mini-action search-tab ${
+                  effectiveScope === "workspace" ? "search-tab-active" : ""
+                }`}
+                onClick={() => updateScope("workspace")}
+              >
+                весь workspace
+              </button>
+              <button
+                type="button"
+                className={`mini-action search-tab ${
+                  effectiveScope === "project" ? "search-tab-active" : ""
+                }`}
+                onClick={() => updateScope("project")}
+                disabled={!activeProject}
+                title={activeProject ? activeProject.title : "Нет активного проекта"}
+              >
+                текущий проект
+              </button>
+              <button
+                type="button"
+                className={`mini-action search-tab ${
+                  effectiveScope === "category" ? "search-tab-active" : ""
+                }`}
+                onClick={() => updateScope("category")}
+                disabled={!currentCategory}
+                title={currentCategory ? currentCategory.title : "Категория не выбрана"}
+              >
+                текущая категория
+              </button>
+            </div>
+            <div className="dictionary-global-search-type-row">
+              <label className="dictionary-editor-toggle">
+                <input
+                  type="checkbox"
+                  checked={includeContinuous}
+                  onChange={(event) => toggleContinuous(event.target.checked)}
+                />
+                <span>continuous #DICT</span>
+              </label>
+              <label className="dictionary-editor-toggle">
+                <input
+                  type="checkbox"
+                  checked={includeBlock}
+                  onChange={(event) => toggleBlock(event.target.checked)}
+                />
+                <span>block #DICT</span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <p
+          className={`dictionary-global-search-status ${
+            error ? "dictionary-global-search-status-error" : ""
+          }`}
+          aria-live="polite"
+        >
+          {statusText}
+        </p>
+
+        <div className="dictionary-global-search-table-wrap">
+          <table className="dictionary-editor-table dictionary-global-search-table">
+            <thead>
+              <tr>
+                <th>{DEFAULT_DICTIONARY_FIELD_LABELS.side1}</th>
+                <th>{DEFAULT_DICTIONARY_FIELD_LABELS.side1Note}</th>
+                <th>{DEFAULT_DICTIONARY_FIELD_LABELS.side2}</th>
+                <th>{DEFAULT_DICTIONARY_FIELD_LABELS.side2Note}</th>
+                <th>Источник</th>
+              </tr>
+            </thead>
+            <tbody>
+              {results.map((result) => (
+                <tr
+                  key={result.id}
+                  className={
+                    result.hasFuzzyMatch ? "dictionary-editor-row-match" : undefined
+                  }
+                >
+                  {renderDictionaryGlobalSearchCell(result, "side1")}
+                  {renderDictionaryGlobalSearchCell(result, "side1Note")}
+                  {renderDictionaryGlobalSearchCell(result, "side2")}
+                  {renderDictionaryGlobalSearchCell(result, "side2Note")}
+                  <td data-label="Источник">
+                    <button
+                      type="button"
+                      className="mini-action dictionary-global-search-source"
+                      onClick={() => onOpenSource(result)}
+                    >
+                      <span>{result.dictionaryTitle}</span>
+                      <small>
+                        {result.categoryPath}
+                        {result.sourceMessageId ? " / сообщение" : ""}
+                      </small>
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function renderDictionaryGlobalSearchCell(
+  result: GlobalDictionarySearchResult,
+  field: SharedDictionaryEntryField
+) {
+  const label = result.labels[field] ?? DEFAULT_DICTIONARY_FIELD_LABELS[field];
+  const isMatch = result.matchedFields.includes(field);
+
+  return (
+    <td data-label={label}>
+      <div
+        className={`dictionary-global-search-cell ${
+          isMatch ? "dictionary-editor-cell-match" : ""
+        }`}
+      >
+        {result.entry[field] || "-"}
+      </div>
+    </td>
+  );
+}
+
+function DictionaryGroupEditorPopup({
+  group,
+  authorizedFetch,
+  onClose,
+  onGroupUpdated,
+  onOpenSource,
+}: {
+  group: DictionaryWordGroup;
+  authorizedFetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  onClose: () => void;
+  onGroupUpdated: (group: DictionaryWordGroup) => void;
+  onOpenSource: (result: DictionaryGroupResolvedResult) => void;
+}) {
+  const [titleDraft, setTitleDraft] = useState(group.title);
+  const [descriptionDraft, setDescriptionDraft] = useState(group.description);
+  const [query, setQuery] = useState("");
+  const deferredQuery = useDeferredValue(query);
+  const trimmedQuery = deferredQuery.trim();
+  const [results, setResults] = useState<GlobalDictionarySearchResult[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const latestRequestKeyRef = useRef("");
+  const compiledDictionaryQuery = useMemo(
+    () => compileDictionarySearchQuery(trimmedQuery),
+    [trimmedQuery]
+  );
+  const existingIdentityKeys = useMemo(
+    () =>
+      new Set(
+        group.items.map((item) =>
+          dictionaryEntryIdentityKey({
+            sourceCategoryId: item.sourceCategoryId,
+            sourceMessageId: item.sourceMessageId,
+            dictionaryId: item.dictionaryId,
+            entryId: item.entryId,
+          })
+        )
+      ),
+    [group.items]
+  );
+
+  useEffect(() => {
+    setTitleDraft(group.title);
+    setDescriptionDraft(group.description);
+  }, [group.description, group.id, group.title]);
+
+  useEffect(() => {
+    if (!trimmedQuery || !compiledDictionaryQuery) {
+      return;
+    }
+
+    const controller = new AbortController();
+    const requestKey = trimmedQuery;
+    latestRequestKeyRef.current = requestKey;
+    const timer = setTimeout(() => {
+      const params = new URLSearchParams({
+        q: trimmedQuery,
+        scope: "workspace",
+        includeContinuous: "true",
+        includeBlock: "true",
+      });
+
+      setIsLoading(true);
+      setError(null);
+      void fetch(`/api/dictionaries/search?${params.toString()}`, {
+        cache: "no-store",
+        credentials: "same-origin",
+        signal: controller.signal,
+      })
+        .then(async (response) => {
+          const payload = (await response.json()) as DictionarySearchPayload;
+          if (!response.ok || !payload.data) {
+            throw new Error(payload.error ?? "Не удалось выполнить поиск.");
+          }
+          if (latestRequestKeyRef.current !== requestKey) {
+            return;
+          }
+          setResults(payload.data);
+        })
+        .catch((fetchError) => {
+          if (controller.signal.aborted || latestRequestKeyRef.current !== requestKey) {
+            return;
+          }
+          setResults([]);
+          setError(toErrorMessage(fetchError, "Не удалось выполнить поиск."));
+        })
+        .finally(() => {
+          if (
+            !controller.signal.aborted &&
+            latestRequestKeyRef.current === requestKey
+          ) {
+            setIsLoading(false);
+          }
+        });
+    }, 180);
+
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [compiledDictionaryQuery, trimmedQuery]);
+
+  function updateQuery(nextQuery: string) {
+    latestRequestKeyRef.current = "";
+    setQuery(nextQuery);
+    setResults([]);
+    setError(null);
+    setIsLoading(Boolean(compileDictionarySearchQuery(nextQuery.trim())));
+  }
+
+  async function saveGroup() {
+    const title = titleDraft.trim();
+    if (!title) {
+      setError("Название группы не может быть пустым.");
+      return;
+    }
+
+    setIsSaving(true);
+    setError(null);
+    try {
+      const response = await authorizedFetch(`/api/dictionary-groups/${group.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title,
+          description: descriptionDraft,
+        }),
+      });
+      const payload = (await response.json()) as DictionaryGroupPayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Не удалось сохранить группу.");
+      }
+
+      onGroupUpdated(payload.data);
+    } catch (saveError) {
+      setError(toErrorMessage(saveError, "Не удалось сохранить группу."));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function addResult(result: GlobalDictionarySearchResult) {
+    setIsSaving(true);
+    setError(null);
+    try {
+      const response = await authorizedFetch(`/api/dictionary-groups/${group.id}/items`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourceCategoryId: result.sourceCategoryId,
+          sourceMessageId: result.sourceMessageId,
+          dictionaryId: result.dictionaryId,
+          entryId: result.entry.id,
+        }),
+      });
+      const payload = (await response.json()) as DictionaryGroupPayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Не удалось добавить запись.");
+      }
+
+      onGroupUpdated(payload.data);
+    } catch (addError) {
+      setError(toErrorMessage(addError, "Не удалось добавить запись."));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function removeItem(itemId: string) {
+    setIsSaving(true);
+    setError(null);
+    try {
+      const response = await authorizedFetch(
+        `/api/dictionary-groups/${group.id}/items/${itemId}`,
+        {
+          method: "DELETE",
+        }
+      );
+      const payload = (await response.json()) as DictionaryGroupPayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Не удалось удалить запись.");
+      }
+
+      onGroupUpdated(payload.data);
+    } catch (removeError) {
+      setError(toErrorMessage(removeError, "Не удалось удалить запись."));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  const statusText = !query.trim()
+    ? "Найди слово в #DICT и добавь его в группу."
+    : !compiledDictionaryQuery
+      ? "Минимум 2 буквы для поиска."
+      : isLoading
+        ? "Ищу..."
+        : error
+          ? error
+          : results.length === 0
+            ? "Ничего не найдено."
+            : `${results.length} совпадений`;
+
+  return (
+    <div className="absolute inset-0 z-50 flex items-center justify-center p-3">
+      <button
+        type="button"
+        className="absolute inset-0 bg-black/45"
+        onClick={onClose}
+        aria-label="Закрыть группу словарей"
+      />
+
+      <div className="project-create-modal dictionary-group-modal popup-3d relative z-10 w-full max-w-6xl p-4 sm:p-5">
+        <div className="dictionary-editor-header mb-3 flex justify-between gap-3">
+          <div className="dictionary-editor-title-wrap">
+            <h2 className="font-display text-4xl leading-none">Группа словарей</h2>
+            <span className="dictionary-editor-title-badge">
+              {group.items.length} слов
+            </span>
+          </div>
+          <button
+            type="button"
+            className="menu-action h-9 w-9 text-xl"
+            onClick={onClose}
+            aria-label="Закрыть группу словарей"
+          >
+            x
+          </button>
+        </div>
+
+        <div className="dictionary-group-settings">
+          <label className="dictionary-editor-field">
+            <span className="settings-label">название</span>
+            <input
+              value={titleDraft}
+              onChange={(event) => setTitleDraft(event.target.value)}
+              className="settings-input"
+            />
+          </label>
+          <label className="dictionary-editor-field">
+            <span className="settings-label">описание</span>
+            <input
+              value={descriptionDraft}
+              onChange={(event) => setDescriptionDraft(event.target.value)}
+              className="settings-input"
+            />
+          </label>
+          <button
+            type="button"
+            className="mini-action dictionary-group-save"
+            onClick={() => void saveGroup()}
+            disabled={isSaving}
+          >
+            сохранить
+          </button>
+        </div>
+
+        <div className="dictionary-group-body">
+          <section className="dictionary-group-section">
+            <div className="dictionary-group-section-head">
+              <span className="settings-label">в группе</span>
+            </div>
+            <div className="dictionary-global-search-table-wrap dictionary-group-table-wrap">
+              <table className="dictionary-editor-table dictionary-global-search-table dictionary-group-table">
+                <thead>
+                  <tr>
+                    <th>{DEFAULT_DICTIONARY_FIELD_LABELS.side1}</th>
+                    <th>{DEFAULT_DICTIONARY_FIELD_LABELS.side1Note}</th>
+                    <th>{DEFAULT_DICTIONARY_FIELD_LABELS.side2}</th>
+                    <th>{DEFAULT_DICTIONARY_FIELD_LABELS.side2Note}</th>
+                    <th>Источник</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {group.items.map((item) => {
+                    const result = item.resolvedResult;
+                    return (
+                      <tr
+                        key={item.id}
+                        className={!result.sourceExists ? "dictionary-group-stale-row" : undefined}
+                      >
+                        {renderDictionaryGroupResultCell(result, "side1")}
+                        {renderDictionaryGroupResultCell(result, "side1Note")}
+                        {renderDictionaryGroupResultCell(result, "side2")}
+                        {renderDictionaryGroupResultCell(result, "side2Note")}
+                        <td data-label="Источник">
+                          <button
+                            type="button"
+                            className="mini-action dictionary-global-search-source"
+                            onClick={() => onOpenSource(result)}
+                            disabled={!result.sourceExists}
+                          >
+                            <span>{result.dictionaryTitle}</span>
+                            <small>
+                              {result.sourceExists
+                                ? result.categoryPath
+                                : "источник не найден"}
+                            </small>
+                          </button>
+                        </td>
+                        <td data-label="">
+                          <button
+                            type="button"
+                            className="mini-action danger-action dictionary-group-remove"
+                            onClick={() => void removeItem(item.id)}
+                            disabled={isSaving}
+                          >
+                            удалить
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {group.items.length === 0 && (
+                    <tr>
+                      <td colSpan={6}>
+                        <div className="dictionary-group-empty-table">
+                          Добавь слова через поиск ниже.
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section className="dictionary-group-section">
+            <div className="dictionary-global-search-settings dictionary-group-search-settings">
+              <label className="dictionary-global-search-field">
+                <span className="settings-label">поиск #DICT</span>
+                <input
+                  value={query}
+                  onChange={(event) => updateQuery(event.target.value)}
+                  className="settings-input"
+                  placeholder="слово или точная фраза..."
+                />
+              </label>
+            </div>
+            <p
+              className={`dictionary-global-search-status ${
+                error ? "dictionary-global-search-status-error" : ""
+              }`}
+              aria-live="polite"
+            >
+              {statusText}
+            </p>
+            <div className="dictionary-global-search-table-wrap dictionary-group-table-wrap">
+              <table className="dictionary-editor-table dictionary-global-search-table dictionary-group-table">
+                <thead>
+                  <tr>
+                    <th>{DEFAULT_DICTIONARY_FIELD_LABELS.side1}</th>
+                    <th>{DEFAULT_DICTIONARY_FIELD_LABELS.side1Note}</th>
+                    <th>{DEFAULT_DICTIONARY_FIELD_LABELS.side2}</th>
+                    <th>{DEFAULT_DICTIONARY_FIELD_LABELS.side2Note}</th>
+                    <th>Источник</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {results.map((result) => {
+                    const identity = getDictionarySearchResultIdentity(result);
+                    const exists = existingIdentityKeys.has(
+                      dictionaryEntryIdentityKey(identity)
+                    );
+
+                    return (
+                      <tr
+                        key={result.id}
+                        className={
+                          result.hasFuzzyMatch ? "dictionary-editor-row-match" : undefined
+                        }
+                      >
+                        {renderDictionaryGlobalSearchCell(result, "side1")}
+                        {renderDictionaryGlobalSearchCell(result, "side1Note")}
+                        {renderDictionaryGlobalSearchCell(result, "side2")}
+                        {renderDictionaryGlobalSearchCell(result, "side2Note")}
+                        <td data-label="Источник">
+                          <div className="dictionary-global-search-source dictionary-group-static-source">
+                            <span>{result.dictionaryTitle}</span>
+                            <small>
+                              {result.categoryPath}
+                              {result.sourceMessageId ? " / сообщение" : ""}
+                            </small>
+                          </div>
+                        </td>
+                        <td data-label="">
+                          <button
+                            type="button"
+                            className="mini-action dictionary-group-add"
+                            onClick={() => void addResult(result)}
+                            disabled={isSaving || exists}
+                          >
+                            {exists ? "добавлено" : "добавить"}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DictionarySimilarPopup({
+  state,
+  onClose,
+  onOpenSource,
+}: {
+  state: DictionarySimilarPopupState;
+  onClose: () => void;
+  onOpenSource: (result: DictionaryGroupResolvedResult) => void;
+}) {
+  const statusText = state.isLoading
+    ? "Загружаю похожие слова..."
+    : state.error
+      ? state.error
+      : state.results.length === 0
+        ? "Для этого слова пока нет похожих."
+        : `${state.results.length} слов`;
+
+  return (
+    <div className="absolute inset-0 z-[90] flex items-center justify-center p-3">
+      <button
+        type="button"
+        className="absolute inset-0 bg-black/50"
+        onClick={onClose}
+        aria-label="Закрыть похожие слова"
+      />
+
+      <div className="project-create-modal dictionary-global-search-modal dictionary-similar-modal popup-3d relative z-10 w-full max-w-6xl p-4 sm:p-5">
+        <div className="dictionary-editor-header mb-3 flex justify-between gap-3">
+          <div className="dictionary-editor-title-wrap">
+            <h2 className="font-display text-4xl leading-none">Похожее</h2>
+            <span className="dictionary-editor-title-badge">группы словарей</span>
+          </div>
+          <button
+            type="button"
+            className="menu-action h-9 w-9 text-xl"
+            onClick={onClose}
+            aria-label="Закрыть похожие слова"
+          >
+            x
+          </button>
+        </div>
+
+        <div className="dictionary-similar-groups">
+          {state.groups.map((group) => (
+            <span key={group.id}>{group.title}</span>
+          ))}
+        </div>
+
+        <p
+          className={`dictionary-global-search-status ${
+            state.error ? "dictionary-global-search-status-error" : ""
+          }`}
+          aria-live="polite"
+        >
+          {statusText}
+        </p>
+
+        <div className="dictionary-global-search-table-wrap">
+          <table className="dictionary-editor-table dictionary-global-search-table dictionary-group-table">
+            <thead>
+              <tr>
+                <th>{DEFAULT_DICTIONARY_FIELD_LABELS.side1}</th>
+                <th>{DEFAULT_DICTIONARY_FIELD_LABELS.side1Note}</th>
+                <th>{DEFAULT_DICTIONARY_FIELD_LABELS.side2}</th>
+                <th>{DEFAULT_DICTIONARY_FIELD_LABELS.side2Note}</th>
+                <th>Источник</th>
+              </tr>
+            </thead>
+            <tbody>
+              {state.results.map((result) => (
+                <tr
+                  key={result.id}
+                  className={result.isCurrent ? "dictionary-group-current-row" : undefined}
+                >
+                  {renderDictionaryGroupResultCell(result, "side1")}
+                  {renderDictionaryGroupResultCell(result, "side1Note")}
+                  {renderDictionaryGroupResultCell(result, "side2")}
+                  {renderDictionaryGroupResultCell(result, "side2Note")}
+                  <td data-label="Источник">
+                    <button
+                      type="button"
+                      className="mini-action dictionary-global-search-source"
+                      onClick={() => onOpenSource(result)}
+                      disabled={!result.sourceExists}
+                    >
+                      <span>{result.dictionaryTitle}</span>
+                      <small>
+                        {result.sourceExists ? result.categoryPath : "источник не найден"}
+                      </small>
+                      <small>
+                        {result.groups.map((group) => group.title).join(", ")}
+                        {result.isCurrent ? " / текущее" : ""}
+                      </small>
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function renderDictionaryGroupResultCell(
+  result: DictionaryGroupResolvedResult,
+  field: SharedDictionaryEntryField
+) {
+  const label = result.labels[field] ?? DEFAULT_DICTIONARY_FIELD_LABELS[field];
+
+  return (
+    <td data-label={label}>
+      <div className="dictionary-global-search-cell">
+        {result.entry[field] || "-"}
+      </div>
+    </td>
   );
 }
 
@@ -16332,6 +20043,24 @@ function normalizeProjectRow(project: ProjectRow): ProjectRow {
   };
 }
 
+function normalizeDictionaryWordGroup(group: DictionaryWordGroup): DictionaryWordGroup {
+  return {
+    ...group,
+    description: group.description ?? "",
+    position: Number.isFinite(group.position) ? group.position : 0,
+    createdAt: normalizeTimestamp(group.createdAt),
+    updatedAt: normalizeTimestamp(group.updatedAt),
+    items: (group.items ?? []).map((item) => ({
+      ...item,
+      sourceMessageId: item.sourceMessageId ?? null,
+      dictionaryId: item.dictionaryId ?? null,
+      position: Number.isFinite(item.position) ? item.position : 0,
+      createdAt: normalizeTimestamp(item.createdAt),
+      updatedAt: normalizeTimestamp(item.updatedAt),
+    })),
+  };
+}
+
 function normalizeTimestamp(value: unknown): string {
   if (value instanceof Date) {
     return value.toISOString();
@@ -16361,6 +20090,17 @@ function mergeProjectTitleDraftMap(
 function sortProjects(a: ProjectRow, b: ProjectRow): number {
   if (a.position === b.position) {
     return a.created_at.localeCompare(b.created_at);
+  }
+
+  return a.position - b.position;
+}
+
+function sortDictionaryWordGroups(
+  a: DictionaryWordGroup,
+  b: DictionaryWordGroup
+): number {
+  if (a.position === b.position) {
+    return a.createdAt.localeCompare(b.createdAt);
   }
 
   return a.position - b.position;
@@ -16642,6 +20382,10 @@ function isSupportedRichImageFile(file: File): boolean {
   );
 }
 
+function isSupportedAccountImageFile(file: File): boolean {
+  return isSupportedRichImageFile(file);
+}
+
 function normalizeRichImageSource(value: string): string | null {
   const trimmed = value.trim();
   if (!trimmed) {
@@ -16895,6 +20639,156 @@ function normalizeRichFileSource(value: string): string | null {
   }
 
   return null;
+}
+
+function getRichFileLinkName(fileLink: HTMLAnchorElement): string {
+  return normalizeRichFileName(
+    fileLink.getAttribute("data-rich-file-name") ?? fileLink.textContent ?? ""
+  );
+}
+
+function isRichFilePdf(fileLink: HTMLAnchorElement): boolean {
+  const fileName = getRichFileLinkName(fileLink);
+  const mimeType =
+    normalizeRichFileMimeType(fileLink.getAttribute("data-rich-file-mime-type") ?? "") ??
+    inferRichFileMimeTypeByFileName(fileName);
+
+  return mimeType === "application/pdf" || fileName.toLowerCase().endsWith(".pdf");
+}
+
+function buildPdfViewerHref(fileId: string, fileName: string): string {
+  const params = new URLSearchParams({
+    id: fileId,
+    name: fileName,
+  });
+
+  return `/pdf-viewer?${params.toString()}`;
+}
+
+function openPendingPdfViewerWindow(fileName: string): Window | null {
+  const viewerWindow = window.open("", "_blank");
+  if (!viewerWindow) {
+    return null;
+  }
+
+  try {
+    const safeTitle = escapeHtmlText(fileName || "PDF");
+    viewerWindow.document.title = safeTitle;
+    viewerWindow.document.body.style.margin = "0";
+    viewerWindow.document.body.style.background = "#8f8f8f";
+    viewerWindow.document.body.style.color = "#191919";
+    viewerWindow.document.body.style.fontFamily = "system-ui, sans-serif";
+    viewerWindow.document.body.innerHTML = [
+      '<main style="min-height:100vh;display:grid;place-items:center;padding:1rem">',
+      '<section style="width:min(100%,34rem);border:1px solid #555;background:#d7d7d7;padding:1rem">',
+      `<h1 style="margin:0 0 .5rem;font-size:1.15rem;overflow-wrap:anywhere">${safeTitle}</h1>`,
+      '<p style="margin:0;font-weight:700">Готовим PDF...</p>',
+      "</section>",
+      "</main>",
+    ].join("");
+  } catch {
+    return viewerWindow;
+  }
+
+  return viewerWindow;
+}
+
+function richFileDataUrlToBlob(source: string): Blob | null {
+  const match = source.match(/^data:([^;,]+);base64,([a-z0-9+/=]+)$/i);
+  const mimeType = normalizeRichFileMimeType(match?.[1]);
+  const base64Body = match?.[2] ?? "";
+  if (!mimeType || !base64Body || typeof atob === "undefined") {
+    return null;
+  }
+
+  try {
+    const binary = atob(base64Body);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return new Blob([bytes], { type: mimeType });
+  } catch {
+    return null;
+  }
+}
+
+function releaseRichFileObjectUrl(
+  cache: Map<string, RichFileObjectUrlCacheEntry>,
+  fileId: string
+) {
+  const cached = cache.get(fileId);
+  if (!cached) {
+    return;
+  }
+
+  URL.revokeObjectURL(cached.objectUrl);
+  cache.delete(fileId);
+}
+
+function revokeRichFileObjectUrlCache(cache: Map<string, RichFileObjectUrlCacheEntry>) {
+  for (const fileId of cache.keys()) {
+    releaseRichFileObjectUrl(cache, fileId);
+  }
+}
+
+function getRichFileOpenHref(
+  cache: Map<string, RichFileObjectUrlCacheEntry>,
+  fileId: string,
+  source: string
+): string | null {
+  const cached = cache.get(fileId);
+  if (!source.startsWith("data:")) {
+    if (cached) {
+      releaseRichFileObjectUrl(cache, fileId);
+    }
+    return source;
+  }
+
+  if (!fileId) {
+    return null;
+  }
+
+  if (cached?.source === source) {
+    return cached.objectUrl;
+  }
+
+  if (cached) {
+    releaseRichFileObjectUrl(cache, fileId);
+  }
+
+  const blob = richFileDataUrlToBlob(source);
+  if (!blob) {
+    return null;
+  }
+
+  try {
+    const objectUrl = URL.createObjectURL(blob);
+    cache.set(fileId, {
+      source,
+      objectUrl,
+    });
+    return objectUrl;
+  } catch {
+    return null;
+  }
+}
+
+function openRichFileHref(ownerDocument: Document, href: string): boolean {
+  if (!ownerDocument.body) {
+    return false;
+  }
+
+  const link = ownerDocument.createElement("a");
+  link.href = href;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.setAttribute("aria-hidden", "true");
+  link.style.display = "none";
+  ownerDocument.body.appendChild(link);
+  link.click();
+  link.remove();
+  return true;
 }
 
 function normalizeRichFileId(value: string | null | undefined): string {
@@ -17444,6 +21338,12 @@ const DEFAULT_DICTIONARY_AUTO_SPEAK_FIELDS: DictionaryEntryField[] = [
 const DEFAULT_DICTIONARY_MANUAL_SPEAK_FIELDS: DictionaryEntryField[] = [
   ...DICTIONARY_EDITOR_SEARCH_FIELDS,
 ];
+const DEFAULT_DICTIONARY_MOTIVATION_ADVANCE_MODE: DictionaryMotivationAdvanceMode =
+  "auto";
+const DEFAULT_DICTIONARY_MOTIVATION_AUTO_SECONDS = 3;
+const MIN_DICTIONARY_MOTIVATION_AUTO_SECONDS = 1;
+const MAX_DICTIONARY_MOTIVATION_AUTO_SECONDS = 30;
+const DICTIONARY_MOTIVATION_EXIT_MS = 420;
 
 type DictionaryImportPreview =
   | {
@@ -17482,6 +21382,29 @@ function normalizeChecklistItemOrderMode(value: unknown): ChecklistItemOrderMode
 
 function normalizeDictionaryPromptSide(value: unknown): DictionaryPromptSide {
   return value === "side2" ? "side2" : "side1";
+}
+
+function normalizeDictionaryMotivationAdvanceMode(
+  value: unknown
+): DictionaryMotivationAdvanceMode {
+  return value === "manual" ? "manual" : DEFAULT_DICTIONARY_MOTIVATION_ADVANCE_MODE;
+}
+
+function normalizeDictionaryMotivationAutoSeconds(value: unknown): number {
+  const numericValue = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return DEFAULT_DICTIONARY_MOTIVATION_AUTO_SECONDS;
+  }
+
+  const clamped = Math.min(
+    MAX_DICTIONARY_MOTIVATION_AUTO_SECONDS,
+    Math.max(MIN_DICTIONARY_MOTIVATION_AUTO_SECONDS, numericValue)
+  );
+  return Math.round(clamped * 10) / 10;
+}
+
+function getDictionaryMotivationAutoDelayMs(value: unknown): number {
+  return Math.round(normalizeDictionaryMotivationAutoSeconds(value) * 1000);
 }
 
 function normalizeDictionaryText(value: string | null | undefined): string {
@@ -17626,6 +21549,16 @@ function normalizeMessageDictionaryPayload(
     manualSpeakFields: normalizeDictionaryManualSpeakFields(
       payload.manualSpeakFields
     ),
+    progressMode: Boolean(payload.progressMode),
+    motivateOnCorrect: Boolean(payload.motivateOnCorrect),
+    cardMode: Boolean(payload.cardMode),
+    adhdMode: Boolean(payload.adhdMode),
+    motivationAdvanceMode: normalizeDictionaryMotivationAdvanceMode(
+      payload.motivationAdvanceMode
+    ),
+    motivationAutoSeconds: normalizeDictionaryMotivationAutoSeconds(
+      payload.motivationAutoSeconds
+    ),
     labels: normalizeDictionaryLabels(payload.labels),
     entries: normalizeDictionaryEntries(payload.entries),
   };
@@ -17769,6 +21702,16 @@ function parseMessageDictionaryContent(
       manualSpeakFields: normalizeDictionaryManualSpeakFields(
         parsed.manualSpeakFields
       ),
+      progressMode: Boolean(parsed.progressMode),
+      motivateOnCorrect: Boolean(parsed.motivateOnCorrect),
+      cardMode: Boolean(parsed.cardMode),
+      adhdMode: Boolean(parsed.adhdMode),
+      motivationAdvanceMode: normalizeDictionaryMotivationAdvanceMode(
+        parsed.motivationAdvanceMode
+      ),
+      motivationAutoSeconds: normalizeDictionaryMotivationAutoSeconds(
+        parsed.motivationAutoSeconds
+      ),
       labels: normalizeDictionaryLabels(parsed.labels),
       entries,
     });
@@ -17788,6 +21731,12 @@ function serializeMessageDictionaryContent(payload: MessageDictionaryPayload): s
     autoSpeak: normalized.autoSpeak,
     autoSpeakFields: normalized.autoSpeakFields,
     manualSpeakFields: normalized.manualSpeakFields,
+    progressMode: normalized.progressMode,
+    motivateOnCorrect: normalized.motivateOnCorrect,
+    cardMode: normalized.cardMode,
+    adhdMode: normalized.adhdMode,
+    motivationAdvanceMode: normalized.motivationAdvanceMode,
+    motivationAutoSeconds: normalized.motivationAutoSeconds,
     labels: normalized.labels,
     entries: normalized.entries,
   });
@@ -17923,6 +21872,16 @@ function parseContinuousDictionaryCollection(value: unknown): DictionaryBlock[] 
       ),
       manualSpeakFields: normalizeDictionaryManualSpeakFields(
         rawDictionary.manualSpeakFields
+      ),
+      progressMode: Boolean(rawDictionary.progressMode),
+      motivateOnCorrect: Boolean(rawDictionary.motivateOnCorrect),
+      cardMode: Boolean(rawDictionary.cardMode),
+      adhdMode: Boolean(rawDictionary.adhdMode),
+      motivationAdvanceMode: normalizeDictionaryMotivationAdvanceMode(
+        rawDictionary.motivationAdvanceMode
+      ),
+      motivationAutoSeconds: normalizeDictionaryMotivationAutoSeconds(
+        rawDictionary.motivationAutoSeconds
       ),
       labels: normalizeDictionaryLabels(rawDictionary.labels),
       entries,
@@ -18209,6 +22168,12 @@ function buildDictionaryExportDocument(
     autoSpeak: normalized.autoSpeak,
     autoSpeakFields: normalized.autoSpeakFields,
     manualSpeakFields: normalized.manualSpeakFields,
+    progressMode: normalized.progressMode,
+    motivateOnCorrect: normalized.motivateOnCorrect,
+    cardMode: normalized.cardMode,
+    adhdMode: normalized.adhdMode,
+    motivationAdvanceMode: normalized.motivationAdvanceMode,
+    motivationAutoSeconds: normalized.motivationAutoSeconds,
     labels: normalized.labels,
     entries: normalized.entries,
   };
@@ -18271,6 +22236,16 @@ function parseDictionaryJsonImport(value: string): DictionaryImportPreview {
       autoSpeakFields: normalizeDictionaryAutoSpeakFields(parsed.autoSpeakFields),
       manualSpeakFields: normalizeDictionaryManualSpeakFields(
         parsed.manualSpeakFields
+      ),
+      progressMode: Boolean(parsed.progressMode),
+      motivateOnCorrect: Boolean(parsed.motivateOnCorrect),
+      cardMode: Boolean(parsed.cardMode),
+      adhdMode: Boolean(parsed.adhdMode),
+      motivationAdvanceMode: normalizeDictionaryMotivationAdvanceMode(
+        parsed.motivationAdvanceMode
+      ),
+      motivationAutoSeconds: normalizeDictionaryMotivationAutoSeconds(
+        parsed.motivationAutoSeconds
       ),
       labels: normalizeDictionaryLabels(parsed.labels),
       entries,
@@ -18543,16 +22518,6 @@ function toDictionaryPromptSideLabel(
   return side === "side1" ? normalizedLabels.side1 : normalizedLabels.side2;
 }
 
-function toDictionaryNoteSideLabel(
-  side: DictionaryPromptSide,
-  labels: DictionaryFieldLabels = DEFAULT_DICTIONARY_FIELD_LABELS
-): string {
-  const normalizedLabels = normalizeDictionaryLabels(labels);
-  return side === "side1"
-    ? normalizedLabels.side1Note
-    : normalizedLabels.side2Note;
-}
-
 function getDictionaryFieldLabel(
   field: DictionaryEntryField,
   labels: DictionaryFieldLabels = DEFAULT_DICTIONARY_FIELD_LABELS
@@ -18631,6 +22596,8 @@ function readDictionaryStudyProgress(
     const cardIds = Array.isArray(parsed.cardIds)
       ? parsed.cardIds.filter((id): id is string => typeof id === "string")
       : [];
+    const answerResultsByEntryId =
+      parseDictionaryStudyAnswerResultsByEntryId(parsed.answerResultsByEntryId);
 
     return {
       currentIndex:
@@ -18641,6 +22608,28 @@ function readDictionaryStudyProgress(
       isAnswerRevealed: Boolean(parsed.isAnswerRevealed),
       cardIds,
       shuffle: Boolean(parsed.shuffle),
+      progressMode: Boolean(parsed.progressMode),
+      progressStartedAt:
+        typeof parsed.progressStartedAt === "number" &&
+        Number.isFinite(parsed.progressStartedAt)
+          ? Math.max(0, parsed.progressStartedAt)
+          : Date.now(),
+      progressCompletedAt:
+        typeof parsed.progressCompletedAt === "number" &&
+        Number.isFinite(parsed.progressCompletedAt)
+          ? Math.max(0, parsed.progressCompletedAt)
+          : null,
+      correctCount:
+        typeof parsed.correctCount === "number" &&
+        Number.isFinite(parsed.correctCount)
+          ? Math.max(0, Math.floor(parsed.correctCount))
+          : 0,
+      wrongCount:
+        typeof parsed.wrongCount === "number" && Number.isFinite(parsed.wrongCount)
+          ? Math.max(0, Math.floor(parsed.wrongCount))
+          : 0,
+      answerResultsByEntryId,
+      isProgressComplete: Boolean(parsed.isProgressComplete),
     };
   } catch {
     return null;
@@ -18658,6 +22647,13 @@ function saveDictionaryStudyProgress(study: DictionaryStudyState) {
       isAnswerRevealed: study.isAnswerRevealed,
       cardIds: study.cards.map((entry) => entry.id),
       shuffle: study.shuffle,
+      progressMode: study.progressMode,
+      progressStartedAt: study.progressStartedAt,
+      progressCompletedAt: study.progressCompletedAt,
+      correctCount: study.correctCount,
+      wrongCount: study.wrongCount,
+      answerResultsByEntryId: study.answerResultsByEntryId,
+      isProgressComplete: study.isProgressComplete,
     };
     window.localStorage.setItem(study.progressKey, JSON.stringify(progress));
   } catch {
@@ -18669,18 +22665,37 @@ function restoreDictionaryStudyProgress(
   progress: DictionaryStudyProgress | null,
   baseCards: DictionaryEntry[],
   defaultCards: DictionaryEntry[],
-  shuffle: boolean
+  shuffle: boolean,
+  progressMode: boolean
 ): {
   cards: DictionaryEntry[];
   currentIndex: number;
   isAnswerRevealed: boolean;
+  progressStartedAt: number;
+  progressCompletedAt: number | null;
+  correctCount: number;
+  wrongCount: number;
+  answerResultsByEntryId: Record<string, DictionaryStudyAnswerResult>;
+  isProgressComplete: boolean;
 } {
+  const fresh = {
+    cards: defaultCards,
+    currentIndex: 0,
+    isAnswerRevealed: false,
+    progressStartedAt: Date.now(),
+    progressCompletedAt: null,
+    correctCount: 0,
+    wrongCount: 0,
+    answerResultsByEntryId: {},
+    isProgressComplete: false,
+  };
+
   if (!progress || baseCards.length === 0) {
-    return {
-      cards: defaultCards,
-      currentIndex: 0,
-      isAnswerRevealed: false,
-    };
+    return fresh;
+  }
+
+  if (progressMode && !progress.progressMode) {
+    return fresh;
   }
 
   const cardsById = new Map(baseCards.map((entry) => [entry.id, entry]));
@@ -18694,11 +22709,140 @@ function restoreDictionaryStudyProgress(
         ]
       : [...baseCards];
   const cards = restoredCards.length > 0 ? restoredCards : defaultCards;
+  const answerResultsByEntryId = normalizeDictionaryStudyAnswerResultsByEntryId(
+    progress.answerResultsByEntryId,
+    cards
+  );
+  const counts = getDictionaryStudyAnswerResultCounts(
+    answerResultsByEntryId,
+    cards
+  );
+  if (
+    progressMode &&
+    progress.progressMode &&
+    counts.answered === 0 &&
+    progress.correctCount + progress.wrongCount > 0
+  ) {
+    return fresh;
+  }
 
   return {
     cards,
     currentIndex: Math.min(progress.currentIndex, cards.length - 1),
-    isAnswerRevealed: progress.isAnswerRevealed,
+    isAnswerRevealed:
+      !progressMode || !progress.isProgressComplete
+        ? progress.isAnswerRevealed
+        : true,
+    progressStartedAt: progress.progressMode
+      ? progress.progressStartedAt
+      : Date.now(),
+    progressCompletedAt:
+      progressMode && progress.progressMode ? progress.progressCompletedAt : null,
+    correctCount: progressMode && progress.progressMode ? counts.correct : 0,
+    wrongCount: progressMode && progress.progressMode ? counts.wrong : 0,
+    answerResultsByEntryId:
+      progressMode && progress.progressMode ? answerResultsByEntryId : {},
+    isProgressComplete:
+      progressMode &&
+      progress.progressMode &&
+      progress.isProgressComplete &&
+      counts.answered >= cards.length,
+  };
+}
+
+function parseDictionaryStudyAnswerResultsByEntryId(
+  value: unknown
+): Record<string, DictionaryStudyAnswerResult> {
+  if (!isObjectRecord(value)) {
+    return {};
+  }
+
+  const result: Record<string, DictionaryStudyAnswerResult> = {};
+  for (const [entryId, answerResult] of Object.entries(value)) {
+    if (
+      typeof entryId !== "string" ||
+      !entryId ||
+      (answerResult !== "correct" && answerResult !== "wrong")
+    ) {
+      continue;
+    }
+
+    result[entryId] = answerResult;
+  }
+
+  return result;
+}
+
+function normalizeDictionaryStudyAnswerResultsByEntryId(
+  value: unknown,
+  cards: DictionaryEntry[]
+): Record<string, DictionaryStudyAnswerResult> {
+  const parsed = parseDictionaryStudyAnswerResultsByEntryId(value);
+  const allowedIds = new Set(cards.map((entry) => entry.id));
+  const result: Record<string, DictionaryStudyAnswerResult> = {};
+
+  for (const [entryId, answerResult] of Object.entries(parsed)) {
+    if (allowedIds.has(entryId)) {
+      result[entryId] = answerResult;
+    }
+  }
+
+  return result;
+}
+
+function getDictionaryStudyAnswerResultCounts(
+  answerResultsByEntryId: Record<string, DictionaryStudyAnswerResult>,
+  cards: DictionaryEntry[]
+) {
+  let correct = 0;
+  let wrong = 0;
+
+  for (const entry of cards) {
+    const answerResult = answerResultsByEntryId[entry.id];
+    if (answerResult === "correct") {
+      correct += 1;
+    } else if (answerResult === "wrong") {
+      wrong += 1;
+    }
+  }
+
+  return {
+    answered: correct + wrong,
+    correct,
+    wrong,
+  };
+}
+
+function formatDuration(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.round(milliseconds / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+
+  if (minutes <= 0) {
+    return `${seconds} сек.`;
+  }
+
+  return `${minutes} мин. ${seconds.toString().padStart(2, "0")} сек.`;
+}
+
+function getDictionaryStudyProgressStats(study: DictionaryStudyState) {
+  const resultCounts = getDictionaryStudyAnswerResultCounts(
+    study.answerResultsByEntryId,
+    study.cards
+  );
+  const answered = resultCounts.answered;
+  const completedAt = study.progressCompletedAt ?? Date.now();
+  const elapsedMs = Math.max(0, completedAt - study.progressStartedAt);
+  const percent = answered > 0 ? Math.round((resultCounts.correct / answered) * 100) : 0;
+
+  return {
+    total: study.cards.length,
+    answered,
+    correct: resultCounts.correct,
+    wrong: resultCounts.wrong,
+    percent,
+    elapsed: formatDuration(elapsedMs),
+    average: answered > 0 ? formatDuration(elapsedMs / answered) : "0 сек.",
   };
 }
 
@@ -18730,6 +22874,48 @@ function getDictionaryStudyActiveTextSegments(
     .map((field) => getDictionaryEntryFieldText(currentEntry, field))
     .map((text) => text.trim())
     .filter(Boolean);
+}
+
+function makeDictionaryStudyEntryIdentity(
+  study: DictionaryStudyState,
+  entry: DictionaryEntry
+): SharedDictionaryEntryIdentity {
+  return {
+    sourceCategoryId: study.sourceCategoryId,
+    sourceMessageId: study.sourceMessageId,
+    dictionaryId: study.dictionaryId,
+    entryId: entry.id,
+  };
+}
+
+function dictionaryEntryIdentityKey(identity: SharedDictionaryEntryIdentity): string {
+  return [
+    identity.sourceCategoryId,
+    identity.sourceMessageId ?? "",
+    identity.dictionaryId ?? "",
+    identity.entryId,
+  ].join("\0");
+}
+
+function getDictionarySearchResultIdentity(
+  result: GlobalDictionarySearchResult
+): SharedDictionaryEntryIdentity {
+  return {
+    sourceCategoryId: result.sourceCategoryId,
+    sourceMessageId: result.sourceMessageId,
+    dictionaryId: result.dictionaryId,
+    entryId: result.entry.id,
+  };
+}
+
+function findDictionaryGroupsForIdentity(
+  groups: DictionaryWordGroup[],
+  identity: SharedDictionaryEntryIdentity
+): DictionaryWordGroup[] {
+  const key = dictionaryEntryIdentityKey(identity);
+  return groups.filter((group) =>
+    group.items.some((item) => dictionaryEntryIdentityKey(item) === key)
+  );
 }
 
 function reorderIdListByTarget(source: string[], dragId: string, targetId: string): string[] {
@@ -18997,6 +23183,30 @@ function makeDictionaryEditorCellKey(
   return `${entryId}:${field}`;
 }
 
+type DictionarySearchToken = {
+  text: string;
+  start: number;
+  end: number;
+};
+
+type DictionarySearchMatchKind = "phrase" | "exact" | "prefix" | "substring" | "fuzzy";
+
+type DictionarySearchMatch = {
+  start: number;
+  end: number;
+  isFuzzy: boolean;
+  kind: DictionarySearchMatchKind;
+  score: number;
+};
+
+type CompiledDictionarySearchQuery = {
+  query: string;
+  tokens: string[];
+  significantLength: number;
+};
+
+const DICTIONARY_SEARCH_FUZZY_MIN_LENGTH = 5;
+
 function normalizeDictionarySearchText(value: string): string {
   return value
     .toLocaleLowerCase("ru-RU")
@@ -19005,12 +23215,8 @@ function normalizeDictionarySearchText(value: string): string {
     .trim();
 }
 
-function getDictionarySearchTokens(value: string): Array<{
-  text: string;
-  start: number;
-  end: number;
-}> {
-  const tokens: Array<{ text: string; start: number; end: number }> = [];
+function getDictionarySearchTokens(value: string): DictionarySearchToken[] {
+  const tokens: DictionarySearchToken[] = [];
   const wordPattern = /[0-9A-Za-zА-Яа-яЁё]+/g;
   let match: RegExpExecArray | null = wordPattern.exec(value);
 
@@ -19027,117 +23233,172 @@ function getDictionarySearchTokens(value: string): Array<{
   return tokens.filter((token) => token.text.length > 0);
 }
 
-function findDictionaryEditorSearchMatch(
-  value: string,
-  query: string,
-  queryTokens: string[]
-): { start: number; end: number; isFuzzy: boolean } | null {
-  const exactPattern = buildDictionarySearchPhrasePattern(query);
-  const exactMatch = exactPattern?.exec(value);
-
-  if (exactMatch && typeof exactMatch.index === "number") {
-    return {
-      start: exactMatch.index,
-      end: exactMatch.index + exactMatch[0].length,
-      isFuzzy: false,
-    };
-  }
-
-  const valueTokens = getDictionarySearchTokens(value);
-  if (queryTokens.length === 0 || valueTokens.length === 0) {
-    return null;
-  }
-
-  let firstMatchedToken: { start: number; end: number } | null = null;
-
-  for (const queryToken of queryTokens) {
-    const matchedToken = valueTokens.find((valueToken) =>
-      isDictionarySearchTokenMatch(queryToken, valueToken.text)
-    );
-
-    if (!matchedToken) {
-      return null;
-    }
-
-    if (!firstMatchedToken) {
-      firstMatchedToken = {
-        start: matchedToken.start,
-        end: matchedToken.end,
-      };
-    }
-  }
-
-  if (!firstMatchedToken) {
+function compileDictionarySearchQuery(
+  query: string
+): CompiledDictionarySearchQuery | null {
+  const tokens = getDictionarySearchTokens(query).map((token) => token.text);
+  const significantLength = tokens.join("").length;
+  if (significantLength < 2 || tokens.length === 0) {
     return null;
   }
 
   return {
-    start: firstMatchedToken.start,
-    end: firstMatchedToken.end,
-    isFuzzy: true,
+    query: normalizeDictionarySearchText(query),
+    tokens,
+    significantLength,
   };
 }
 
-function buildDictionarySearchPhrasePattern(query: string): RegExp | null {
-  const normalizedQuery = normalizeDictionarySearchText(query);
-  if (!normalizedQuery) {
+function findDictionaryEditorSearchMatch(
+  value: string,
+  query: CompiledDictionarySearchQuery
+): DictionarySearchMatch | null {
+  const valueTokens = getDictionarySearchTokens(value);
+  if (query.tokens.length === 0 || valueTokens.length === 0) {
     return null;
   }
 
-  const pattern = Array.from(normalizedQuery)
-    .map((character) => {
-      if (character === " ") {
-        return "\\s+";
-      }
+  if (query.tokens.length > 1) {
+    return findDictionaryPhraseSearchMatch(valueTokens, query.tokens);
+  }
 
-      if (character === "е") {
-        return "[её]";
-      }
-
-      return escapeRegExp(character);
-    })
-    .join("");
-
-  return new RegExp(pattern, "iu");
+  return findDictionarySingleTokenSearchMatch(valueTokens, query.tokens[0] ?? "");
 }
 
-function isDictionarySearchTokenMatch(
-  queryToken: string,
-  valueToken: string
-): boolean {
-  if (!queryToken || !valueToken) {
-    return false;
+function findDictionaryPhraseSearchMatch(
+  valueTokens: DictionarySearchToken[],
+  queryTokens: string[]
+): DictionarySearchMatch | null {
+  if (queryTokens.length > valueTokens.length) {
+    return null;
   }
 
-  if (queryToken === valueToken || valueToken.includes(queryToken)) {
-    return true;
+  for (
+    let valueStartIndex = 0;
+    valueStartIndex <= valueTokens.length - queryTokens.length;
+    valueStartIndex += 1
+  ) {
+    const isExactPhrase = queryTokens.every(
+      (queryToken, queryIndex) =>
+        valueTokens[valueStartIndex + queryIndex]?.text === queryToken
+    );
+
+    if (!isExactPhrase) {
+      continue;
+    }
+
+    const firstToken = valueTokens[valueStartIndex];
+    const lastToken = valueTokens[valueStartIndex + queryTokens.length - 1];
+    if (!firstToken || !lastToken) {
+      return null;
+    }
+
+    return {
+      start: firstToken.start,
+      end: lastToken.end,
+      isFuzzy: false,
+      kind: "phrase",
+      score: 600,
+    };
   }
 
-  if (queryToken.length < 3 || valueToken.length < 3) {
-    return false;
+  return null;
+}
+
+function findDictionarySingleTokenSearchMatch(
+  valueTokens: DictionarySearchToken[],
+  queryToken: string
+): DictionarySearchMatch | null {
+  if (!queryToken) {
+    return null;
+  }
+
+  const exactToken = valueTokens.find((valueToken) => valueToken.text === queryToken);
+  if (exactToken) {
+    return {
+      start: exactToken.start,
+      end: exactToken.end,
+      isFuzzy: false,
+      kind: "exact",
+      score: 500,
+    };
+  }
+
+  if (queryToken.length <= 2) {
+    return null;
+  }
+
+  const prefixToken = valueTokens.find((valueToken) =>
+    valueToken.text.startsWith(queryToken)
+  );
+  if (prefixToken) {
+    return {
+      start: prefixToken.start,
+      end: prefixToken.end,
+      isFuzzy: false,
+      kind: "prefix",
+      score: 400,
+    };
+  }
+
+  if (queryToken.length >= DICTIONARY_SEARCH_FUZZY_MIN_LENGTH) {
+    const substringToken = valueTokens.find((valueToken) =>
+      valueToken.text.includes(queryToken)
+    );
+    if (substringToken) {
+      return {
+        start: substringToken.start,
+        end: substringToken.end,
+        isFuzzy: false,
+        kind: "substring",
+        score: 300,
+      };
+    }
+  }
+
+  if (queryToken.length < DICTIONARY_SEARCH_FUZZY_MIN_LENGTH) {
+    return null;
   }
 
   const maxDistance = getDictionarySearchMaxDistance(queryToken.length);
-  if (Math.abs(queryToken.length - valueToken.length) > maxDistance) {
-    return false;
+  let bestFuzzyToken: DictionarySearchToken | null = null;
+  let bestDistance = maxDistance + 1;
+
+  for (const valueToken of valueTokens) {
+    if (Math.abs(queryToken.length - valueToken.text.length) > maxDistance) {
+      continue;
+    }
+
+    const distance = getBoundedLevenshteinDistance(
+      queryToken,
+      valueToken.text,
+      maxDistance
+    );
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestFuzzyToken = valueToken;
+    }
   }
 
-  return (
-    getBoundedLevenshteinDistance(queryToken, valueToken, maxDistance) <=
-    maxDistance
-  );
+  if (!bestFuzzyToken || bestDistance > maxDistance) {
+    return null;
+  }
+
+  return {
+    start: bestFuzzyToken.start,
+    end: bestFuzzyToken.end,
+    isFuzzy: true,
+    kind: "fuzzy",
+    score: 100 - bestDistance,
+  };
 }
 
 function getDictionarySearchMaxDistance(length: number): number {
-  if (length <= 4) {
+  if (length <= 8) {
     return 1;
   }
 
-  if (length <= 8) {
-    return 2;
-  }
-
-  return 3;
+  return 2;
 }
 
 function getBoundedLevenshteinDistance(
@@ -19186,10 +23447,6 @@ function wrapIndex(value: number, length: number): number {
   return ((value % length) + length) % length;
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 function isValidHttpUrl(value: string): boolean {
   try {
     const parsed = new URL(value);
@@ -19197,6 +23454,14 @@ function isValidHttpUrl(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+function isInternalAccountImageUrl(value: string): boolean {
+  return /^\/api\/account\/images\/[0-9a-f-]{36}$/i.test(value.trim());
+}
+
+function isDisplayImageUrl(value: string): boolean {
+  return isValidHttpUrl(value) || isInternalAccountImageUrl(value);
 }
 
 function formatDateTime(value: string): string {
@@ -19213,6 +23478,23 @@ function formatDateTime(value: string): string {
     minute: "2-digit",
     hour12: false,
   });
+}
+
+function formatFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  const digits = unitIndex === 0 || value >= 100 ? 0 : 1;
+  return `${value.toFixed(digits)} ${units[unitIndex]}`;
 }
 
 function toMessageTypeLabel(type: MessageType): string {
