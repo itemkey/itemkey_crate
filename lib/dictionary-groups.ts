@@ -4,6 +4,8 @@ import type { QueryResult, QueryResultRow } from "pg";
 
 import { buildCategoryPath } from "@/lib/categories";
 import {
+  DEFAULT_DICTIONARY_COLUMNS,
+  type DictionaryColumn,
   type DictionaryEntry,
   type DictionaryEntryIdentity,
   type DictionaryFieldLabels,
@@ -12,6 +14,7 @@ import {
   type DictionaryWordGroupItem,
   type DictionaryWordGroupItemSnapshot,
   type DictionaryWordGroupSummary,
+  normalizeDictionaryColumns as normalizeSharedDictionaryColumns,
   parseContinuousDictionariesFromContent,
   parseMessageDictionaryContent,
 } from "@/lib/dictionaries";
@@ -134,23 +137,36 @@ function toFinitePosition(value: unknown): number {
   return Math.max(0, Math.floor(asNumber));
 }
 
-function normalizeDictionaryEntry(value: unknown): DictionaryEntry {
+function normalizeDictionaryEntry(
+  value: unknown,
+  columns: DictionaryColumn[] = DEFAULT_DICTIONARY_COLUMNS
+): DictionaryEntry {
   if (!isObjectRecord(value)) {
     return {
       id: "",
-      side1: "",
-      side1Note: "",
-      side2: "",
-      side2Note: "",
+      values: Object.fromEntries(
+        columns.map((column) => [column.id, ""])
+      ) as Record<string, string>,
     };
   }
 
+  const rawValues = isObjectRecord(value.values) ? value.values : {};
   return {
     id: typeof value.id === "string" ? value.id : "",
-    side1: typeof value.side1 === "string" ? value.side1 : "",
-    side1Note: typeof value.side1Note === "string" ? value.side1Note : "",
-    side2: typeof value.side2 === "string" ? value.side2 : "",
-    side2Note: typeof value.side2Note === "string" ? value.side2Note : "",
+    values: Object.fromEntries(
+      columns.map((column) => {
+        const rawValue = rawValues[column.id];
+        const directValue = value[column.id];
+        return [
+          column.id,
+          typeof rawValue === "string"
+            ? rawValue
+            : typeof directValue === "string"
+              ? directValue
+              : "",
+        ];
+      })
+    ) as Record<string, string>,
   };
 }
 
@@ -176,17 +192,36 @@ function normalizeDictionaryLabels(value: unknown): DictionaryFieldLabels {
 
 function normalizeEntrySnapshot(value: unknown): DictionaryWordGroupItemSnapshot {
   if (!isObjectRecord(value)) {
+    const columns = normalizeSharedDictionaryColumns(null);
     return {
-      entry: normalizeDictionaryEntry(null),
-      labels: normalizeDictionaryLabels(null),
+      entry: normalizeDictionaryEntry(null, columns),
+      labels: Object.fromEntries(
+        columns.map((column) => [column.id, column.label])
+      ) as DictionaryFieldLabels,
+      columns,
       dictionaryTitle: "Источник не найден",
       categoryPath: "",
     };
   }
 
+  const columns = normalizeSharedDictionaryColumns(value.columns, value.labels);
+  const legacyLabels = normalizeDictionaryLabels(value.labels);
   return {
-    entry: normalizeDictionaryEntry(value.entry),
-    labels: normalizeDictionaryLabels(value.labels),
+    entry: normalizeDictionaryEntry(value.entry, columns),
+    labels: Object.fromEntries(
+      columns.map((column) => {
+        const rawLabel = isObjectRecord(value.labels)
+          ? value.labels[column.id]
+          : null;
+        return [
+          column.id,
+          typeof rawLabel === "string"
+            ? rawLabel
+            : legacyLabels[column.id] ?? column.label,
+        ];
+      })
+    ) as DictionaryFieldLabels,
+    columns,
     dictionaryTitle:
       typeof value.dictionaryTitle === "string" && value.dictionaryTitle.trim()
         ? value.dictionaryTitle
@@ -442,6 +477,7 @@ function makeFallbackResult(
     entryId: item.entryId,
     entry: item.entrySnapshot.entry,
     labels: item.entrySnapshot.labels,
+    columns: item.entrySnapshot.columns,
     sourceExists: false,
     dictionaryTitle: item.entrySnapshot.dictionaryTitle || "Источник не найден",
     categoryPath: item.entrySnapshot.categoryPath,
@@ -480,6 +516,7 @@ function resolveLiveResult(
       entryId: item.entryId,
       entry,
       labels: payload.labels,
+      columns: payload.columns,
       sourceExists: true,
       dictionaryTitle: message.title,
       categoryPath: makeCategoryPath(context, category.id),
@@ -509,6 +546,7 @@ function resolveLiveResult(
     entryId: item.entryId,
     entry,
     labels: dictionary.labels,
+    columns: dictionary.columns,
     sourceExists: true,
     dictionaryTitle: dictionary.title,
     categoryPath: makeCategoryPath(context, category.id),
@@ -534,6 +572,7 @@ function makeSnapshot(
   return {
     entry: result.entry,
     labels: result.labels,
+    columns: result.columns,
     dictionaryTitle: result.dictionaryTitle,
     categoryPath: result.categoryPath,
   };

@@ -5,6 +5,7 @@ import { getCategoryStore } from "@/lib/category-store";
 import {
   DICTIONARY_EDITOR_SEARCH_FIELDS,
   type CompiledDictionarySearchQuery,
+  type DictionaryColumn,
   type DictionaryBlock,
   type DictionaryEntry,
   type DictionaryEntryField,
@@ -12,6 +13,7 @@ import {
   type DictionarySearchResult,
   compileDictionarySearchQuery,
   findDictionaryEditorSearchMatch,
+  getDictionaryEntryFieldText,
   parseContinuousDictionariesFromContent,
   parseMessageDictionaryContent,
 } from "@/lib/dictionaries";
@@ -314,6 +316,7 @@ function appendDictionaryMatches(options: {
   for (const entry of options.dictionary.entries) {
     const matchedFields = collectMatchedDictionaryFields(
       entry,
+      options.dictionary.columns,
       options.query
     );
 
@@ -323,7 +326,9 @@ function appendDictionaryMatches(options: {
 
     const score = Math.max(
       ...matchedFields.map(
-        (match) => match.match.score + getDictionarySearchFieldScore(match.field)
+        (match) =>
+          match.match.score +
+          getDictionarySearchFieldScore(match.field, options.dictionary.columns)
       )
     );
 
@@ -336,6 +341,7 @@ function appendDictionaryMatches(options: {
         ].join(":"),
         entry,
         labels: options.dictionary.labels,
+        columns: options.dictionary.columns,
         matchedFields: matchedFields.map((match) => match.field),
         hasFuzzyMatch: matchedFields.some((match) => match.match.isFuzzy),
         sourceCategoryId: options.category.id,
@@ -352,6 +358,7 @@ function appendDictionaryMatches(options: {
 
 function collectMatchedDictionaryFields(
   entry: DictionaryEntry,
+  columns: DictionaryColumn[],
   query: CompiledDictionarySearchQuery
 ): Array<{ field: DictionaryEntryField; match: DictionarySearchMatch }> {
   const matchedFields: Array<{
@@ -359,14 +366,30 @@ function collectMatchedDictionaryFields(
     match: DictionarySearchMatch;
   }> = [];
 
-  for (const field of DICTIONARY_EDITOR_SEARCH_FIELDS) {
-    const match = findDictionaryEditorSearchMatch(entry[field], query);
+  const searchColumns =
+    columns.length > 0
+      ? columns
+      : DICTIONARY_EDITOR_SEARCH_FIELDS.map(
+          (field) =>
+            ({
+              id: field,
+              side: field === "side1" || field === "side1Note" ? "side1" : "side2",
+              kind: field === "side1" || field === "side2" ? "word" : "note",
+              label: field,
+            }) satisfies DictionaryColumn
+        );
+
+  for (const column of searchColumns) {
+    const match = findDictionaryEditorSearchMatch(
+      getDictionaryEntryFieldText(entry, column.id),
+      query
+    );
     if (!match) {
       continue;
     }
 
     matchedFields.push({
-      field,
+      field: column.id,
       match,
     });
   }
@@ -374,6 +397,9 @@ function collectMatchedDictionaryFields(
   return matchedFields;
 }
 
-function getDictionarySearchFieldScore(field: DictionaryEntryField): number {
-  return field === "side1" || field === "side2" ? 40 : 10;
+function getDictionarySearchFieldScore(
+  field: DictionaryEntryField,
+  columns: DictionaryColumn[]
+): number {
+  return columns.find((column) => column.id === field)?.kind === "word" ? 40 : 10;
 }

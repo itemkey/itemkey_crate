@@ -1,24 +1,30 @@
 export type DictionaryPromptSide = "side1" | "side2";
 export type DictionaryMotivationAdvanceMode = "auto" | "manual";
+export type DictionaryColumnKind = "word" | "note";
+export type DictionaryNoteDisplayMode = "continuous" | "separate";
+
+export type DictionaryColumn = {
+  id: string;
+  side: DictionaryPromptSide;
+  kind: DictionaryColumnKind;
+  label: string;
+  wordIndex?: number;
+};
 
 export type DictionaryEntry = {
   id: string;
-  side1: string;
-  side1Note: string;
-  side2: string;
-  side2Note: string;
+  values: Record<string, string>;
+  side1?: string;
+  side1Note?: string;
+  side2?: string;
+  side2Note?: string;
 };
 
-export type DictionaryFieldLabels = {
-  side1: string;
-  side1Note: string;
-  side2: string;
-  side2Note: string;
-};
+export type DictionaryFieldLabels = Record<string, string>;
 
-export type DictionaryEntryField = Exclude<keyof DictionaryEntry, "id">;
+export type DictionaryEntryField = string;
 
-export type DictionaryLabelField = keyof DictionaryFieldLabels;
+export type DictionaryLabelField = string;
 
 export type DictionaryBlock = {
   id: string;
@@ -30,6 +36,7 @@ export type DictionaryBlock = {
   autoSpeak: boolean;
   autoSpeakFields: DictionaryEntryField[];
   manualSpeakFields: DictionaryEntryField[];
+  noteDisplayMode: DictionaryNoteDisplayMode;
   progressMode: boolean;
   motivateOnCorrect: boolean;
   cardMode: boolean;
@@ -37,6 +44,7 @@ export type DictionaryBlock = {
   motivationAdvanceMode: DictionaryMotivationAdvanceMode;
   motivationAutoSeconds: number;
   labels: DictionaryFieldLabels;
+  columns: DictionaryColumn[];
   entries: DictionaryEntry[];
 };
 
@@ -48,6 +56,7 @@ export type MessageDictionaryPayload = {
   autoSpeak: boolean;
   autoSpeakFields: DictionaryEntryField[];
   manualSpeakFields: DictionaryEntryField[];
+  noteDisplayMode: DictionaryNoteDisplayMode;
   progressMode: boolean;
   motivateOnCorrect: boolean;
   cardMode: boolean;
@@ -55,6 +64,7 @@ export type MessageDictionaryPayload = {
   motivationAdvanceMode: DictionaryMotivationAdvanceMode;
   motivationAutoSeconds: number;
   labels: DictionaryFieldLabels;
+  columns: DictionaryColumn[];
   entries: DictionaryEntry[];
 };
 
@@ -62,6 +72,7 @@ export type DictionarySearchResult = {
   id: string;
   entry: DictionaryEntry;
   labels: DictionaryFieldLabels;
+  columns: DictionaryColumn[];
   matchedFields: DictionaryEntryField[];
   hasFuzzyMatch: boolean;
   sourceCategoryId: string;
@@ -87,6 +98,7 @@ export type DictionaryGroupResolvedResult = DictionaryEntryIdentity & {
   id: string;
   entry: DictionaryEntry;
   labels: DictionaryFieldLabels;
+  columns: DictionaryColumn[];
   sourceExists: boolean;
   dictionaryTitle: string;
   categoryPath: string;
@@ -98,6 +110,7 @@ export type DictionaryGroupResolvedResult = DictionaryEntryIdentity & {
 export type DictionaryWordGroupItemSnapshot = {
   entry: DictionaryEntry;
   labels: DictionaryFieldLabels;
+  columns: DictionaryColumn[];
   dictionaryTitle: string;
   categoryPath: string;
 };
@@ -125,7 +138,7 @@ export type DictionaryWordGroup = {
 export const CONTINUOUS_CONTENT_KIND = "itemkey-continuous-v1";
 export const MESSAGE_DICTIONARY_KIND = "itemkey-message-dictionary-v1";
 export const DICTIONARY_EXPORT_KIND = "itemkey-dict-export";
-export const DICTIONARY_EXPORT_SCHEMA_VERSION = 1;
+export const DICTIONARY_EXPORT_SCHEMA_VERSION = 2;
 export const DICTIONARY_LABEL_MAX_LENGTH = 42;
 
 export const DEFAULT_DICTIONARY_FIELD_LABELS: DictionaryFieldLabels = {
@@ -134,6 +147,35 @@ export const DEFAULT_DICTIONARY_FIELD_LABELS: DictionaryFieldLabels = {
   side2: "сторона 2",
   side2Note: "пояснение 2",
 };
+
+export const DEFAULT_DICTIONARY_COLUMNS: DictionaryColumn[] = [
+  {
+    id: "side1",
+    side: "side1",
+    kind: "word",
+    label: DEFAULT_DICTIONARY_FIELD_LABELS.side1,
+  },
+  {
+    id: "side1Note",
+    side: "side1",
+    kind: "note",
+    label: DEFAULT_DICTIONARY_FIELD_LABELS.side1Note,
+    wordIndex: 0,
+  },
+  {
+    id: "side2",
+    side: "side2",
+    kind: "word",
+    label: DEFAULT_DICTIONARY_FIELD_LABELS.side2,
+  },
+  {
+    id: "side2Note",
+    side: "side2",
+    kind: "note",
+    label: DEFAULT_DICTIONARY_FIELD_LABELS.side2Note,
+    wordIndex: 0,
+  },
+];
 
 export const DICTIONARY_EDITOR_SEARCH_FIELDS: DictionaryEntryField[] = [
   "side1",
@@ -153,6 +195,8 @@ export const DEFAULT_DICTIONARY_MANUAL_SPEAK_FIELDS: DictionaryEntryField[] = [
 
 export const DEFAULT_DICTIONARY_MOTIVATION_ADVANCE_MODE: DictionaryMotivationAdvanceMode =
   "auto";
+export const DEFAULT_DICTIONARY_NOTE_DISPLAY_MODE: DictionaryNoteDisplayMode =
+  "continuous";
 export const DEFAULT_DICTIONARY_MOTIVATION_AUTO_SECONDS = 3;
 export const MIN_DICTIONARY_MOTIVATION_AUTO_SECONDS = 1;
 export const MAX_DICTIONARY_MOTIVATION_AUTO_SECONDS = 30;
@@ -193,6 +237,16 @@ export function normalizeDictionaryMotivationAdvanceMode(
   return value === "manual" ? "manual" : DEFAULT_DICTIONARY_MOTIVATION_ADVANCE_MODE;
 }
 
+export function normalizeDictionaryColumnKind(value: unknown): DictionaryColumnKind {
+  return value === "word" ? "word" : "note";
+}
+
+export function normalizeDictionaryNoteDisplayMode(
+  value: unknown
+): DictionaryNoteDisplayMode {
+  return value === "separate" ? "separate" : DEFAULT_DICTIONARY_NOTE_DISPLAY_MODE;
+}
+
 export function normalizeDictionaryMotivationAutoSeconds(value: unknown): number {
   const numericValue = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(numericValue)) {
@@ -221,10 +275,6 @@ export function normalizeDictionaryDescription(
   return normalizeDictionaryText(value).slice(0, 420);
 }
 
-export function createDefaultDictionaryLabels(): DictionaryFieldLabels {
-  return { ...DEFAULT_DICTIONARY_FIELD_LABELS };
-}
-
 function normalizeDictionaryLabel(value: unknown, fallback: string): string {
   const normalized =
     typeof value === "string"
@@ -234,47 +284,268 @@ function normalizeDictionaryLabel(value: unknown, fallback: string): string {
   return normalized || fallback;
 }
 
-export function normalizeDictionaryLabels(value: unknown): DictionaryFieldLabels {
-  const raw = isObjectRecord(value) ? value : {};
+function readDictionaryLabels(value: unknown): DictionaryFieldLabels {
+  if (!isObjectRecord(value)) {
+    return {};
+  }
 
-  return {
-    side1: normalizeDictionaryLabel(
-      raw.side1,
-      DEFAULT_DICTIONARY_FIELD_LABELS.side1
-    ),
-    side1Note: normalizeDictionaryLabel(
-      raw.side1Note,
-      DEFAULT_DICTIONARY_FIELD_LABELS.side1Note
-    ),
-    side2: normalizeDictionaryLabel(
-      raw.side2,
-      DEFAULT_DICTIONARY_FIELD_LABELS.side2
-    ),
-    side2Note: normalizeDictionaryLabel(
-      raw.side2Note,
-      DEFAULT_DICTIONARY_FIELD_LABELS.side2Note
-    ),
+  const labels: DictionaryFieldLabels = {};
+  for (const [key, label] of Object.entries(value)) {
+    if (typeof label === "string") {
+      labels[key] = label;
+    }
+  }
+
+  return labels;
+}
+
+function normalizeDictionaryColumnId(value: unknown, fallback: string): string {
+  const normalized =
+    typeof value === "string"
+      ? normalizeDictionaryText(value).slice(0, 64)
+      : "";
+  return normalized || fallback;
+}
+
+function readDictionaryColumnWordIndex(value: unknown): number | null {
+  const numericValue = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return null;
+  }
+
+  return Math.max(0, Math.floor(numericValue));
+}
+
+function clampDictionaryColumnWordIndex(
+  value: unknown,
+  wordCount: number,
+  fallback = 0
+): number {
+  const parsed = readDictionaryColumnWordIndex(value);
+  const maxIndex = Math.max(0, wordCount - 1);
+  return Math.min(maxIndex, parsed ?? fallback);
+}
+
+function normalizeDictionaryColumnWordIndexes(
+  columns: DictionaryColumn[]
+): DictionaryColumn[] {
+  const wordCountBySide: Record<DictionaryPromptSide, number> = {
+    side1: getDictionarySideColumns(columns, "side1", "word").length,
+    side2: getDictionarySideColumns(columns, "side2", "word").length,
   };
+  const seenWordCountBySide: Record<DictionaryPromptSide, number> = {
+    side1: 0,
+    side2: 0,
+  };
+
+  return columns.map((column) => {
+    if (column.kind === "word") {
+      seenWordCountBySide[column.side] += 1;
+      const wordColumn = { ...column };
+      delete wordColumn.wordIndex;
+      return wordColumn;
+    }
+
+    const fallbackWordIndex = Math.max(0, seenWordCountBySide[column.side] - 1);
+    return {
+      ...column,
+      wordIndex: clampDictionaryColumnWordIndex(
+        column.wordIndex,
+        wordCountBySide[column.side],
+        fallbackWordIndex
+      ),
+    };
+  });
+}
+
+function makeDictionaryColumnFallbackId(
+  side: DictionaryPromptSide,
+  kind: DictionaryColumnKind,
+  index: number
+): string {
+  return `${side}-${kind}-${index + 1}`;
+}
+
+function makeDictionaryColumnFallbackLabel(
+  side: DictionaryPromptSide,
+  kind: DictionaryColumnKind,
+  index: number
+): string {
+  if (side === "side1" && kind === "word" && index === 0) {
+    return DEFAULT_DICTIONARY_FIELD_LABELS.side1;
+  }
+  if (side === "side1" && kind === "note" && index === 1) {
+    return DEFAULT_DICTIONARY_FIELD_LABELS.side1Note;
+  }
+  if (side === "side2" && kind === "word" && index === 2) {
+    return DEFAULT_DICTIONARY_FIELD_LABELS.side2;
+  }
+  if (side === "side2" && kind === "note" && index === 3) {
+    return DEFAULT_DICTIONARY_FIELD_LABELS.side2Note;
+  }
+
+  const sideNumber = side === "side1" ? "1" : "2";
+  const typeLabel = kind === "word" ? "ÑÐ»Ð¾Ð²Ð¾" : "Ð¿Ð¾ÑÑÐ½ÐµÐ½Ð¸Ðµ";
+  return `${typeLabel} ${sideNumber}.${index + 1}`;
+}
+
+export function createDefaultDictionaryColumns(
+  labels: unknown = DEFAULT_DICTIONARY_FIELD_LABELS
+): DictionaryColumn[] {
+  const rawLabels = isObjectRecord(labels) ? labels : {};
+  return DEFAULT_DICTIONARY_COLUMNS.map((column) => ({
+    ...column,
+    label: normalizeDictionaryLabel(rawLabels[column.id], column.label),
+  }));
+}
+
+export function normalizeDictionaryColumns(
+  value: unknown,
+  labels: unknown = DEFAULT_DICTIONARY_FIELD_LABELS
+): DictionaryColumn[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    return createDefaultDictionaryColumns(labels);
+  }
+
+  const rawLabels = isObjectRecord(labels) ? labels : {};
+  const seen = new Set<string>();
+  const result: DictionaryColumn[] = [];
+
+  for (let index = 0; index < value.length; index += 1) {
+    const rawColumn = value[index];
+    if (!isObjectRecord(rawColumn)) {
+      continue;
+    }
+
+    const side = normalizeDictionaryPromptSide(rawColumn.side);
+    const kind = normalizeDictionaryColumnKind(rawColumn.kind);
+    const baseId = normalizeDictionaryColumnId(
+      rawColumn.id,
+      makeDictionaryColumnFallbackId(side, kind, index)
+    );
+    let resolvedId = baseId;
+    let suffix = 2;
+    while (seen.has(resolvedId.toLocaleLowerCase())) {
+      resolvedId = `${baseId}-${suffix}`;
+      suffix += 1;
+    }
+    seen.add(resolvedId.toLocaleLowerCase());
+
+    const fallbackColumn = DEFAULT_DICTIONARY_COLUMNS.find(
+      (column) => column.id === resolvedId
+    );
+    const fallbackLabel =
+      fallbackColumn?.label ?? makeDictionaryColumnFallbackLabel(side, kind, index);
+
+    const column: DictionaryColumn = {
+      id: resolvedId,
+      side,
+      kind,
+      label: normalizeDictionaryLabel(
+        rawColumn.label ?? rawLabels[resolvedId],
+        fallbackLabel
+      ),
+    };
+
+    if (kind === "note") {
+      column.wordIndex = readDictionaryColumnWordIndex(rawColumn.wordIndex) ?? undefined;
+    }
+
+    result.push(column);
+  }
+
+  if (result.length === 0) {
+    return createDefaultDictionaryColumns(labels);
+  }
+
+  for (const side of ["side1", "side2"] as const) {
+    if (result.some((column) => column.side === side && column.kind === "word")) {
+      continue;
+    }
+
+    const fallbackColumn = DEFAULT_DICTIONARY_COLUMNS.find(
+      (column) => column.side === side && column.kind === "word"
+    );
+    if (fallbackColumn && !seen.has(fallbackColumn.id.toLocaleLowerCase())) {
+      result.unshift({ ...fallbackColumn });
+    }
+  }
+
+  return normalizeDictionaryColumnWordIndexes(result);
+}
+
+export function createDefaultDictionaryLabels(
+  columns: DictionaryColumn[] = DEFAULT_DICTIONARY_COLUMNS
+): DictionaryFieldLabels {
+  return Object.fromEntries(columns.map((column) => [column.id, column.label]));
+}
+
+export function normalizeDictionaryLabels(
+  value: unknown,
+  columns: DictionaryColumn[] = DEFAULT_DICTIONARY_COLUMNS
+): DictionaryFieldLabels {
+  const raw = isObjectRecord(value) ? value : {};
+  return Object.fromEntries(
+    columns.map((column) => [
+      column.id,
+      normalizeDictionaryLabel(raw[column.id] ?? column.label, column.label),
+    ])
+  );
+}
+
+function normalizeDictionaryEntryValues(
+  entry: unknown,
+  columns: DictionaryColumn[]
+): Record<string, string> {
+  const rawEntry = isObjectRecord(entry) ? entry : {};
+  const rawValues = isObjectRecord(rawEntry.values) ? rawEntry.values : {};
+  const values: Record<string, string> = {};
+
+  for (const column of columns) {
+    const rawValue = rawValues[column.id];
+    const directValue = rawEntry[column.id];
+    values[column.id] = normalizeDictionaryText(
+      typeof rawValue === "string"
+        ? rawValue
+        : typeof directValue === "string"
+          ? directValue
+          : ""
+    );
+  }
+
+  return values;
 }
 
 export function normalizeDictionaryEntries(
-  entries: DictionaryEntry[]
+  entries: unknown,
+  columns: DictionaryColumn[] = DEFAULT_DICTIONARY_COLUMNS
 ): DictionaryEntry[] {
+  if (!Array.isArray(entries)) {
+    return [];
+  }
+
   const seen = new Set<string>();
   const result: DictionaryEntry[] = [];
 
   for (let index = 0; index < entries.length; index += 1) {
     const entry = entries[index];
-    const side1 = normalizeDictionaryText(entry.side1);
-    const side1Note = normalizeDictionaryText(entry.side1Note);
-    const side2 = normalizeDictionaryText(entry.side2);
-    const side2Note = normalizeDictionaryText(entry.side2Note);
+    const values = normalizeDictionaryEntryValues(entry, columns);
+    const hasSide1Word = columns.some(
+      (column) =>
+        column.side === "side1" && column.kind === "word" && Boolean(values[column.id])
+    );
+    const hasSide2Word = columns.some(
+      (column) =>
+        column.side === "side2" && column.kind === "word" && Boolean(values[column.id])
+    );
 
-    if (!side1 || !side2) {
+    if (!hasSide1Word || !hasSide2Word) {
       continue;
     }
 
-    const rawId = normalizeDictionaryText(entry.id);
+    const rawId = normalizeDictionaryText(
+      isObjectRecord(entry) && typeof entry.id === "string" ? entry.id : ""
+    );
     const baseId = rawId || `entry-${index + 1}`;
     let resolvedId = baseId;
     let suffix = 2;
@@ -286,10 +557,7 @@ export function normalizeDictionaryEntries(
 
     result.push({
       id: resolvedId,
-      side1,
-      side1Note,
-      side2,
-      side2Note,
+      values,
     });
   }
 
@@ -297,17 +565,64 @@ export function normalizeDictionaryEntries(
 }
 
 export function isDictionaryEntryField(
-  value: unknown
+  value: unknown,
+  columns: DictionaryColumn[] = DEFAULT_DICTIONARY_COLUMNS
 ): value is DictionaryEntryField {
   return (
     typeof value === "string" &&
-    DICTIONARY_EDITOR_SEARCH_FIELDS.includes(value as DictionaryEntryField)
+    columns.some((column) => column.id === value)
   );
 }
 
-export function normalizeDictionaryAutoSpeakFields(
+export function getDictionarySideColumns(
+  columns: DictionaryColumn[],
+  side: DictionaryPromptSide,
+  kind?: DictionaryColumnKind
+): DictionaryColumn[] {
+  return columns.filter(
+    (column) => column.side === side && (!kind || column.kind === kind)
+  );
+}
+
+export function getDictionaryFieldLabel(
+  field: DictionaryEntryField,
+  labels: DictionaryFieldLabels = DEFAULT_DICTIONARY_FIELD_LABELS,
+  columns: DictionaryColumn[] = DEFAULT_DICTIONARY_COLUMNS
+): string {
+  const column = columns.find((candidate) => candidate.id === field);
+  return labels[field] ?? column?.label ?? field;
+}
+
+export function getDictionaryEntryFieldText(
+  entry: DictionaryEntry,
+  field: DictionaryEntryField
+): string {
+  return normalizeDictionaryText(
+    entry.values?.[field] ??
+      (typeof entry[field as keyof DictionaryEntry] === "string"
+        ? (entry[field as keyof DictionaryEntry] as string)
+        : "")
+  );
+}
+
+function getDefaultDictionaryAutoSpeakFields(
+  columns: DictionaryColumn[] = DEFAULT_DICTIONARY_COLUMNS
+): DictionaryEntryField[] {
+  return columns
+    .filter((column) => column.kind === "word")
+    .map((column) => column.id);
+}
+
+function getDefaultDictionaryManualSpeakFields(
+  columns: DictionaryColumn[] = DEFAULT_DICTIONARY_COLUMNS
+): DictionaryEntryField[] {
+  return columns.map((column) => column.id);
+}
+
+function normalizeDictionarySpeakFields(
   value: unknown,
-  fallback: DictionaryEntryField[] = DEFAULT_DICTIONARY_AUTO_SPEAK_FIELDS
+  columns: DictionaryColumn[],
+  fallback: DictionaryEntryField[]
 ): DictionaryEntryField[] {
   if (!Array.isArray(value)) {
     return [...fallback];
@@ -315,36 +630,55 @@ export function normalizeDictionaryAutoSpeakFields(
 
   const result: DictionaryEntryField[] = [];
   for (const field of value) {
-    if (!isDictionaryEntryField(field) || result.includes(field)) {
+    if (!isDictionaryEntryField(field, columns) || result.includes(field)) {
       continue;
     }
 
     result.push(field);
   }
 
-  return result;
+  return result.length > 0 ? result : [...fallback];
+}
+
+export function normalizeDictionaryAutoSpeakFields(
+  value: unknown,
+  fallback: DictionaryEntryField[] = DEFAULT_DICTIONARY_AUTO_SPEAK_FIELDS,
+  columns: DictionaryColumn[] = DEFAULT_DICTIONARY_COLUMNS
+): DictionaryEntryField[] {
+  return normalizeDictionarySpeakFields(value, columns, fallback);
 }
 
 export function normalizeDictionaryManualSpeakFields(
   value: unknown,
-  fallback: DictionaryEntryField[] = DEFAULT_DICTIONARY_MANUAL_SPEAK_FIELDS
+  fallback: DictionaryEntryField[] = DEFAULT_DICTIONARY_MANUAL_SPEAK_FIELDS,
+  columns: DictionaryColumn[] = DEFAULT_DICTIONARY_COLUMNS
 ): DictionaryEntryField[] {
-  return normalizeDictionaryAutoSpeakFields(value, fallback);
+  return normalizeDictionarySpeakFields(value, columns, fallback);
 }
 
 export function normalizeMessageDictionaryPayload(
   payload: MessageDictionaryPayload
 ): MessageDictionaryPayload {
+  const columns = normalizeDictionaryColumns(payload.columns, payload.labels);
+  const labels = normalizeDictionaryLabels(payload.labels, columns);
+
   return {
     description: normalizeDictionaryDescription(payload.description),
     tags: dedupeDictionaryList(Array.isArray(payload.tags) ? payload.tags : []),
     promptSide: normalizeDictionaryPromptSide(payload.promptSide),
     shuffle: Boolean(payload.shuffle),
     autoSpeak: Boolean(payload.autoSpeak),
-    autoSpeakFields: normalizeDictionaryAutoSpeakFields(payload.autoSpeakFields),
-    manualSpeakFields: normalizeDictionaryManualSpeakFields(
-      payload.manualSpeakFields
+    autoSpeakFields: normalizeDictionaryAutoSpeakFields(
+      payload.autoSpeakFields,
+      getDefaultDictionaryAutoSpeakFields(columns),
+      columns
     ),
+    manualSpeakFields: normalizeDictionaryManualSpeakFields(
+      payload.manualSpeakFields,
+      getDefaultDictionaryManualSpeakFields(columns),
+      columns
+    ),
+    noteDisplayMode: normalizeDictionaryNoteDisplayMode(payload.noteDisplayMode),
     progressMode: Boolean(payload.progressMode),
     motivateOnCorrect: Boolean(payload.motivateOnCorrect),
     cardMode: Boolean(payload.cardMode),
@@ -355,8 +689,9 @@ export function normalizeMessageDictionaryPayload(
     motivationAutoSeconds: normalizeDictionaryMotivationAutoSeconds(
       payload.motivationAutoSeconds
     ),
-    labels: normalizeDictionaryLabels(payload.labels),
-    entries: normalizeDictionaryEntries(payload.entries),
+    labels,
+    columns,
+    entries: normalizeDictionaryEntries(payload.entries, columns),
   };
 }
 
@@ -408,18 +743,6 @@ export function parseMessageDictionaryContent(
       return null;
     }
 
-    const entries = Array.isArray(parsed.entries)
-      ? parsed.entries
-          .filter(isObjectRecord)
-          .map((entry): DictionaryEntry => ({
-            id: typeof entry.id === "string" ? entry.id : "",
-            side1: typeof entry.side1 === "string" ? entry.side1 : "",
-            side1Note: typeof entry.side1Note === "string" ? entry.side1Note : "",
-            side2: typeof entry.side2 === "string" ? entry.side2 : "",
-            side2Note: typeof entry.side2Note === "string" ? entry.side2Note : "",
-          }))
-      : [];
-
     return normalizeMessageDictionaryPayload({
       description:
         typeof parsed.description === "string" ? parsed.description : "",
@@ -429,10 +752,13 @@ export function parseMessageDictionaryContent(
       promptSide: normalizeDictionaryPromptSide(parsed.promptSide),
       shuffle: Boolean(parsed.shuffle),
       autoSpeak: Boolean(parsed.autoSpeak),
-      autoSpeakFields: normalizeDictionaryAutoSpeakFields(parsed.autoSpeakFields),
-      manualSpeakFields: normalizeDictionaryManualSpeakFields(
-        parsed.manualSpeakFields
-      ),
+      autoSpeakFields: Array.isArray(parsed.autoSpeakFields)
+        ? parsed.autoSpeakFields.filter((field): field is string => typeof field === "string")
+        : [],
+      manualSpeakFields: Array.isArray(parsed.manualSpeakFields)
+        ? parsed.manualSpeakFields.filter((field): field is string => typeof field === "string")
+        : [],
+      noteDisplayMode: normalizeDictionaryNoteDisplayMode(parsed.noteDisplayMode),
       progressMode: Boolean(parsed.progressMode),
       motivateOnCorrect: Boolean(parsed.motivateOnCorrect),
       cardMode: Boolean(parsed.cardMode),
@@ -443,8 +769,9 @@ export function parseMessageDictionaryContent(
       motivationAutoSeconds: normalizeDictionaryMotivationAutoSeconds(
         parsed.motivationAutoSeconds
       ),
-      labels: normalizeDictionaryLabels(parsed.labels),
-      entries,
+      labels: readDictionaryLabels(parsed.labels),
+      columns: normalizeDictionaryColumns(parsed.columns, parsed.labels),
+      entries: Array.isArray(parsed.entries) ? parsed.entries : [],
     });
   } catch {
     return null;
@@ -464,12 +791,14 @@ export function serializeMessageDictionaryContent(
     autoSpeak: normalized.autoSpeak,
     autoSpeakFields: normalized.autoSpeakFields,
     manualSpeakFields: normalized.manualSpeakFields,
+    noteDisplayMode: normalized.noteDisplayMode,
     progressMode: normalized.progressMode,
     motivateOnCorrect: normalized.motivateOnCorrect,
     cardMode: normalized.cardMode,
     adhdMode: normalized.adhdMode,
     motivationAdvanceMode: normalized.motivationAdvanceMode,
     motivationAutoSeconds: normalized.motivationAutoSeconds,
+    columns: normalized.columns,
     labels: normalized.labels,
     entries: normalized.entries,
   });
@@ -488,18 +817,6 @@ export function parseContinuousDictionaryCollection(
       continue;
     }
 
-    const entries = Array.isArray(rawDictionary.entries)
-      ? rawDictionary.entries
-          .filter(isObjectRecord)
-          .map((entry): DictionaryEntry => ({
-            id: typeof entry.id === "string" ? entry.id : "",
-            side1: typeof entry.side1 === "string" ? entry.side1 : "",
-            side1Note: typeof entry.side1Note === "string" ? entry.side1Note : "",
-            side2: typeof entry.side2 === "string" ? entry.side2 : "",
-            side2Note: typeof entry.side2Note === "string" ? entry.side2Note : "",
-          }))
-      : [];
-
     parsedDictionaries.push({
       id: typeof rawDictionary.id === "string" ? rawDictionary.id : "",
       title: typeof rawDictionary.title === "string" ? rawDictionary.title : "",
@@ -513,11 +830,18 @@ export function parseContinuousDictionaryCollection(
       promptSide: normalizeDictionaryPromptSide(rawDictionary.promptSide),
       shuffle: Boolean(rawDictionary.shuffle),
       autoSpeak: Boolean(rawDictionary.autoSpeak),
-      autoSpeakFields: normalizeDictionaryAutoSpeakFields(
-        rawDictionary.autoSpeakFields
-      ),
-      manualSpeakFields: normalizeDictionaryManualSpeakFields(
-        rawDictionary.manualSpeakFields
+      autoSpeakFields: Array.isArray(rawDictionary.autoSpeakFields)
+        ? rawDictionary.autoSpeakFields.filter(
+            (field): field is string => typeof field === "string"
+          )
+        : [],
+      manualSpeakFields: Array.isArray(rawDictionary.manualSpeakFields)
+        ? rawDictionary.manualSpeakFields.filter(
+            (field): field is string => typeof field === "string"
+          )
+        : [],
+      noteDisplayMode: normalizeDictionaryNoteDisplayMode(
+        rawDictionary.noteDisplayMode
       ),
       progressMode: Boolean(rawDictionary.progressMode),
       motivateOnCorrect: Boolean(rawDictionary.motivateOnCorrect),
@@ -529,8 +853,12 @@ export function parseContinuousDictionaryCollection(
       motivationAutoSeconds: normalizeDictionaryMotivationAutoSeconds(
         rawDictionary.motivationAutoSeconds
       ),
-      labels: normalizeDictionaryLabels(rawDictionary.labels),
-      entries,
+      labels: readDictionaryLabels(rawDictionary.labels),
+      columns: normalizeDictionaryColumns(
+        rawDictionary.columns,
+        rawDictionary.labels
+      ),
+      entries: Array.isArray(rawDictionary.entries) ? rawDictionary.entries : [],
     });
   }
 
@@ -566,17 +894,22 @@ export function parseContinuousDictionariesFromContent(
 export function dictionaryPayloadToPlainText(
   payload: MessageDictionaryPayload
 ): string {
+  const normalized = normalizeMessageDictionaryPayload(payload);
   return [
-    payload.description,
-    payload.tags.join(" "),
-    payload.entries
+    normalized.description,
+    normalized.tags.join(" "),
+    normalized.entries
       .map((entry) =>
         [
-          entry.side1,
-          entry.side1Note ? `(${entry.side1Note})` : "",
+          getDictionarySideColumns(normalized.columns, "side1")
+            .map((column) => getDictionaryEntryFieldText(entry, column.id))
+            .filter(Boolean)
+            .join(" / "),
           "-",
-          entry.side2,
-          entry.side2Note ? `(${entry.side2Note})` : "",
+          getDictionarySideColumns(normalized.columns, "side2")
+            .map((column) => getDictionaryEntryFieldText(entry, column.id))
+            .filter(Boolean)
+            .join(" / "),
         ]
           .filter(Boolean)
           .join(" ")
@@ -589,28 +922,32 @@ export function dictionaryPayloadToPlainText(
 
 export function toDictionaryPromptSideLabel(
   side: DictionaryPromptSide,
-  labels: DictionaryFieldLabels = DEFAULT_DICTIONARY_FIELD_LABELS
+  labels: DictionaryFieldLabels = DEFAULT_DICTIONARY_FIELD_LABELS,
+  columns: DictionaryColumn[] = DEFAULT_DICTIONARY_COLUMNS
 ): string {
-  const normalizedLabels = normalizeDictionaryLabels(labels);
-  return side === "side1" ? normalizedLabels.side1 : normalizedLabels.side2;
+  const wordColumn = columns.find(
+    (column) => column.side === side && column.kind === "word"
+  );
+  return wordColumn
+    ? getDictionaryFieldLabel(wordColumn.id, labels, columns)
+    : side === "side1"
+      ? DEFAULT_DICTIONARY_FIELD_LABELS.side1
+      : DEFAULT_DICTIONARY_FIELD_LABELS.side2;
 }
 
 export function toDictionaryNoteSideLabel(
   side: DictionaryPromptSide,
-  labels: DictionaryFieldLabels = DEFAULT_DICTIONARY_FIELD_LABELS
+  labels: DictionaryFieldLabels = DEFAULT_DICTIONARY_FIELD_LABELS,
+  columns: DictionaryColumn[] = DEFAULT_DICTIONARY_COLUMNS
 ): string {
-  const normalizedLabels = normalizeDictionaryLabels(labels);
-  return side === "side1"
-    ? normalizedLabels.side1Note
-    : normalizedLabels.side2Note;
-}
-
-export function getDictionaryFieldLabel(
-  field: DictionaryEntryField,
-  labels: DictionaryFieldLabels = DEFAULT_DICTIONARY_FIELD_LABELS
-): string {
-  const normalizedLabels = normalizeDictionaryLabels(labels);
-  return normalizedLabels[field];
+  const noteColumn = columns.find(
+    (column) => column.side === side && column.kind === "note"
+  );
+  return noteColumn
+    ? getDictionaryFieldLabel(noteColumn.id, labels, columns)
+    : side === "side1"
+      ? DEFAULT_DICTIONARY_FIELD_LABELS.side1Note
+      : DEFAULT_DICTIONARY_FIELD_LABELS.side2Note;
 }
 
 export type DictionarySearchToken = {
