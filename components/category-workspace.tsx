@@ -28,6 +28,14 @@ import {
   CATEGORY_TREE_SCHEMA_VERSION,
   type CategoryTreeDocument,
 } from "@/lib/category-transfer";
+import {
+  DICTIONARY_STUDY_PROGRESS_SCHEMA_VERSION,
+  normalizeDictionaryStudyProgressSource,
+  normalizePersistedDictionaryStudyProgress,
+  type DictionaryStudyProgressSourceIdentity,
+  type DictionaryStudyProgressSettings,
+  type PersistedDictionaryStudyProgress,
+} from "@/lib/dictionary-study-progress-types";
 import { storePdfViewerFile } from "@/lib/pdf-viewer-store";
 import type {
   DictionaryEntryIdentity as SharedDictionaryEntryIdentity,
@@ -36,7 +44,10 @@ import type {
   DictionaryWordGroup,
 } from "@/lib/dictionaries";
 import {
+  applyScheduleAutoplanPreview,
   applyScheduleSpontaneousPreview,
+  addScheduleDays,
+  buildScheduleAutoplanPreview,
   buildScheduleSuggestions,
   buildSpontaneousSchedulePreview,
   createDefaultScheduleBlock,
@@ -46,6 +57,7 @@ import {
   formatScheduleMinutes,
   formatScheduleTimeRange,
   getEventDurationMinutes,
+  getScheduleStats,
   getScheduleDayEvents,
   getScheduleFreeWindows,
   getScheduleGoalProgress,
@@ -58,27 +70,47 @@ import {
   normalizeScheduleEvents,
   normalizeScheduleGoals,
   normalizeSchedulePayload,
+  normalizeScheduleTaskBase,
   normalizeScheduleSettings,
+  normalizeScheduleTimeInput,
   parseMessageScheduleContent,
+  scheduleTaskTemplateToGoal,
   serializeMessageScheduleContent,
   timeToMinutes,
   type ScheduleBlock,
+  type ScheduleAutoplanPreview,
   type ScheduleDayMode,
   type ScheduleEnergyMode,
   type ScheduleEvent,
+  type ScheduleEventEndMode,
   type ScheduleEventType,
-  type ScheduleGoal,
   type ScheduleGoalPeriod,
   type SchedulePayload,
   type SchedulePreviewChange,
   type SchedulePriority,
+  type ScheduleRecurrenceRule,
   type ScheduleRescheduleMode,
   type ScheduleSettings,
   type ScheduleSpontaneousPreview,
   type ScheduleStatus,
   type ScheduleSuggestion,
+  type ScheduleStatsBucket,
+  type ScheduleTaskTemplate,
   type ScheduleViewMode,
+  type ScheduleWeekday,
 } from "@/lib/schedules";
+import RuleEditor, { RuleCard } from "@/components/rule-editor";
+import {
+  createDefaultRuleDocument,
+  createRuleId,
+  dedupeRuleTitle,
+  getRuleBlockText,
+  normalizeRuleDocuments,
+  parseMessageRuleContent,
+  parseRuleDocumentJson,
+  serializeMessageRuleContent,
+  type RuleDocument,
+} from "@/lib/rule-document";
 import { normalizeUserId, validateUserId } from "@/lib/account-user-id";
 import { toErrorMessage } from "@/lib/errors";
 import type {
@@ -370,6 +402,12 @@ type DictionaryGroupSimilarPayload = {
   error?: string;
 };
 
+type DictionaryStudyProgressPayload = {
+  data?: PersistedDictionaryStudyProgress | null;
+  source?: DataSource;
+  error?: string;
+};
+
 type PendingDictionarySearchSource = {
   sourceCategoryId: string;
   sourceMessageId: string | null;
@@ -392,6 +430,14 @@ type ContinuousContentModel = {
   checklists: ChecklistBlock[];
   dictionaries: DictionaryBlock[];
   schedules: ScheduleBlock[];
+  rules: RuleDocument[];
+};
+
+type RuleEditorSource = {
+  source: "continuous" | "block-message";
+  sourceCategoryId: string;
+  sourceMessageId: string | null;
+  ruleId: string;
 };
 
 type MessageChecklistPayload = {
@@ -445,6 +491,7 @@ type DictionaryPromptSide = "side1" | "side2";
 type DictionaryMotivationAdvanceMode = "auto" | "manual";
 type DictionaryColumnKind = "word" | "note";
 type DictionaryNoteDisplayMode = "continuous" | "separate";
+type DictionarySpeechLanguage = string;
 type DictionaryStudyAnswerResult = "correct" | "wrong";
 type DictionaryMotivationDismissAction = "advance" | "clear";
 type DictionaryMotivationShowResult = "shown" | "skipped" | "canceled";
@@ -479,6 +526,7 @@ type DictionaryBlock = {
   autoSpeak: boolean;
   autoSpeakFields: DictionaryEntryField[];
   manualSpeakFields: DictionaryEntryField[];
+  speechLanguage: DictionarySpeechLanguage;
   noteDisplayMode: DictionaryNoteDisplayMode;
   progressMode: boolean;
   motivateOnCorrect: boolean;
@@ -499,6 +547,7 @@ type MessageDictionaryPayload = {
   autoSpeak: boolean;
   autoSpeakFields: DictionaryEntryField[];
   manualSpeakFields: DictionaryEntryField[];
+  speechLanguage: DictionarySpeechLanguage;
   noteDisplayMode: DictionaryNoteDisplayMode;
   progressMode: boolean;
   motivateOnCorrect: boolean;
@@ -512,6 +561,10 @@ type MessageDictionaryPayload = {
 };
 
 type ScheduleEditorSource = "continuous" | "block-message";
+type ScheduleAssistantMode = "slot" | "autoplan";
+type ScheduleStatsTab = "past" | "current" | "future";
+type ScheduleStatsRangeMode = "day" | "week" | "horizon" | "custom";
+type ScheduleRecurrenceDraftMode = "none" | "weekly" | "custom";
 
 type ScheduleSourceRef = {
   source: ScheduleEditorSource;
@@ -521,11 +574,16 @@ type ScheduleSourceRef = {
 };
 
 type ScheduleEventDraft = {
+  taskId: string;
   title: string;
   description: string;
+  location: string;
   date: string;
   start: string;
+  end: string;
+  endMode: ScheduleEventEndMode;
   durationMinutes: string;
+  approximate: boolean;
   type: ScheduleEventType;
   category: string;
   priority: SchedulePriority;
@@ -533,10 +591,12 @@ type ScheduleEventDraft = {
   canMove: boolean;
   canSplit: boolean;
   deadline: string;
-  recurrence: string;
+  recurrenceMode: ScheduleRecurrenceDraftMode;
+  recurrenceWeekdays: ScheduleWeekday[];
 };
 
 type ScheduleAssistantDraft = {
+  assistantMode: ScheduleAssistantMode;
   text: string;
   durationMinutes: string;
   date: string;
@@ -549,6 +609,10 @@ type ScheduleAssistantDraft = {
   canMove: boolean;
   canSplit: boolean;
   category: string;
+  autoplanText: string;
+  autoplanHorizonDays: string;
+  selectedTaskId: string;
+  selectedTaskIds: string[];
 };
 
 type ScheduleSpontaneousDraft = {
@@ -561,13 +625,30 @@ type ScheduleSpontaneousDraft = {
   scope: "today" | "near";
 };
 
-type ScheduleGoalDraft = {
+type ScheduleTaskTemplateDraft = {
   id: string;
   title: string;
+  description: string;
+  details: string;
+  checklistText: string;
   category: string;
-  period: ScheduleGoalPeriod;
-  targetCount: string;
-  targetMinutes: string;
+  type: ScheduleEventType;
+  goalPeriod: ScheduleGoalPeriod;
+  goalCount: string;
+  goalMinutes: string;
+  durationMinutes: string;
+  minDurationMinutes: string;
+  maxDurationMinutes: string;
+  approximateEnd: string;
+  priority: SchedulePriority;
+  isSpontaneous: boolean;
+  allowAutoplan: boolean;
+  canSplit: boolean;
+  preferredTimeOfDay: string;
+  avoidedTimeOfDay: string;
+  sourceGoalId?: string;
+  sourceRoutineId?: string;
+  sourceAutoTaskId?: string;
 };
 
 type ScheduleModalState =
@@ -580,6 +661,7 @@ type ScheduleModalState =
       mode: "assistant";
       draft: ScheduleAssistantDraft;
       suggestions: ScheduleSuggestion[];
+      autoplanPreview: ScheduleAutoplanPreview | null;
       status: string;
     })
   | (ScheduleSourceRef & {
@@ -589,10 +671,27 @@ type ScheduleModalState =
       status: string;
     })
   | (ScheduleSourceRef & {
-      mode: "goals";
-      goalDrafts: ScheduleGoalDraft[];
+      mode: "taskBase";
+      taskDrafts: ScheduleTaskTemplateDraft[];
       settingsDraft: ScheduleSettings;
     });
+
+type ScheduleStatsModalState = ScheduleSourceRef & {
+  tab: ScheduleStatsTab;
+  rangeMode: ScheduleStatsRangeMode;
+  startDate: string;
+  endDate: string;
+};
+
+const SCHEDULE_WEEKDAY_OPTIONS: Array<{ value: ScheduleWeekday; label: string }> = [
+  { value: 1, label: "пн" },
+  { value: 2, label: "вт" },
+  { value: 3, label: "ср" },
+  { value: 4, label: "чт" },
+  { value: 5, label: "пт" },
+  { value: 6, label: "сб" },
+  { value: 7, label: "вс" },
+];
 
 type DictionaryEditorState = {
   source: "continuous" | "block-message";
@@ -607,6 +706,7 @@ type DictionaryEditorState = {
   autoSpeak: boolean;
   autoSpeakFields: DictionaryEntryField[];
   manualSpeakFields: DictionaryEntryField[];
+  speechLanguage: DictionarySpeechLanguage;
   noteDisplayMode: DictionaryNoteDisplayMode;
   progressMode: boolean;
   motivateOnCorrect: boolean;
@@ -617,7 +717,15 @@ type DictionaryEditorState = {
   labels: DictionaryFieldLabels;
   columns: DictionaryColumn[];
   entries: DictionaryEntry[];
+  initialSnapshot: DictionaryEditorSnapshot;
 };
+
+type DictionaryEditorSnapshot = {
+  title: string;
+  payload: MessageDictionaryPayload;
+};
+
+type DictionaryEditorDraft = Omit<DictionaryEditorState, "initialSnapshot">;
 
 type DictionaryStudyState = {
   sourceCategoryId: string;
@@ -633,6 +741,7 @@ type DictionaryStudyState = {
   autoSpeak: boolean;
   autoSpeakFields: DictionaryEntryField[];
   manualSpeakFields: DictionaryEntryField[];
+  speechLanguage: DictionarySpeechLanguage;
   noteDisplayMode: DictionaryNoteDisplayMode;
   progressMode: boolean;
   motivateOnCorrect: boolean;
@@ -658,19 +767,7 @@ type DictionaryStudyState = {
   activeNoteIndexBySide: Record<DictionaryPromptSide, number>;
 };
 
-type DictionaryStudyProgress = {
-  currentIndex: number;
-  isAnswerRevealed: boolean;
-  cardIds: string[];
-  shuffle: boolean;
-  progressMode: boolean;
-  progressStartedAt: number;
-  progressCompletedAt: number | null;
-  correctCount: number;
-  wrongCount: number;
-  answerResultsByEntryId: Record<string, DictionaryStudyAnswerResult>;
-  isProgressComplete: boolean;
-};
+type DictionaryStudyProgress = PersistedDictionaryStudyProgress;
 
 type DictionaryEntryField = string;
 type DictionaryLabelField = string;
@@ -696,6 +793,17 @@ type DictionarySimilarPopupState = {
   results: DictionaryGroupResolvedResult[];
   isLoading: boolean;
   error: string | null;
+};
+
+const DICTIONARY_STUDY_SIMILAR_NEW_GROUP_ID = "__new_dictionary_study_similar_group__";
+
+type DictionaryStudySimilarAddPopupState = {
+  identity: SharedDictionaryEntryIdentity;
+  entry: DictionaryEntry;
+  labels: DictionaryFieldLabels;
+  columns: DictionaryColumn[];
+  currentGroups: DictionaryWordGroup[];
+  availableGroups: DictionaryWordGroup[];
 };
 
 type CategoryFormState = {
@@ -908,6 +1016,8 @@ export default function CategoryWorkspace() {
   const [continuousSchedules, setContinuousSchedules] = useState<ScheduleBlock[]>(
     []
   );
+  const [continuousRules, setContinuousRules] = useState<RuleDocument[]>([]);
+  const [ruleEditor, setRuleEditor] = useState<RuleEditorSource | null>(null);
   const [editorTextScalePercent, setEditorTextScalePercent] = useState(
     DEFAULT_EDITOR_TEXT_SCALE_PERCENT
   );
@@ -936,6 +1046,8 @@ export default function CategoryWorkspace() {
   const [scheduleModal, setScheduleModal] = useState<ScheduleModalState | null>(
     null
   );
+  const [scheduleStatsModal, setScheduleStatsModal] =
+    useState<ScheduleStatsModalState | null>(null);
   const [dictionaryEditorTab, setDictionaryEditorTab] =
     useState<DictionaryEditorTab>("entries");
   const [dictionaryGroupEditor, setDictionaryGroupEditor] =
@@ -944,7 +1056,14 @@ export default function CategoryWorkspace() {
     useState<DictionaryStudyState | null>(null);
   const [dictionarySimilarPopup, setDictionarySimilarPopup] =
     useState<DictionarySimilarPopupState | null>(null);
+  const [dictionaryStudySimilarAddPopup, setDictionaryStudySimilarAddPopup] =
+    useState<DictionaryStudySimilarAddPopupState | null>(null);
   const [dictionaryStudyCardScale, setDictionaryStudyCardScale] = useState(1);
+  const [dictionarySpeechVoices, setDictionarySpeechVoices] = useState<
+    SpeechSynthesisVoice[]
+  >([]);
+  const [dictionarySpeechVoicesLoaded, setDictionarySpeechVoicesLoaded] =
+    useState(false);
   const [dictionaryImportDraft, setDictionaryImportDraft] = useState("");
   const dictionaryImportPreview = useMemo(
     () =>
@@ -1075,6 +1194,7 @@ export default function CategoryWorkspace() {
   const [isSavingPublicAction, setIsSavingPublicAction] = useState(false);
 
   const importFileRef = useRef<HTMLInputElement | null>(null);
+  const ruleImportFileRef = useRef<HTMLInputElement | null>(null);
   const dictionaryImportFileRef = useRef<HTMLInputElement | null>(null);
   const accountAvatarFileRef = useRef<HTMLInputElement | null>(null);
   const motivationImageFileRef = useRef<HTMLInputElement | null>(null);
@@ -1085,6 +1205,10 @@ export default function CategoryWorkspace() {
   const dictionaryStudyWordValueRef = useRef<HTMLDivElement | null>(null);
   const dictionaryStudyNoteSlotRef = useRef<HTMLDivElement | null>(null);
   const dictionaryStudyNoteValueRef = useRef<HTMLDivElement | null>(null);
+  const dictionaryStudyRef = useRef<DictionaryStudyState | null>(null);
+  const dictionarySimilarAbortRef = useRef<AbortController | null>(null);
+  const dictionarySpeechVoicesRef = useRef<SpeechSynthesisVoice[]>([]);
+  const dictionaryMissingSpeechVoiceNoticeRef = useRef<string | null>(null);
   const dictionaryEditorCellRefsRef = useRef<
     Record<string, HTMLTextAreaElement | null>
   >({});
@@ -1775,6 +1899,39 @@ export default function CategoryWorkspace() {
     return map;
   }, [currentCategory, currentMessages]);
 
+  const blockRuleCardsByMessageId = useMemo(() => {
+    const map = new Map<string, RuleDocument>();
+    if (!currentCategory || currentCategory.format !== "block") {
+      return map;
+    }
+    for (const message of currentMessages) {
+      const ruleDocument = parseMessageRuleContent(message.content);
+      if (ruleDocument) {
+        map.set(message.id, ruleDocument);
+      }
+    }
+    return map;
+  }, [currentCategory, currentMessages]);
+
+  const activeRuleDocument = useMemo(() => {
+    if (!ruleEditor) {
+      return null;
+    }
+    if (ruleEditor.source === "block-message") {
+      const message = (messagesByCategory[ruleEditor.sourceCategoryId] ?? []).find(
+        (item) => item.id === ruleEditor.sourceMessageId
+      );
+      return parseMessageRuleContent(message?.content) ?? null;
+    }
+    const sourceRules =
+      currentCategory?.id === ruleEditor.sourceCategoryId
+        ? continuousRules
+        : parseContinuousContent(
+            categories.find((category) => category.id === ruleEditor.sourceCategoryId)?.content ?? ""
+          ).rules;
+    return sourceRules.find((item) => item.id === ruleEditor.ruleId) ?? null;
+  }, [categories, continuousRules, currentCategory?.id, messagesByCategory, ruleEditor]);
+
   const checklistParticipation = useMemo(() => {
     if (!currentCategory) {
       return [] as ChecklistParticipationEntry[];
@@ -1864,7 +2021,9 @@ export default function CategoryWorkspace() {
       return [] as DictionaryEditorSearchMatch[];
     }
 
-    const compiledQuery = compileDictionarySearchQuery(query);
+    const compiledQuery = compileDictionarySearchQuery(query, {
+      minSignificantLength: DICTIONARY_EDITOR_SEARCH_MIN_SIGNIFICANT_LENGTH,
+    });
     if (!compiledQuery) {
       return [] as DictionaryEditorSearchMatch[];
     }
@@ -2035,6 +2194,8 @@ export default function CategoryWorkspace() {
     setContinuousChecklists([]);
     setContinuousDictionaries([]);
     setContinuousSchedules([]);
+    setContinuousRules([]);
+    setRuleEditor(null);
     setScheduleModal(null);
     setActiveRichEditor(null);
     setRichToolbarState({
@@ -2055,7 +2216,10 @@ export default function CategoryWorkspace() {
     setDictionaryEditor(null);
     setDictionaryGroupEditor(null);
     setDictionaryStudy(null);
+    dictionarySimilarAbortRef.current?.abort();
+    dictionarySimilarAbortRef.current = null;
     setDictionarySimilarPopup(null);
+    setDictionaryStudySimilarAddPopup(null);
     setChecklistTagSearchQuery("");
     setSource("unknown");
     setLoadError(null);
@@ -2934,6 +3098,47 @@ export default function CategoryWorkspace() {
   }, [currentCategoryId]);
 
   useEffect(() => {
+    dictionaryStudyRef.current = dictionaryStudy;
+  }, [dictionaryStudy]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      dictionarySpeechVoicesRef.current = [];
+      setDictionarySpeechVoices([]);
+      setDictionarySpeechVoicesLoaded(true);
+      return;
+    }
+
+    let isMounted = true;
+    const syncVoices = (markLoaded: boolean) => {
+      const voices = window.speechSynthesis.getVoices();
+      dictionarySpeechVoicesRef.current = voices;
+      if (!isMounted) {
+        return;
+      }
+
+      setDictionarySpeechVoices(voices);
+      setDictionarySpeechVoicesLoaded(markLoaded || voices.length > 0);
+    };
+    const handleVoicesChanged = () => syncVoices(true);
+    syncVoices(false);
+    window.speechSynthesis.addEventListener(
+      "voiceschanged",
+      handleVoicesChanged
+    );
+    const fallbackTimer = window.setTimeout(() => syncVoices(true), 900);
+
+    return () => {
+      isMounted = false;
+      window.clearTimeout(fallbackTimer);
+      window.speechSynthesis.removeEventListener(
+        "voiceschanged",
+        handleVoicesChanged
+      );
+    };
+  }, []);
+
+  useEffect(() => {
     selectedFriendInboxIdRef.current = selectedFriendInboxId;
   }, [selectedFriendInboxId]);
 
@@ -3303,6 +3508,7 @@ export default function CategoryWorkspace() {
       setContinuousChecklists([]);
       setContinuousDictionaries([]);
       setContinuousSchedules([]);
+      setContinuousRules([]);
       return;
     }
 
@@ -3316,6 +3522,7 @@ export default function CategoryWorkspace() {
     setContinuousChecklists(parsedContinuous.checklists);
     setContinuousDictionaries(parsedContinuous.dictionaries);
     setContinuousSchedules(parsedContinuous.schedules);
+    setContinuousRules(parsedContinuous.rules);
   }, [currentCategory]);
 
   useEffect(() => {
@@ -3354,7 +3561,16 @@ export default function CategoryWorkspace() {
       if (!dictionary) {
         return;
       }
-      setDictionaryEditor({
+      const studySettings = resolveDictionaryStudySettingsForLocalProgress(
+        {
+          sourceCategoryId: currentCategory.id,
+          sourceMessageId: null,
+          dictionaryId: dictionary.id,
+          title: dictionary.title,
+        },
+        dictionary
+      );
+      setDictionaryEditor(makeDictionaryEditorState({
         source: "continuous",
         sourceCategoryId: currentCategory.id,
         sourceMessageId: null,
@@ -3362,30 +3578,23 @@ export default function CategoryWorkspace() {
         titleDraft: dictionary.title,
         descriptionDraft: dictionary.description,
         tagsDraft: serializeDictionaryTags(dictionary.tags),
-        promptSide: dictionary.promptSide,
-        shuffle: dictionary.shuffle,
-        autoSpeak: dictionary.autoSpeak,
-        autoSpeakFields: normalizeDictionaryAutoSpeakFields(
-          dictionary.autoSpeakFields,
-          getDefaultDictionaryAutoSpeakFields(dictionary.columns),
-          dictionary.columns
-        ),
-        manualSpeakFields: normalizeDictionaryManualSpeakFields(
-          dictionary.manualSpeakFields,
-          getDefaultDictionaryManualSpeakFields(dictionary.columns),
-          dictionary.columns
-        ),
-        noteDisplayMode: dictionary.noteDisplayMode,
-        progressMode: dictionary.progressMode,
-        motivateOnCorrect: dictionary.motivateOnCorrect,
-        cardMode: dictionary.cardMode,
-        adhdMode: dictionary.adhdMode,
-        motivationAdvanceMode: dictionary.motivationAdvanceMode,
-        motivationAutoSeconds: dictionary.motivationAutoSeconds,
+        promptSide: studySettings.promptSide,
+        shuffle: studySettings.shuffle,
+        autoSpeak: studySettings.autoSpeak,
+        autoSpeakFields: studySettings.autoSpeakFields,
+        manualSpeakFields: studySettings.manualSpeakFields,
+        speechLanguage: studySettings.speechLanguage,
+        noteDisplayMode: studySettings.noteDisplayMode,
+        progressMode: studySettings.progressMode,
+        motivateOnCorrect: studySettings.motivateOnCorrect,
+        cardMode: studySettings.cardMode,
+        adhdMode: studySettings.adhdMode,
+        motivationAdvanceMode: studySettings.motivationAdvanceMode,
+        motivationAutoSeconds: studySettings.motivationAutoSeconds,
         labels: normalizeDictionaryLabels(dictionary.labels, dictionary.columns),
         columns: dictionary.columns,
         entries: makeDictionaryEditorEntries(dictionary),
-      });
+      }));
       return;
     }
 
@@ -3420,7 +3629,16 @@ export default function CategoryWorkspace() {
     setDictionaryMobileSearchOpen(false);
     setDictionaryEditorTab("entries");
     setSelectedMessageId(message.id);
-    setDictionaryEditor({
+    const studySettings = resolveDictionaryStudySettingsForLocalProgress(
+      {
+        sourceCategoryId: pending.sourceCategoryId,
+        sourceMessageId: message.id,
+        dictionaryId: null,
+        title: message.title,
+      },
+      payload
+    );
+    setDictionaryEditor(makeDictionaryEditorState({
       source: "block-message",
       sourceCategoryId: pending.sourceCategoryId,
       sourceMessageId: message.id,
@@ -3428,30 +3646,23 @@ export default function CategoryWorkspace() {
       titleDraft: message.title,
       descriptionDraft: payload.description,
       tagsDraft: serializeDictionaryTags(payload.tags),
-      promptSide: payload.promptSide,
-      shuffle: payload.shuffle,
-      autoSpeak: payload.autoSpeak,
-      autoSpeakFields: normalizeDictionaryAutoSpeakFields(
-        payload.autoSpeakFields,
-        getDefaultDictionaryAutoSpeakFields(payload.columns),
-        payload.columns
-      ),
-      manualSpeakFields: normalizeDictionaryManualSpeakFields(
-        payload.manualSpeakFields,
-        getDefaultDictionaryManualSpeakFields(payload.columns),
-        payload.columns
-      ),
-      noteDisplayMode: payload.noteDisplayMode,
-      progressMode: payload.progressMode,
-      motivateOnCorrect: payload.motivateOnCorrect,
-      cardMode: payload.cardMode,
-      adhdMode: payload.adhdMode,
-      motivationAdvanceMode: payload.motivationAdvanceMode,
-      motivationAutoSeconds: payload.motivationAutoSeconds,
+      promptSide: studySettings.promptSide,
+      shuffle: studySettings.shuffle,
+      autoSpeak: studySettings.autoSpeak,
+      autoSpeakFields: studySettings.autoSpeakFields,
+      manualSpeakFields: studySettings.manualSpeakFields,
+      speechLanguage: studySettings.speechLanguage,
+      noteDisplayMode: studySettings.noteDisplayMode,
+      progressMode: studySettings.progressMode,
+      motivateOnCorrect: studySettings.motivateOnCorrect,
+      cardMode: studySettings.cardMode,
+      adhdMode: studySettings.adhdMode,
+      motivationAdvanceMode: studySettings.motivationAdvanceMode,
+      motivationAutoSeconds: studySettings.motivationAutoSeconds,
       labels: normalizeDictionaryLabels(payload.labels, payload.columns),
       columns: payload.columns,
       entries: makeDictionaryEditorEntries(payload),
-    });
+    }));
   }, [currentCategory, continuousDictionaries, messagesByCategory, pushNotice]);
 
   useEffect(() => {
@@ -4013,6 +4224,7 @@ export default function CategoryWorkspace() {
         setChecklistEditor(null);
         setDictionaryEditor(null);
         setDictionaryStudy(null);
+        setRuleEditor(null);
         setChecklistTagSearchQuery("");
         setMenuPanel("main");
       }
@@ -4744,6 +4956,7 @@ export default function CategoryWorkspace() {
           checklists: currentDocument?.checklists ?? [],
           dictionaries: currentDocument?.dictionaries ?? [],
           schedules: currentDocument?.schedules ?? [],
+          rules: currentDocument?.rules ?? [],
         });
 
         if (entry.snapshot.currentCategoryId === entry.categoryId) {
@@ -4773,6 +4986,7 @@ export default function CategoryWorkspace() {
           checklists: currentDocument?.checklists ?? [],
           dictionaries: currentDocument?.dictionaries ?? [],
           schedules: currentDocument?.schedules ?? [],
+          rules: currentDocument?.rules ?? [],
         });
       }
     } else if (payload.categoryId) {
@@ -9151,7 +9365,7 @@ export default function CategoryWorkspace() {
     rawContent: string,
     version: number
   ) {
-    const content = sanitizeRichTextHtml(rawContent);
+    const content = normalizePersistedMessageContent(rawContent);
     const ackVersion = messageAckVersionRef.current[messageId] ?? 0;
     if (savedMessageContentRef.current[messageId] === content && version <= ackVersion) {
       delete pendingMessageSaveRef.current[messageId];
@@ -9415,6 +9629,7 @@ export default function CategoryWorkspace() {
         checklists: normalizeChecklistBlocks(continuousChecklists),
         dictionaries: normalizeDictionaryBlocks(continuousDictionaries),
         schedules: normalizeScheduleBlocks(continuousSchedules),
+        rules: normalizeRuleDocuments(continuousRules),
       };
     }
 
@@ -9435,6 +9650,7 @@ export default function CategoryWorkspace() {
       checklists: normalizeChecklistBlocks(document.checklists),
       dictionaries: normalizeDictionaryBlocks(document.dictionaries),
       schedules: normalizeScheduleBlocks(document.schedules),
+      rules: normalizeRuleDocuments(document.rules),
     };
     const serialized = serializeContinuousContent(nextDocument);
 
@@ -9444,6 +9660,7 @@ export default function CategoryWorkspace() {
         setContinuousChecklists(nextDocument.checklists);
         setContinuousDictionaries(nextDocument.dictionaries);
         setContinuousSchedules(nextDocument.schedules);
+        setContinuousRules(nextDocument.rules);
       }
       return false;
     }
@@ -9456,6 +9673,7 @@ export default function CategoryWorkspace() {
       setContinuousChecklists(nextDocument.checklists);
       setContinuousDictionaries(nextDocument.dictionaries);
       setContinuousSchedules(nextDocument.schedules);
+      setContinuousRules(nextDocument.rules);
     }
 
     setCategories((prev) =>
@@ -9499,6 +9717,7 @@ export default function CategoryWorkspace() {
         checklists: nextDocument?.checklists ?? [],
         dictionaries: nextDocument?.dictionaries ?? [],
         schedules: nextDocument?.schedules ?? [],
+        rules: nextDocument?.rules ?? [],
       },
       nextVersion
     );
@@ -9533,6 +9752,7 @@ export default function CategoryWorkspace() {
 
     setDictionaryEditor(null);
     setDictionaryStudy(null);
+    setRuleEditor(null);
     setScheduleModal(null);
     setChecklistTagSearchQuery("");
     setChecklistEditor({
@@ -9853,6 +10073,7 @@ export default function CategoryWorkspace() {
         checklists: nextChecklists,
         dictionaries: sourceDocument.dictionaries,
         schedules: sourceDocument.schedules,
+        rules: sourceDocument.rules,
       });
       pushNotice("#Checklist обновлен.");
       closeChecklistEditor();
@@ -9873,6 +10094,7 @@ export default function CategoryWorkspace() {
       checklists: [...sourceDocument.checklists, createdChecklist],
       dictionaries: sourceDocument.dictionaries,
       schedules: sourceDocument.schedules,
+      rules: sourceDocument.rules,
     });
     pushNotice("#Checklist добавлен.");
     closeChecklistEditor();
@@ -9950,6 +10172,7 @@ export default function CategoryWorkspace() {
       checklists: nextChecklists,
       dictionaries: sourceDocument.dictionaries,
       schedules: sourceDocument.schedules,
+      rules: sourceDocument.rules,
     });
     pushNotice("#Checklist удален.");
     closeChecklistEditor();
@@ -9969,7 +10192,7 @@ export default function CategoryWorkspace() {
     setDictionaryImportDraft("");
     resetDictionaryEditorSearch();
     setDictionaryEditorTab("entries");
-    setDictionaryEditor({
+    setDictionaryEditor(makeDictionaryEditorState({
       source: currentCategory.format === "block" ? "block-message" : "continuous",
       sourceCategoryId: currentCategory.id,
       sourceMessageId: null,
@@ -9982,6 +10205,7 @@ export default function CategoryWorkspace() {
       autoSpeak: false,
       autoSpeakFields: getDefaultDictionaryAutoSpeakFields(columns),
       manualSpeakFields: getDefaultDictionaryManualSpeakFields(columns),
+      speechLanguage: DEFAULT_DICTIONARY_SPEECH_LANGUAGE,
       noteDisplayMode: DEFAULT_DICTIONARY_NOTE_DISPLAY_MODE,
       progressMode: false,
       motivateOnCorrect: false,
@@ -9992,7 +10216,7 @@ export default function CategoryWorkspace() {
       labels: createDefaultDictionaryLabels(columns),
       columns,
       entries: [createEmptyDictionaryEntry(columns)],
-    });
+    }));
   }
 
   function openDictionaryEditorForBlockMessage(
@@ -10010,7 +10234,16 @@ export default function CategoryWorkspace() {
     setDictionaryImportDraft("");
     resetDictionaryEditorSearch();
     setDictionaryEditorTab("entries");
-    setDictionaryEditor({
+    const studySettings = resolveDictionaryStudySettingsForLocalProgress(
+      {
+        sourceCategoryId: currentCategory.id,
+        sourceMessageId: message.id,
+        dictionaryId: null,
+        title: message.title,
+      },
+      payload
+    );
+    setDictionaryEditor(makeDictionaryEditorState({
       source: "block-message",
       sourceCategoryId: currentCategory.id,
       sourceMessageId: message.id,
@@ -10018,30 +10251,23 @@ export default function CategoryWorkspace() {
       titleDraft: message.title,
       descriptionDraft: payload.description,
       tagsDraft: serializeDictionaryTags(payload.tags),
-      promptSide: payload.promptSide,
-      shuffle: payload.shuffle,
-      autoSpeak: payload.autoSpeak,
-      autoSpeakFields: normalizeDictionaryAutoSpeakFields(
-        payload.autoSpeakFields,
-        getDefaultDictionaryAutoSpeakFields(payload.columns),
-        payload.columns
-      ),
-      manualSpeakFields: normalizeDictionaryManualSpeakFields(
-        payload.manualSpeakFields,
-        getDefaultDictionaryManualSpeakFields(payload.columns),
-        payload.columns
-      ),
-      noteDisplayMode: payload.noteDisplayMode,
-      progressMode: payload.progressMode,
-      motivateOnCorrect: payload.motivateOnCorrect,
-      cardMode: payload.cardMode,
-      adhdMode: payload.adhdMode,
-      motivationAdvanceMode: payload.motivationAdvanceMode,
-      motivationAutoSeconds: payload.motivationAutoSeconds,
+      promptSide: studySettings.promptSide,
+      shuffle: studySettings.shuffle,
+      autoSpeak: studySettings.autoSpeak,
+      autoSpeakFields: studySettings.autoSpeakFields,
+      manualSpeakFields: studySettings.manualSpeakFields,
+      speechLanguage: studySettings.speechLanguage,
+      noteDisplayMode: studySettings.noteDisplayMode,
+      progressMode: studySettings.progressMode,
+      motivateOnCorrect: studySettings.motivateOnCorrect,
+      cardMode: studySettings.cardMode,
+      adhdMode: studySettings.adhdMode,
+      motivationAdvanceMode: studySettings.motivationAdvanceMode,
+      motivationAutoSeconds: studySettings.motivationAutoSeconds,
       labels: normalizeDictionaryLabels(payload.labels, payload.columns),
       columns: payload.columns,
       entries: makeDictionaryEditorEntries(payload),
-    });
+    }));
   }
 
   function openDictionaryEditorForContinuousDictionary(dictionaryId: string) {
@@ -10060,7 +10286,16 @@ export default function CategoryWorkspace() {
     setDictionaryImportDraft("");
     resetDictionaryEditorSearch();
     setDictionaryEditorTab("entries");
-    setDictionaryEditor({
+    const studySettings = resolveDictionaryStudySettingsForLocalProgress(
+      {
+        sourceCategoryId: currentCategory.id,
+        sourceMessageId: null,
+        dictionaryId: dictionary.id,
+        title: dictionary.title,
+      },
+      dictionary
+    );
+    setDictionaryEditor(makeDictionaryEditorState({
       source: "continuous",
       sourceCategoryId: currentCategory.id,
       sourceMessageId: null,
@@ -10068,30 +10303,23 @@ export default function CategoryWorkspace() {
       titleDraft: dictionary.title,
       descriptionDraft: dictionary.description,
       tagsDraft: serializeDictionaryTags(dictionary.tags),
-      promptSide: dictionary.promptSide,
-      shuffle: dictionary.shuffle,
-      autoSpeak: dictionary.autoSpeak,
-      autoSpeakFields: normalizeDictionaryAutoSpeakFields(
-        dictionary.autoSpeakFields,
-        getDefaultDictionaryAutoSpeakFields(dictionary.columns),
-        dictionary.columns
-      ),
-      manualSpeakFields: normalizeDictionaryManualSpeakFields(
-        dictionary.manualSpeakFields,
-        getDefaultDictionaryManualSpeakFields(dictionary.columns),
-        dictionary.columns
-      ),
-      noteDisplayMode: dictionary.noteDisplayMode,
-      progressMode: dictionary.progressMode,
-      motivateOnCorrect: dictionary.motivateOnCorrect,
-      cardMode: dictionary.cardMode,
-      adhdMode: dictionary.adhdMode,
-      motivationAdvanceMode: dictionary.motivationAdvanceMode,
-      motivationAutoSeconds: dictionary.motivationAutoSeconds,
+      promptSide: studySettings.promptSide,
+      shuffle: studySettings.shuffle,
+      autoSpeak: studySettings.autoSpeak,
+      autoSpeakFields: studySettings.autoSpeakFields,
+      manualSpeakFields: studySettings.manualSpeakFields,
+      speechLanguage: studySettings.speechLanguage,
+      noteDisplayMode: studySettings.noteDisplayMode,
+      progressMode: studySettings.progressMode,
+      motivateOnCorrect: studySettings.motivateOnCorrect,
+      cardMode: studySettings.cardMode,
+      adhdMode: studySettings.adhdMode,
+      motivationAdvanceMode: studySettings.motivationAdvanceMode,
+      motivationAutoSeconds: studySettings.motivationAutoSeconds,
       labels: normalizeDictionaryLabels(dictionary.labels, dictionary.columns),
       columns: dictionary.columns,
       entries: makeDictionaryEditorEntries(dictionary),
-    });
+    }));
   }
 
   function moveContinuousDictionary(dictionaryId: string, offset: number) {
@@ -10129,6 +10357,7 @@ export default function CategoryWorkspace() {
       checklists: sourceDocument.checklists,
       dictionaries: nextDictionaries,
       schedules: sourceDocument.schedules,
+      rules: sourceDocument.rules,
     });
   }
 
@@ -10189,6 +10418,7 @@ export default function CategoryWorkspace() {
       checklists: sourceDocument.checklists,
       dictionaries: nextDictionaries,
       schedules: sourceDocument.schedules,
+      rules: sourceDocument.rules,
     });
     setDragDictionaryId(null);
   }
@@ -10200,8 +10430,97 @@ export default function CategoryWorkspace() {
     setDictionaryEditor(null);
   }
 
+  async function requestCloseDictionaryEditor() {
+    if (!dictionaryEditor) {
+      closeDictionaryEditor();
+      return;
+    }
+
+    if (!isDictionaryEditorDirty(dictionaryEditor, dictionaryImportDraft)) {
+      closeDictionaryEditor();
+      return;
+    }
+
+    const confirmed = await requestConfirmation({
+      title: "Закрыть #DICT",
+      message:
+        "В настройках #DICT есть несохраненные изменения. Закрыть окно и потерять их?",
+      confirmLabel: "закрыть",
+      cancelLabel: "остаться",
+      tone: "danger",
+    });
+    if (!confirmed) {
+      return;
+    }
+
+    closeDictionaryEditor();
+  }
+
   function closeScheduleModal() {
     setScheduleModal(null);
+  }
+
+  function closeScheduleStatsModal() {
+    setScheduleStatsModal(null);
+  }
+
+  function resolveScheduleStatsRange(
+    payload: SchedulePayload,
+    rangeMode: ScheduleStatsRangeMode,
+    startDate: string,
+    endDate: string
+  ): { startDate: string; endDate: string } {
+    const normalizedStart = startDate || payload.selectedDate;
+    if (rangeMode === "week") {
+      const weekDates = getScheduleWeekDates(normalizedStart);
+      return {
+        startDate: weekDates[0] ?? normalizedStart,
+        endDate: weekDates[weekDates.length - 1] ?? normalizedStart,
+      };
+    }
+    if (rangeMode === "horizon") {
+      const horizonDays =
+        normalizeScheduleSettings(payload.settings).autoplanHorizonDays ?? 7;
+      return {
+        startDate: normalizedStart,
+        endDate: addScheduleDays(normalizedStart, horizonDays - 1),
+      };
+    }
+    if (rangeMode === "custom") {
+      return {
+        startDate: normalizedStart,
+        endDate: endDate || normalizedStart,
+      };
+    }
+    return { startDate: normalizedStart, endDate: normalizedStart };
+  }
+
+  function updateScheduleStatsRange(
+    rangeMode: ScheduleStatsRangeMode,
+    startDate?: string,
+    endDate?: string
+  ) {
+    setScheduleStatsModal((prev) => {
+      if (!prev) {
+        return prev;
+      }
+      const payload = getSchedulePayloadForSource(prev);
+      if (!payload) {
+        return prev;
+      }
+      const range = resolveScheduleStatsRange(
+        payload,
+        rangeMode,
+        startDate ?? prev.startDate,
+        endDate ?? prev.endDate
+      );
+      return {
+        ...prev,
+        rangeMode,
+        startDate: range.startDate,
+        endDate: range.endDate,
+      };
+    });
   }
 
   function getSchedulePayloadForSource(ref: ScheduleSourceRef): SchedulePayload | null {
@@ -10267,6 +10586,7 @@ export default function CategoryWorkspace() {
         checklists: sourceDocument.checklists,
         dictionaries: sourceDocument.dictionaries,
         schedules: nextSchedules,
+        rules: sourceDocument.rules,
       });
       return true;
     }
@@ -10326,6 +10646,156 @@ export default function CategoryWorkspace() {
     }));
   }
 
+  function getScheduleWeekdayForDraftDate(date: string): ScheduleWeekday {
+    const parsed = new Date(`${date}T00:00:00`);
+    const day = Number.isNaN(parsed.getTime()) ? 1 : parsed.getDay();
+    return (day === 0 ? 7 : day) as ScheduleWeekday;
+  }
+
+  function getScheduleRecurrenceDraft(
+    event: ScheduleEvent | null,
+    date: string
+  ): Pick<ScheduleEventDraft, "recurrenceMode" | "recurrenceWeekdays"> {
+    if (event?.recurrenceRule?.mode === "weekly") {
+      return { recurrenceMode: "weekly", recurrenceWeekdays: [] };
+    }
+
+    if (event?.recurrenceRule?.mode === "custom") {
+      return {
+        recurrenceMode: "custom",
+        recurrenceWeekdays: event.recurrenceRule.weekdays,
+      };
+    }
+
+    return {
+      recurrenceMode: "none",
+      recurrenceWeekdays: [getScheduleWeekdayForDraftDate(date)],
+    };
+  }
+
+  function scheduleRecurrenceRuleFromDraft(
+    draft: ScheduleEventDraft
+  ): ScheduleRecurrenceRule | undefined {
+    if (draft.recurrenceMode === "weekly") {
+      return { mode: "weekly", anchorDate: draft.date };
+    }
+
+    if (draft.recurrenceMode === "custom") {
+      const weekdays = draft.recurrenceWeekdays.length
+        ? draft.recurrenceWeekdays
+        : [getScheduleWeekdayForDraftDate(draft.date)];
+      return { mode: "custom", anchorDate: draft.date, weekdays };
+    }
+
+    return undefined;
+  }
+
+  function getDurationFromDraftRange(start: string, end: string): string | null {
+    const normalizedStart = normalizeScheduleTimeInput(start);
+    const normalizedEnd = normalizeScheduleTimeInput(end);
+    if (!normalizedStart || !normalizedEnd) {
+      return null;
+    }
+
+    const startMinutes = timeToMinutes(normalizedStart);
+    let endMinutes = timeToMinutes(normalizedEnd);
+    if (endMinutes <= startMinutes) {
+      endMinutes += 24 * 60;
+    }
+    return String(endMinutes - startMinutes);
+  }
+
+  function getEndFromDraftDuration(start: string, durationMinutes: string): string | null {
+    const normalizedStart = normalizeScheduleTimeInput(start);
+    const duration = Number(durationMinutes);
+    if (!normalizedStart || !Number.isFinite(duration) || duration <= 0) {
+      return null;
+    }
+
+    return minutesToTime(timeToMinutes(normalizedStart) + duration);
+  }
+
+  function reconcileScheduleEventDraftTime(
+    draft: ScheduleEventDraft,
+    changedField: "start" | "end" | "duration" | "endMode"
+  ): ScheduleEventDraft {
+    if (draft.endMode === "until-morning") {
+      return { ...draft, end: "" };
+    }
+
+    const rangeDuration = getDurationFromDraftRange(draft.start, draft.end);
+    if ((changedField === "start" || changedField === "end") && rangeDuration) {
+      return { ...draft, durationMinutes: rangeDuration };
+    }
+
+    if (changedField === "start" || changedField === "duration") {
+      const derivedEnd = getEndFromDraftDuration(draft.start, draft.durationMinutes);
+      if (derivedEnd) {
+        return { ...draft, end: derivedEnd };
+      }
+    }
+
+    return draft;
+  }
+
+  function updateScheduleEventDraft(
+    patch: Partial<ScheduleEventDraft>,
+    changedField?: "start" | "end" | "duration" | "endMode"
+  ) {
+    setScheduleModal((prev) =>
+      prev?.mode === "event"
+        ? {
+            ...prev,
+            draft: changedField
+              ? reconcileScheduleEventDraftTime(
+                  { ...prev.draft, ...patch },
+                  changedField
+                )
+              : { ...prev.draft, ...patch },
+          }
+        : prev
+    );
+  }
+
+  function updateScheduleEventRecurrenceMode(mode: ScheduleRecurrenceDraftMode) {
+    setScheduleModal((prev) => {
+      if (prev?.mode !== "event") {
+        return prev;
+      }
+
+      return {
+        ...prev,
+        draft: {
+          ...prev.draft,
+          recurrenceMode: mode,
+          recurrenceWeekdays:
+            mode === "custom" && prev.draft.recurrenceWeekdays.length === 0
+              ? [getScheduleWeekdayForDraftDate(prev.draft.date)]
+              : prev.draft.recurrenceWeekdays,
+        },
+      };
+    });
+  }
+
+  function toggleScheduleEventRecurrenceWeekday(weekday: ScheduleWeekday) {
+    setScheduleModal((prev) => {
+      if (prev?.mode !== "event") {
+        return prev;
+      }
+
+      const nextWeekdays = prev.draft.recurrenceWeekdays.includes(weekday)
+        ? prev.draft.recurrenceWeekdays.filter((candidate) => candidate !== weekday)
+        : [...prev.draft.recurrenceWeekdays, weekday].sort((left, right) => left - right);
+      return {
+        ...prev,
+        draft: {
+          ...prev.draft,
+          recurrenceWeekdays: nextWeekdays,
+        },
+      };
+    });
+  }
+
   async function deleteScheduleBlock(ref: ScheduleSourceRef) {
     const confirmed = await requestConfirmation({
       title: "Удалить расписание",
@@ -10356,6 +10826,7 @@ export default function CategoryWorkspace() {
         schedules: sourceDocument.schedules.filter(
           (schedule) => schedule.id !== ref.scheduleId
         ),
+        rules: sourceDocument.rules,
       });
       pushNotice("Расписание удалено.");
       return;
@@ -10394,52 +10865,95 @@ export default function CategoryWorkspace() {
     payload: SchedulePayload,
     event: ScheduleEvent | null = null
   ): ScheduleEventDraft {
+    const selectedTask =
+      event?.taskId
+        ? payload.taskBase?.find((task) => task.id === event.taskId)
+        : payload.taskBase?.[0];
+    const fallbackDuration =
+      selectedTask?.durationMinutes ??
+      (selectedTask?.minDurationMinutes && selectedTask.maxDurationMinutes
+        ? Math.round((selectedTask.minDurationMinutes + selectedTask.maxDurationMinutes) / 2)
+        : selectedTask?.goalMinutes ?? 60);
+    const draftDate = event?.date ?? payload.selectedDate;
+    const recurrenceDraft = getScheduleRecurrenceDraft(event, draftDate);
     return {
+      taskId: event?.taskId ?? selectedTask?.id ?? "",
       title: event?.title ?? "",
       description: event?.description ?? "",
-      date: event?.date ?? payload.selectedDate,
+      location: event?.location ?? "",
+      date: draftDate,
       start: event?.start ?? "",
-      durationMinutes: String(event ? getEventDurationMinutes(event) : 60),
-      type: event?.type ?? "flexible",
-      category: event?.category ?? "",
-      priority: event?.priority ?? "medium",
+      end: event?.end ?? selectedTask?.approximateEnd ?? "",
+      endMode: event?.endMode ?? "time",
+      durationMinutes: String(event ? getEventDurationMinutes(event, payload) : fallbackDuration),
+      approximate: event?.approximate ?? Boolean(selectedTask?.minDurationMinutes || selectedTask?.maxDurationMinutes),
+      type: event?.type ?? selectedTask?.type ?? "flexible",
+      category: event?.category ?? selectedTask?.category ?? "",
+      priority: event?.priority ?? selectedTask?.priority ?? "medium",
       status: event?.status ?? "planned",
-      canMove: event?.canMove ?? true,
-      canSplit: event?.canSplit ?? false,
+      canMove: event?.canMove ?? selectedTask?.type !== "fixed",
+      canSplit: event?.canSplit ?? selectedTask?.canSplit ?? false,
       deadline: event?.deadline ?? "",
-      recurrence: event?.recurrence ?? "",
+      ...recurrenceDraft,
     };
   }
 
   function scheduleEventFromDraft(
     draft: ScheduleEventDraft,
-    eventId: string | null
+    eventId: string | null,
+    payload: SchedulePayload
   ): ScheduleEvent {
-    const durationMinutes = draft.durationMinutes.trim()
+    const task = payload.taskBase?.find((candidate) => candidate.id === draft.taskId);
+    const start = normalizeScheduleTimeInput(draft.start);
+    const explicitEnd =
+      draft.endMode === "time" ? normalizeScheduleTimeInput(draft.end) : undefined;
+    const fallbackDuration =
+      task?.durationMinutes ??
+      (task?.minDurationMinutes && task.maxDurationMinutes
+        ? Math.round((task.minDurationMinutes + task.maxDurationMinutes) / 2)
+        : task?.goalMinutes ?? 60);
+    const explicitDuration =
+      start && explicitEnd
+        ? timeToMinutes(explicitEnd) <= timeToMinutes(start)
+          ? timeToMinutes(explicitEnd) + 24 * 60 - timeToMinutes(start)
+          : timeToMinutes(explicitEnd) - timeToMinutes(start)
+        : undefined;
+    const durationMinutes = explicitDuration ?? (draft.durationMinutes.trim()
       ? Number(draft.durationMinutes)
-      : 60;
-    const start = draft.start || undefined;
+      : fallbackDuration);
     const end =
-      start && Number.isFinite(durationMinutes)
+      draft.endMode === "until-morning"
+        ? undefined
+        : explicitEnd ??
+      (start && Number.isFinite(durationMinutes)
         ? minutesToTime(timeToMinutes(start) + durationMinutes)
+        : undefined);
+    const endDate =
+      start && end && timeToMinutes(end) <= timeToMinutes(start)
+        ? addScheduleDays(draft.date, 1)
         : undefined;
 
     return normalizeScheduleEvent({
       id: eventId ?? createScheduleId("event"),
-      title: draft.title,
-      description: draft.description,
+      taskId: draft.taskId || undefined,
+      title: draft.title.trim() || task?.title || "Дело",
+      description: draft.description || task?.details || task?.description,
+      location: draft.location || undefined,
       date: draft.date,
       start,
       end,
+      endDate,
       durationMinutes,
-      type: draft.type,
-      category: draft.category,
-      priority: draft.priority,
+      endMode: draft.endMode,
+      approximate: draft.approximate,
+      type: task?.isSpontaneous ? "spontaneous" : draft.type,
+      category: draft.category || task?.category,
+      priority: draft.priority || task?.priority,
       status: draft.status,
       canMove: draft.canMove,
       canSplit: draft.canSplit,
       deadline: draft.deadline || undefined,
-      recurrence: draft.recurrence || undefined,
+      recurrenceRule: scheduleRecurrenceRuleFromDraft(draft),
     });
   }
 
@@ -10469,13 +10983,31 @@ export default function CategoryWorkspace() {
       return;
     }
 
-    const title = scheduleModal.draft.title.trim();
-    if (!title) {
-      pushNotice("У дела должно быть название.", "warn");
+    const payload = getSchedulePayloadForSource(scheduleModal);
+    if (!payload) {
+      pushNotice("Расписание не найдено.", "warn");
       return;
     }
 
-    const event = scheduleEventFromDraft(scheduleModal.draft, scheduleModal.eventId);
+    const selectedTask = payload.taskBase?.find(
+      (task) => task.id === scheduleModal.draft.taskId
+    );
+    const title = scheduleModal.draft.title.trim() || selectedTask?.title;
+    if (!title) {
+      pushNotice("Сначала выберите дело из Базы дел.", "warn");
+      return;
+    }
+
+    if (!scheduleModal.eventId && !scheduleModal.draft.taskId) {
+      pushNotice("Сначала выберите дело из Базы дел.", "warn");
+      return;
+    }
+
+    const event = scheduleEventFromDraft(
+      scheduleModal.draft,
+      scheduleModal.eventId,
+      payload
+    );
     const saved = updateSchedulePayload(scheduleModal, (payload) => ({
       ...payload,
       selectedDate: event.date ?? payload.selectedDate,
@@ -10508,6 +11040,7 @@ export default function CategoryWorkspace() {
       ...ref,
       mode: "assistant",
       draft: {
+        assistantMode: "autoplan",
         text: "",
         durationMinutes: "",
         date: "",
@@ -10520,8 +11053,17 @@ export default function CategoryWorkspace() {
         canMove: true,
         canSplit: false,
         category: "",
+        autoplanText: "",
+        autoplanHorizonDays: String(
+          normalizeScheduleSettings(payload.settings).autoplanHorizonDays ?? 7
+        ),
+        selectedTaskId: payload.taskBase?.[0]?.id ?? "",
+        selectedTaskIds: (payload.taskBase ?? [])
+          .filter((task) => task.allowAutoplan !== false)
+          .map((task) => task.id),
       },
       suggestions: [],
+      autoplanPreview: null,
       status: "",
     });
   }
@@ -10537,10 +11079,46 @@ export default function CategoryWorkspace() {
       return;
     }
 
+    if (scheduleModal.draft.assistantMode === "autoplan") {
+      const horizonDays = Number(scheduleModal.draft.autoplanHorizonDays);
+      const preview = buildScheduleAutoplanPreview(payload, {
+        text: scheduleModal.draft.autoplanText || scheduleModal.draft.text,
+        startDate: scheduleModal.draft.dateRangeStart || payload.selectedDate,
+        horizonDays:
+          Number.isFinite(horizonDays) && horizonDays > 0 ? horizonDays : undefined,
+        taskIds: scheduleModal.draft.selectedTaskIds,
+      });
+
+      setScheduleModal({
+        ...scheduleModal,
+        suggestions: [],
+        autoplanPreview: preview,
+        status: preview.message,
+      });
+      return;
+    }
+
+    const selectedTask = payload.taskBase?.find(
+      (task) => task.id === scheduleModal.draft.selectedTaskId
+    );
     const durationText = scheduleModal.draft.durationMinutes.trim();
-    const durationMinutes = durationText ? Number(durationText) : undefined;
+    const durationMinutes = durationText
+      ? Number(durationText)
+      : selectedTask?.durationMinutes ??
+        (selectedTask?.minDurationMinutes && selectedTask.maxDurationMinutes
+          ? Math.round(
+              (selectedTask.minDurationMinutes + selectedTask.maxDurationMinutes) / 2
+            )
+          : selectedTask?.goalMinutes);
     const suggestions = buildScheduleSuggestions(payload, {
-      text: scheduleModal.draft.text,
+      taskId: selectedTask?.id,
+      title: selectedTask?.title,
+      text:
+        scheduleModal.draft.text ||
+        selectedTask?.title ||
+        selectedTask?.details ||
+        selectedTask?.description,
+      description: selectedTask?.details || selectedTask?.description,
       durationMinutes:
         typeof durationMinutes === "number" && durationMinutes > 0 && Number.isFinite(durationMinutes)
           ? durationMinutes
@@ -10551,15 +11129,22 @@ export default function CategoryWorkspace() {
       preferredTime: scheduleModal.draft.preferredTime || undefined,
       avoidedTime: scheduleModal.draft.avoidedTime || undefined,
       deadline: scheduleModal.draft.deadline || undefined,
-      priority: scheduleModal.draft.priority,
-      category: scheduleModal.draft.category || undefined,
-      canMove: scheduleModal.draft.canMove,
-      canSplit: scheduleModal.draft.canSplit,
+      priority: selectedTask?.priority ?? scheduleModal.draft.priority,
+      category: scheduleModal.draft.category || selectedTask?.category || undefined,
+      canMove: selectedTask?.type !== "fixed" && scheduleModal.draft.canMove,
+      canSplit: selectedTask?.canSplit ?? scheduleModal.draft.canSplit,
+      approximate: Boolean(
+        selectedTask?.minDurationMinutes ||
+          selectedTask?.maxDurationMinutes ||
+          selectedTask?.approximateEnd
+      ),
+      type: selectedTask?.type ?? "flexible",
     });
 
     setScheduleModal({
       ...scheduleModal,
       suggestions,
+      autoplanPreview: null,
       status:
         suggestions.length > 0
           ? "Выберите подходящее окно."
@@ -10585,31 +11170,35 @@ export default function CategoryWorkspace() {
     }
   }
 
-  function openScheduleSpontaneousModal(ref: ScheduleSourceRef) {
-    const payload = getSchedulePayloadForSource(ref);
+  function applyScheduleAutoplanPreviewFromModal() {
+    if (!scheduleModal || scheduleModal.mode !== "assistant" || !scheduleModal.autoplanPreview) {
+      return;
+    }
+
+    const payload = getSchedulePayloadForSource(scheduleModal);
     if (!payload) {
       pushNotice("Расписание не найдено.", "warn");
       return;
     }
 
-    setChecklistEditor(null);
-    setDictionaryEditor(null);
-    setDictionaryStudy(null);
-    setScheduleModal({
-      ...ref,
-      mode: "spontaneous",
-      draft: {
-        text: "",
-        date: payload.selectedDate,
-        start: "",
-        durationMinutes: "",
-        priority: "high",
-        canCancel: false,
-        scope: "near",
-      },
-      preview: null,
-      status: "",
+    const nextPayload = applyScheduleAutoplanPreview(
+      payload,
+      scheduleModal.autoplanPreview
+    );
+    const horizonDays = Number(scheduleModal.draft.autoplanHorizonDays);
+    const saved = commitSchedulePayloadForSource(scheduleModal, {
+      ...nextPayload,
+      settings: normalizeScheduleSettings({
+        ...nextPayload.settings,
+        autoplanHorizonDays:
+          Number.isFinite(horizonDays) && horizonDays > 0 ? horizonDays : undefined,
+      }),
     });
+
+    if (saved) {
+      pushNotice("Автораспределение применено.");
+      closeScheduleModal();
+    }
   }
 
   function calculateScheduleSpontaneousPreview() {
@@ -10673,29 +11262,70 @@ export default function CategoryWorkspace() {
     }
   }
 
-  function scheduleGoalToDraft(goal: ScheduleGoal): ScheduleGoalDraft {
+  function scheduleTaskTemplateToDraft(task: ScheduleTaskTemplate): ScheduleTaskTemplateDraft {
     return {
-      id: goal.id,
-      title: goal.title,
-      category: goal.category ?? "",
-      period: goal.period,
-      targetCount: goal.targetCount ? String(goal.targetCount) : "",
-      targetMinutes: goal.targetMinutes ? String(goal.targetMinutes) : "",
+      id: task.id,
+      title: task.title,
+      description: task.description ?? "",
+      details: task.details ?? "",
+      checklistText: (task.checklist ?? []).join("\n"),
+      category: task.category ?? "",
+      type: task.type ?? "flexible",
+      goalPeriod: task.goalPeriod ?? "week",
+      goalCount: task.goalCount ? String(task.goalCount) : "",
+      goalMinutes: task.goalMinutes ? String(task.goalMinutes) : "",
+      durationMinutes: task.durationMinutes ? String(task.durationMinutes) : "",
+      minDurationMinutes: task.minDurationMinutes ? String(task.minDurationMinutes) : "",
+      maxDurationMinutes: task.maxDurationMinutes ? String(task.maxDurationMinutes) : "",
+      approximateEnd: task.approximateEnd ?? "",
+      priority: task.priority ?? "medium",
+      isSpontaneous: task.isSpontaneous ?? false,
+      allowAutoplan: task.allowAutoplan ?? true,
+      canSplit: task.canSplit ?? true,
+      preferredTimeOfDay: task.preferredTimeOfDay ?? "",
+      avoidedTimeOfDay: task.avoidedTimeOfDay ?? "",
+      sourceGoalId: task.sourceGoalId,
+      sourceRoutineId: task.sourceRoutineId,
+      sourceAutoTaskId: task.sourceAutoTaskId,
     };
   }
 
-  function scheduleGoalFromDraft(draft: ScheduleGoalDraft): ScheduleGoal {
+  function scheduleTaskTemplateFromDraft(draft: ScheduleTaskTemplateDraft): ScheduleTaskTemplate {
     return {
       id: draft.id,
-      title: draft.title.trim() || "Норма",
+      title: draft.title.trim() || "Дело",
+      description: draft.description.trim() || undefined,
+      details: draft.details.trim() || undefined,
+      checklist: draft.checklistText
+        .split(/\r?\n/)
+        .map((entry) => entry.trim())
+        .filter(Boolean),
       category: draft.category.trim() || undefined,
-      period: draft.period,
-      targetCount: draft.targetCount ? Number(draft.targetCount) : undefined,
-      targetMinutes: draft.targetMinutes ? Number(draft.targetMinutes) : undefined,
+      type: draft.isSpontaneous ? "spontaneous" : draft.type,
+      goalPeriod: draft.goalPeriod,
+      goalCount: draft.goalCount ? Number(draft.goalCount) : undefined,
+      goalMinutes: draft.goalMinutes ? Number(draft.goalMinutes) : undefined,
+      durationMinutes: draft.durationMinutes ? Number(draft.durationMinutes) : undefined,
+      minDurationMinutes: draft.minDurationMinutes
+        ? Number(draft.minDurationMinutes)
+        : undefined,
+      maxDurationMinutes: draft.maxDurationMinutes
+        ? Number(draft.maxDurationMinutes)
+        : undefined,
+      approximateEnd: draft.approximateEnd || undefined,
+      priority: draft.priority,
+      isSpontaneous: draft.isSpontaneous,
+      allowAutoplan: draft.allowAutoplan,
+      canSplit: draft.canSplit,
+      preferredTimeOfDay: draft.preferredTimeOfDay || undefined,
+      avoidedTimeOfDay: draft.avoidedTimeOfDay || undefined,
+      sourceGoalId: draft.sourceGoalId,
+      sourceRoutineId: draft.sourceRoutineId,
+      sourceAutoTaskId: draft.sourceAutoTaskId,
     };
   }
 
-  function openScheduleGoalsModal(ref: ScheduleSourceRef) {
+  function openScheduleTaskBaseModal(ref: ScheduleSourceRef) {
     const payload = getSchedulePayloadForSource(ref);
     if (!payload) {
       pushNotice("Расписание не найдено.", "warn");
@@ -10707,26 +11337,40 @@ export default function CategoryWorkspace() {
     setDictionaryStudy(null);
     setScheduleModal({
       ...ref,
-      mode: "goals",
-      goalDrafts: payload.goals.map(scheduleGoalToDraft),
+      mode: "taskBase",
+      taskDrafts: (payload.taskBase ?? []).map(scheduleTaskTemplateToDraft),
       settingsDraft: normalizeScheduleSettings(payload.settings),
     });
   }
 
-  function addScheduleGoalDraft() {
+  function addScheduleTaskTemplateDraft() {
     setScheduleModal((prev) =>
-      prev?.mode === "goals"
+      prev?.mode === "taskBase"
         ? {
             ...prev,
-            goalDrafts: [
-              ...prev.goalDrafts,
+            taskDrafts: [
+              ...prev.taskDrafts,
               {
-                id: createScheduleId("goal"),
+                id: createScheduleId("task"),
                 title: "",
+                description: "",
+                details: "",
+                checklistText: "",
                 category: "",
-                period: "week",
-                targetCount: "",
-                targetMinutes: "",
+                type: "flexible",
+                goalPeriod: "week",
+                goalCount: "",
+                goalMinutes: "",
+                durationMinutes: "",
+                minDurationMinutes: "",
+                maxDurationMinutes: "",
+                approximateEnd: "",
+                priority: "medium",
+                isSpontaneous: false,
+                allowAutoplan: true,
+                canSplit: true,
+                preferredTimeOfDay: "",
+                avoidedTimeOfDay: "",
               },
             ],
           }
@@ -10734,25 +11378,59 @@ export default function CategoryWorkspace() {
     );
   }
 
-  function saveScheduleGoalsFromModal() {
-    if (!scheduleModal || scheduleModal.mode !== "goals") {
+  function updateScheduleTaskTemplateDraft(
+    taskId: string,
+    patch: Partial<ScheduleTaskTemplateDraft>
+  ) {
+    setScheduleModal((prev) =>
+      prev?.mode === "taskBase"
+        ? {
+            ...prev,
+            taskDrafts: prev.taskDrafts.map((task) =>
+              task.id === taskId ? { ...task, ...patch } : task
+            ),
+          }
+        : prev
+    );
+  }
+
+  function deleteScheduleTaskTemplateDraft(taskId: string) {
+    setScheduleModal((prev) =>
+      prev?.mode === "taskBase"
+        ? {
+            ...prev,
+            taskDrafts: prev.taskDrafts.filter((task) => task.id !== taskId),
+          }
+        : prev
+    );
+  }
+
+  function saveScheduleTaskBaseFromModal() {
+    if (!scheduleModal || scheduleModal.mode !== "taskBase") {
       return;
     }
 
+    const taskBase = normalizeScheduleTaskBase(
+      scheduleModal.taskDrafts
+        .map(scheduleTaskTemplateFromDraft)
+        .filter((task) => task.title.trim())
+    );
     const goals = normalizeScheduleGoals(
-      scheduleModal.goalDrafts
-        .map(scheduleGoalFromDraft)
-        .filter((goal) => goal.title.trim())
+      taskBase
+        .filter((task) => task.goalMinutes || task.goalCount)
+        .map(scheduleTaskTemplateToGoal)
     );
     const settings = normalizeScheduleSettings(scheduleModal.settingsDraft);
     const saved = updateSchedulePayload(scheduleModal, (payload) => ({
       ...payload,
       goals,
+      taskBase,
+      routines: [],
       settings,
     }));
 
     if (saved) {
-      pushNotice("Нормы расписания сохранены.");
+      pushNotice("База дел сохранена.");
       closeScheduleModal();
     }
   }
@@ -10780,6 +11458,7 @@ export default function CategoryWorkspace() {
         checklists: sourceDocument.checklists,
         dictionaries: sourceDocument.dictionaries,
         schedules: [...sourceDocument.schedules, createdSchedule],
+        rules: sourceDocument.rules,
       });
       pushNotice("Расписание добавлено.");
       return;
@@ -10810,6 +11489,269 @@ export default function CategoryWorkspace() {
     } finally {
       setIsMutating(false);
     }
+  }
+
+  function closeRuleSiblingEditors() {
+    setChecklistEditor(null);
+    setDictionaryEditor(null);
+    setDictionaryStudy(null);
+    setScheduleModal(null);
+    setScheduleStatsModal(null);
+  }
+
+  function getCurrentRuleTitles(): string[] {
+    if (!currentCategory) {
+      return [];
+    }
+    if (currentCategory.format === "continuous") {
+      return continuousRules.map((document) => document.title);
+    }
+    return currentMessages.flatMap((message) => {
+      const document = parseMessageRuleContent(message.content);
+      return document ? [document.title] : [];
+    });
+  }
+
+  async function insertRuleDocument(document: RuleDocument): Promise<void> {
+    if (!currentCategory || !currentCategoryCanEdit) {
+      return;
+    }
+    closeRuleSiblingEditors();
+    if (currentCategory.format === "continuous") {
+      const sourceDocument = getContinuousDocumentForCategory(currentCategory.id);
+      if (!sourceDocument) {
+        pushNotice("Не удалось добавить Rule.", "error");
+        return;
+      }
+      commitContinuousDocumentForCategory(currentCategory.id, {
+        ...sourceDocument,
+        rules: [...sourceDocument.rules, document],
+      });
+      setRuleEditor({
+        source: "continuous",
+        sourceCategoryId: currentCategory.id,
+        sourceMessageId: null,
+        ruleId: document.id,
+      });
+      pushNotice("Rule добавлен.");
+      return;
+    }
+
+    setIsMutating(true);
+    try {
+      const created = await createMessageRequest(
+        currentCategory.id,
+        document.title,
+        serializeMessageRuleContent(document),
+        "info"
+      );
+      savedMessageContentRef.current[created.id] = created.content;
+      messageDraftVersionRef.current[created.id] = 0;
+      messageAckVersionRef.current[created.id] = 0;
+      clearMessageSaveState(created.id);
+      setMessagesByCategory((prev) => ({
+        ...prev,
+        [currentCategory.id]: [...(prev[currentCategory.id] ?? []), created].sort(sortMessages),
+      }));
+      setSelectedMessageId(created.id);
+      setRuleEditor({
+        source: "block-message",
+        sourceCategoryId: currentCategory.id,
+        sourceMessageId: created.id,
+        ruleId: document.id,
+      });
+      pushNotice("Rule добавлен.");
+    } catch (error) {
+      pushNotice(toErrorMessage(error, "Не удалось добавить Rule."), "error");
+    } finally {
+      setIsMutating(false);
+    }
+  }
+
+  function handleAddRuleDocument() {
+    if (!currentCategory || !currentCategoryCanEdit) {
+      return;
+    }
+    const title = dedupeRuleTitle("Rule — учебный текст", getCurrentRuleTitles());
+    void insertRuleDocument(createDefaultRuleDocument(title));
+  }
+
+  function handleOpenRuleImportPicker() {
+    if (!currentCategory || !currentCategoryCanEdit) {
+      return;
+    }
+    ruleImportFileRef.current?.click();
+  }
+
+  async function handleImportRuleForCreate(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) {
+      return;
+    }
+    try {
+      const parsed = parseRuleDocumentJson(await file.text());
+      const now = new Date().toISOString();
+      const importedDocument: RuleDocument = {
+        ...parsed.document,
+        id: createRuleId("rule"),
+        title: dedupeRuleTitle(parsed.document.title, getCurrentRuleTitles()),
+        createdAt: now,
+        updatedAt: now,
+      };
+      await insertRuleDocument(importedDocument);
+      if (parsed.warnings.length > 0) {
+        pushNotice(`Rule импортирован частично: ${parsed.warnings.join(" ")}`, "warn");
+      } else {
+        pushNotice("Rule импортирован.");
+      }
+    } catch (error) {
+      pushNotice(toErrorMessage(error, "Файл Rule не удалось импортировать."), "error");
+    }
+  }
+
+  function openRuleEditorForBlock(messageId: string, document: RuleDocument) {
+    if (!currentCategory) {
+      return;
+    }
+    closeRuleSiblingEditors();
+    setSelectedMessageId(messageId);
+    setRuleEditor({
+      source: "block-message",
+      sourceCategoryId: currentCategory.id,
+      sourceMessageId: messageId,
+      ruleId: document.id,
+    });
+  }
+
+  function openRuleEditorForContinuous(document: RuleDocument) {
+    if (!currentCategory) {
+      return;
+    }
+    closeRuleSiblingEditors();
+    setRuleEditor({
+      source: "continuous",
+      sourceCategoryId: currentCategory.id,
+      sourceMessageId: null,
+      ruleId: document.id,
+    });
+  }
+
+  function handleRuleDocumentChange(nextRule: RuleDocument) {
+    if (!ruleEditor || !currentCategoryCanEdit) {
+      return;
+    }
+    if (ruleEditor.source === "block-message" && ruleEditor.sourceMessageId) {
+      const serialized = serializeMessageRuleContent(nextRule);
+      syncMessageContentChange(
+        ruleEditor.sourceCategoryId,
+        ruleEditor.sourceMessageId,
+        serialized
+      );
+      setMessagesByCategory((prev) => ({
+        ...prev,
+        [ruleEditor.sourceCategoryId]: (prev[ruleEditor.sourceCategoryId] ?? []).map((message) =>
+          message.id === ruleEditor.sourceMessageId
+            ? { ...message, title: nextRule.title }
+            : message
+        ),
+      }));
+      return;
+    }
+    const sourceDocument = getContinuousDocumentForCategory(ruleEditor.sourceCategoryId);
+    if (!sourceDocument) {
+      return;
+    }
+    commitContinuousDocumentForCategory(ruleEditor.sourceCategoryId, {
+      ...sourceDocument,
+      rules: sourceDocument.rules.map((document) =>
+        document.id === ruleEditor.ruleId ? nextRule : document
+      ),
+    });
+  }
+
+  function flushActiveRuleSave() {
+    if (!ruleEditor || !activeRuleDocument) {
+      return;
+    }
+    if (ruleEditor.source === "block-message" && ruleEditor.sourceMessageId) {
+      const messageId = ruleEditor.sourceMessageId;
+      const content = serializeMessageRuleContent(activeRuleDocument);
+      const timer = messageSaveTimersRef.current[messageId];
+      if (timer) {
+        clearTimeout(timer);
+        delete messageSaveTimersRef.current[messageId];
+      }
+      const version = messageDraftVersionRef.current[messageId] ?? 0;
+      enqueueMessageContentSave(ruleEditor.sourceCategoryId, messageId, content, version);
+      void patchMessage(messageId, ruleEditor.sourceCategoryId, {
+        title: activeRuleDocument.title.trim() || "Rule — учебный текст",
+      }).catch((error) => {
+        pushNotice(toErrorMessage(error, "Не удалось сохранить название Rule."), "error");
+      });
+      return;
+    }
+    const sourceDocument = getContinuousDocumentForCategory(ruleEditor.sourceCategoryId);
+    if (!sourceDocument) {
+      return;
+    }
+    const content = serializeContinuousContent(sourceDocument);
+    const timer = categorySaveTimersRef.current[ruleEditor.sourceCategoryId];
+    if (timer) {
+      clearTimeout(timer);
+      delete categorySaveTimersRef.current[ruleEditor.sourceCategoryId];
+    }
+    enqueueContinuousSave(
+      ruleEditor.sourceCategoryId,
+      content,
+      categoryDraftVersionRef.current[ruleEditor.sourceCategoryId] ?? 0
+    );
+  }
+
+  async function deleteRuleDocument(source: RuleEditorSource) {
+    if (!(await requestConfirmation({
+      title: "Удалить Rule",
+      message: "Удалить этот Rule-документ вместе с упражнениями, словарём и пометками?",
+      confirmLabel: "удалить",
+      cancelLabel: "отмена",
+      tone: "danger",
+    }))) {
+      return;
+    }
+    if (source.source === "block-message" && source.sourceMessageId) {
+      setIsMutating(true);
+      try {
+        await deleteMessageRequest(source.sourceMessageId);
+        clearMessageSaveState(source.sourceMessageId);
+        setMessagesByCategory((prev) => ({
+          ...prev,
+          [source.sourceCategoryId]: (prev[source.sourceCategoryId] ?? []).filter(
+            (message) => message.id !== source.sourceMessageId
+          ),
+        }));
+        if (ruleEditor?.sourceMessageId === source.sourceMessageId) {
+          setRuleEditor(null);
+        }
+        pushNotice("Rule удалён.");
+      } catch (error) {
+        pushNotice(toErrorMessage(error, "Не удалось удалить Rule."), "error");
+      } finally {
+        setIsMutating(false);
+      }
+      return;
+    }
+    const sourceDocument = getContinuousDocumentForCategory(source.sourceCategoryId);
+    if (!sourceDocument) {
+      return;
+    }
+    commitContinuousDocumentForCategory(source.sourceCategoryId, {
+      ...sourceDocument,
+      rules: sourceDocument.rules.filter((document) => document.id !== source.ruleId),
+    });
+    if (ruleEditor?.ruleId === source.ruleId) {
+      setRuleEditor(null);
+    }
+    pushNotice("Rule удалён.");
   }
 
   function resetDictionaryEditorSearch() {
@@ -10889,6 +11831,19 @@ export default function CategoryWorkspace() {
 
       return { ...prev, autoSpeak, autoSpeakFields };
     });
+  }
+
+  function updateDictionaryEditorSpeechLanguage(
+    speechLanguage: DictionarySpeechLanguage
+  ) {
+    setDictionaryEditor((prev) =>
+      prev
+        ? {
+            ...prev,
+            speechLanguage: normalizeDictionarySpeechLanguage(speechLanguage),
+          }
+        : prev
+    );
   }
 
   function updateDictionaryEditorProgressMode(progressMode: boolean) {
@@ -11359,6 +12314,9 @@ export default function CategoryWorkspace() {
         autoSpeak: dictionaryEditor.autoSpeak,
         autoSpeakFields,
         manualSpeakFields,
+        speechLanguage: normalizeDictionarySpeechLanguage(
+          dictionaryEditor.speechLanguage
+        ),
         noteDisplayMode: dictionaryEditor.noteDisplayMode,
         progressMode: dictionaryEditor.progressMode,
         motivateOnCorrect: dictionaryEditor.motivateOnCorrect,
@@ -11426,6 +12384,7 @@ export default function CategoryWorkspace() {
       );
       if (parsed.ok) {
         pushNotice(`Файл прочитан: ${parsed.entries.length} пар.`);
+        await applyDictionaryImport(parsed);
       } else {
         pushNotice(parsed.error, "warn");
       }
@@ -11520,20 +12479,20 @@ export default function CategoryWorkspace() {
     void readInsertedDictionaryImportFile(file);
   }
 
-  async function handleApplyDictionaryImport() {
+  async function applyDictionaryImport(importPreview: DictionaryImportPreview) {
     if (!dictionaryEditor) {
       return;
     }
 
-    if (!dictionaryImportPreview.ok) {
-      pushNotice(dictionaryImportPreview.error, "warn");
+    if (!importPreview.ok) {
+      pushNotice(importPreview.error, "warn");
       return;
     }
 
     const message =
-      dictionaryImportPreview.kind === "json"
-        ? `JSON импорт заменит весь черновик словаря и загрузит ${dictionaryImportPreview.entries.length} пар. Продолжить?`
-        : `Импорт таблицы полностью заменит текущие строки словаря на ${dictionaryImportPreview.entries.length} пар. Название, описание, теги, подписи и настройки останутся как сейчас. Продолжить?`;
+      importPreview.kind === "json"
+        ? `JSON импорт заменит весь черновик словаря и загрузит ${importPreview.entries.length} пар. Продолжить?`
+        : `Импорт таблицы полностью заменит текущие строки словаря на ${importPreview.entries.length} пар. Название, описание, теги, подписи и настройки останутся как сейчас. Продолжить?`;
 
     const confirmed = await requestConfirmation({
       title: "Импорт #DICT",
@@ -11546,46 +12505,45 @@ export default function CategoryWorkspace() {
       return;
     }
 
-    if (dictionaryImportPreview.kind === "json") {
+    if (importPreview.kind === "json") {
       setDictionaryEditor((prev) =>
         prev
           ? {
               ...prev,
-              titleDraft: dictionaryImportPreview.title,
-              descriptionDraft: dictionaryImportPreview.payload.description,
-              tagsDraft: serializeDictionaryTags(dictionaryImportPreview.payload.tags),
-              promptSide: dictionaryImportPreview.payload.promptSide,
-              shuffle: dictionaryImportPreview.payload.shuffle,
-              autoSpeak: dictionaryImportPreview.payload.autoSpeak,
+              titleDraft: importPreview.title,
+              descriptionDraft: importPreview.payload.description,
+              tagsDraft: serializeDictionaryTags(importPreview.payload.tags),
+              promptSide: importPreview.payload.promptSide,
+              shuffle: importPreview.payload.shuffle,
+              autoSpeak: importPreview.payload.autoSpeak,
               autoSpeakFields: normalizeDictionaryAutoSpeakFields(
-                dictionaryImportPreview.payload.autoSpeakFields,
+                importPreview.payload.autoSpeakFields,
                 getDefaultDictionaryAutoSpeakFields(
-                  dictionaryImportPreview.payload.columns
+                  importPreview.payload.columns
                 ),
-                dictionaryImportPreview.payload.columns
+                importPreview.payload.columns
               ),
               manualSpeakFields: normalizeDictionaryManualSpeakFields(
-                dictionaryImportPreview.payload.manualSpeakFields,
+                importPreview.payload.manualSpeakFields,
                 getDefaultDictionaryManualSpeakFields(
-                  dictionaryImportPreview.payload.columns
+                  importPreview.payload.columns
                 ),
-                dictionaryImportPreview.payload.columns
+                importPreview.payload.columns
               ),
-              noteDisplayMode: dictionaryImportPreview.payload.noteDisplayMode,
-              progressMode: dictionaryImportPreview.payload.progressMode,
-              motivateOnCorrect: dictionaryImportPreview.payload.motivateOnCorrect,
-              cardMode: dictionaryImportPreview.payload.cardMode,
-              adhdMode: dictionaryImportPreview.payload.adhdMode,
-              motivationAdvanceMode:
-                dictionaryImportPreview.payload.motivationAdvanceMode,
-              motivationAutoSeconds:
-                dictionaryImportPreview.payload.motivationAutoSeconds,
+              speechLanguage: importPreview.payload.speechLanguage,
+              noteDisplayMode: importPreview.payload.noteDisplayMode,
+              progressMode: importPreview.payload.progressMode,
+              motivateOnCorrect: importPreview.payload.motivateOnCorrect,
+              cardMode: importPreview.payload.cardMode,
+              adhdMode: importPreview.payload.adhdMode,
+              motivationAdvanceMode: importPreview.payload.motivationAdvanceMode,
+              motivationAutoSeconds: importPreview.payload.motivationAutoSeconds,
               labels: normalizeDictionaryLabels(
-                dictionaryImportPreview.payload.labels,
-                dictionaryImportPreview.payload.columns
+                importPreview.payload.labels,
+                importPreview.payload.columns
               ),
-              columns: dictionaryImportPreview.payload.columns,
-              entries: makeDictionaryEditorEntries(dictionaryImportPreview.payload),
+              columns: importPreview.payload.columns,
+              entries: makeDictionaryEditorEntries(importPreview.payload),
             }
           : prev
       );
@@ -11598,7 +12556,7 @@ export default function CategoryWorkspace() {
       prev
         ? {
             ...prev,
-            entries: dictionaryImportPreview.entries.map((entry) => ({
+            entries: importPreview.entries.map((entry) => ({
               id: entry.id,
               values: normalizeDictionaryEntryValues(entry, prev.columns),
             })),
@@ -11607,6 +12565,15 @@ export default function CategoryWorkspace() {
     );
     setDictionaryImportDraft("");
     pushNotice("Строки #DICT заменены импортом.");
+  }
+
+  async function handleApplyDictionaryImport() {
+    if (!dictionaryImportDraft.trim()) {
+      handleOpenDictionaryImportFilePicker();
+      return;
+    }
+
+    await applyDictionaryImport(dictionaryImportPreview);
   }
 
   async function handleSaveDictionaryEditor(
@@ -11662,6 +12629,9 @@ export default function CategoryWorkspace() {
       autoSpeak: dictionaryEditor.autoSpeak,
       autoSpeakFields,
       manualSpeakFields,
+      speechLanguage: normalizeDictionarySpeechLanguage(
+        dictionaryEditor.speechLanguage
+      ),
       noteDisplayMode: dictionaryEditor.noteDisplayMode,
       progressMode: dictionaryEditor.progressMode,
       motivateOnCorrect: dictionaryEditor.motivateOnCorrect,
@@ -11674,15 +12644,17 @@ export default function CategoryWorkspace() {
       entries: validation.entries,
     };
     const serializedContent = serializeMessageDictionaryContent(nextPayload);
-    const finishDictionarySave = (studyOptions: {
+    const finishDictionarySave = async (studyOptions: {
       sourceCategoryId: string;
       sourceMessageId: string | null;
       dictionaryId: string | null;
       title: string;
       payload: MessageDictionaryPayload;
     }) => {
+      await refreshDictionaryStudyProgressForSavedDictionary(studyOptions);
+
       if (options.openStudyAfterSave) {
-        openDictionaryStudy(studyOptions);
+        void openDictionaryStudy(studyOptions);
         return;
       }
 
@@ -11722,9 +12694,10 @@ export default function CategoryWorkspace() {
           checklists: sourceDocument.checklists,
           dictionaries: nextDictionaries,
           schedules: sourceDocument.schedules,
+          rules: sourceDocument.rules,
         });
         pushNotice("#DICT обновлен.");
-        finishDictionarySave({
+        await finishDictionarySave({
           sourceCategoryId,
           sourceMessageId: null,
           dictionaryId: dictionaryEditor.dictionaryId,
@@ -11745,9 +12718,10 @@ export default function CategoryWorkspace() {
         checklists: sourceDocument.checklists,
         dictionaries: [...sourceDocument.dictionaries, createdDictionary],
         schedules: sourceDocument.schedules,
+        rules: sourceDocument.rules,
       });
       pushNotice("#DICT добавлен.");
-      finishDictionarySave({
+      await finishDictionarySave({
         sourceCategoryId,
         sourceMessageId: null,
         dictionaryId: createdDictionary.id,
@@ -11781,13 +12755,15 @@ export default function CategoryWorkspace() {
         pushNotice("#DICT добавлен.");
         if (options.openStudyAfterSave) {
           shouldCloseEditor = false;
-          openDictionaryStudy({
+          const studyOptions = {
             sourceCategoryId,
             sourceMessageId: created.id,
             dictionaryId: null,
             title: nextTitle,
             payload: nextPayload,
-          });
+          };
+          await refreshDictionaryStudyProgressForSavedDictionary(studyOptions);
+          void openDictionaryStudy(studyOptions);
         }
       } catch (error) {
         pushNotice(toErrorMessage(error, "Не удалось добавить #DICT."), "error");
@@ -11839,15 +12815,17 @@ export default function CategoryWorkspace() {
         content: serializedContent,
       });
       pushNotice("#DICT обновлен.");
+      const studyOptions = {
+        sourceCategoryId,
+        sourceMessageId: targetMessage.id,
+        dictionaryId: null,
+        title: nextTitle,
+        payload: nextPayload,
+      };
+      await refreshDictionaryStudyProgressForSavedDictionary(studyOptions);
       if (options.openStudyAfterSave) {
         shouldCloseEditor = false;
-        openDictionaryStudy({
-          sourceCategoryId,
-          sourceMessageId: targetMessage.id,
-          dictionaryId: null,
-          title: nextTitle,
-          payload: nextPayload,
-        });
+        void openDictionaryStudy(studyOptions);
       }
     } catch (error) {
       setMessagesByCategory((prev) => ({
@@ -11911,6 +12889,7 @@ export default function CategoryWorkspace() {
         checklists: sourceDocument.checklists,
         dictionaries: nextDictionaries,
         schedules: sourceDocument.schedules,
+        rules: sourceDocument.rules,
       });
       setDictionaryStudy((prev) =>
         prev?.dictionaryId === dictionaryEditor.dictionaryId ? null : prev
@@ -11990,15 +12969,140 @@ export default function CategoryWorkspace() {
     window.speechSynthesis.cancel();
   }
 
+  async function loadDictionaryStudyProgress(
+    sourceIdentity: DictionaryStudyProgressSourceIdentity
+  ): Promise<DictionaryStudyProgress | null | undefined> {
+    try {
+      const params = makeDictionaryStudyProgressSearchParams(sourceIdentity);
+      const response = await authorizedFetch(
+        `/api/dictionary-study-progress?${params.toString()}`,
+        {
+          cache: "no-store",
+        }
+      );
+      const payload = (await response.json()) as DictionaryStudyProgressPayload;
+      if (!response.ok) {
+        return undefined;
+      }
+
+      setSource((prev) => payload.source ?? prev);
+      return payload.data
+        ? normalizePersistedDictionaryStudyProgress(payload.data)
+        : null;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async function persistDictionaryStudyProgress(
+    study: DictionaryStudyState
+  ): Promise<void> {
+    const sourceIdentity = makeDictionaryStudyProgressSource(study);
+    if (!sourceIdentity) {
+      return;
+    }
+
+    await persistDictionaryStudyProgressSnapshot(
+      sourceIdentity,
+      getDictionaryStudyProgressSnapshot(study)
+    );
+  }
+
+  async function persistDictionaryStudyProgressSnapshot(
+    sourceIdentity: DictionaryStudyProgressSourceIdentity,
+    progress: DictionaryStudyProgress
+  ): Promise<void> {
+    if (!authUser) {
+      return;
+    }
+
+    try {
+      const response = await authorizedFetch("/api/dictionary-study-progress", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...sourceIdentity,
+          progress,
+        }),
+      });
+      const payload = (await response.json()) as DictionaryStudyProgressPayload;
+      if (!response.ok) {
+        return;
+      }
+
+      setSource((prev) => payload.source ?? prev);
+    } catch {
+      return;
+    }
+  }
+
   function commitDictionaryStudyState(
     nextStudy: DictionaryStudyState,
     options: { autoSpeak?: boolean } = {}
   ) {
     saveDictionaryStudyProgress(nextStudy);
+    void persistDictionaryStudyProgress(nextStudy);
+    dictionaryStudyRef.current = nextStudy;
     setDictionaryStudy(nextStudy);
 
     if (options.autoSpeak) {
       queueDictionaryAutoSpeech(nextStudy);
+    }
+  }
+
+  async function refreshDictionaryStudyProgressForSavedDictionary(options: {
+    sourceCategoryId: string;
+    sourceMessageId: string | null;
+    dictionaryId: string | null;
+    title: string;
+    payload: MessageDictionaryPayload;
+  }) {
+    const baseCards = [...options.payload.entries];
+    if (baseCards.length === 0) {
+      return;
+    }
+
+    const progressKey = makeDictionaryStudyProgressKey(options);
+    const progressSource = makeDictionaryStudyProgressSource(options);
+    const localProgress = readDictionaryStudyProgress(progressKey);
+    const serverProgress = progressSource
+      ? await loadDictionaryStudyProgress(progressSource)
+      : undefined;
+    const selectedProgress = selectDictionaryStudyProgress(
+      localProgress,
+      serverProgress
+    );
+    if (!selectedProgress) {
+      return;
+    }
+
+    const settings = getDictionaryStudySettingsFromPayload(options.payload);
+    const restoredProgress = restoreDictionaryStudyProgress(
+      selectedProgress,
+      baseCards,
+      makeDefaultDictionaryStudyCards(baseCards, settings),
+      settings
+    );
+    const nextProgress: DictionaryStudyProgress = {
+      schemaVersion: DICTIONARY_STUDY_PROGRESS_SCHEMA_VERSION,
+      savedAt: Date.now(),
+      currentIndex: restoredProgress.currentIndex,
+      isAnswerRevealed: restoredProgress.isAnswerRevealed,
+      cardIds: restoredProgress.cards.map((entry) => entry.id),
+      shuffle: settings.shuffle,
+      progressMode: settings.progressMode,
+      progressStartedAt: restoredProgress.progressStartedAt,
+      progressCompletedAt: restoredProgress.progressCompletedAt,
+      correctCount: restoredProgress.correctCount,
+      wrongCount: restoredProgress.wrongCount,
+      answerResultsByEntryId: restoredProgress.answerResultsByEntryId,
+      isProgressComplete: restoredProgress.isProgressComplete,
+      settings,
+    };
+
+    writeDictionaryStudyProgress(progressKey, nextProgress);
+    if (progressSource) {
+      void persistDictionaryStudyProgressSnapshot(progressSource, nextProgress);
     }
   }
 
@@ -12018,8 +13122,13 @@ export default function CategoryWorkspace() {
 
     dictionaryAutoSpeechTimerRef.current = window.setTimeout(() => {
       dictionaryAutoSpeechTimerRef.current = null;
+      const speechStudy = dictionaryStudyRef.current;
+      if (!speechStudy) {
+        return;
+      }
+
       speakDictionaryStudyTextSegments(
-        getDictionaryStudyActiveTextSegments(study, "auto"),
+        getDictionaryStudyActiveTextSegments(speechStudy, "auto"),
         {
           warn: false,
         }
@@ -12027,7 +13136,7 @@ export default function CategoryWorkspace() {
     }, 120);
   }
 
-  function openDictionaryStudy(options: {
+  async function openDictionaryStudy(options: {
     sourceCategoryId: string;
     sourceMessageId: string | null;
     dictionaryId: string | null;
@@ -12036,53 +13145,57 @@ export default function CategoryWorkspace() {
   }) {
     const payload = options.payload;
     const baseCards = [...payload.entries];
-    const defaultCards =
-      payload.shuffle && baseCards.length > 1
-        ? shuffleDictionaryEntries(baseCards)
-        : baseCards;
-
-    if (defaultCards.length === 0) {
+    if (baseCards.length === 0) {
       pushNotice("Добавь пары в словарь перед заучиванием.", "warn");
       return;
     }
 
     const progressKey = makeDictionaryStudyProgressKey(options);
+    const progressSource = makeDictionaryStudyProgressSource(options);
+    const localProgress = readDictionaryStudyProgress(progressKey);
+    const serverProgress = progressSource
+      ? await loadDictionaryStudyProgress(progressSource)
+      : undefined;
+    const selectedProgress = selectDictionaryStudyProgress(
+      localProgress,
+      serverProgress
+    );
+    const studySettings = resolveDictionaryStudySettings(
+      payload,
+      selectedProgress
+    );
+    const defaultCards = makeDefaultDictionaryStudyCards(
+      baseCards,
+      studySettings
+    );
     const restoredProgress = restoreDictionaryStudyProgress(
-      readDictionaryStudyProgress(progressKey),
+      selectedProgress,
       baseCards,
       defaultCards,
-      payload.shuffle,
-      payload.progressMode
+      studySettings
     );
     const nextStudy: DictionaryStudyState = {
       sourceCategoryId: options.sourceCategoryId,
       sourceMessageId: options.sourceMessageId,
       dictionaryId: options.dictionaryId,
       title: options.title,
-      promptSide: payload.promptSide,
+      promptSide: studySettings.promptSide,
       labels: normalizeDictionaryLabels(payload.labels, payload.columns),
       columns: payload.columns,
       baseCards,
       cards: restoredProgress.cards,
-      shuffle: payload.shuffle,
-      autoSpeak: payload.autoSpeak,
-      autoSpeakFields: normalizeDictionaryAutoSpeakFields(
-        payload.autoSpeakFields,
-        getDefaultDictionaryAutoSpeakFields(payload.columns),
-        payload.columns
-      ),
-      manualSpeakFields: normalizeDictionaryManualSpeakFields(
-        payload.manualSpeakFields,
-        getDefaultDictionaryManualSpeakFields(payload.columns),
-        payload.columns
-      ),
-      noteDisplayMode: payload.noteDisplayMode,
-      progressMode: payload.progressMode,
-      motivateOnCorrect: payload.motivateOnCorrect,
-      cardMode: payload.cardMode,
-      adhdMode: payload.adhdMode,
-      motivationAdvanceMode: payload.motivationAdvanceMode,
-      motivationAutoSeconds: payload.motivationAutoSeconds,
+      shuffle: studySettings.shuffle,
+      autoSpeak: studySettings.autoSpeak,
+      autoSpeakFields: studySettings.autoSpeakFields,
+      manualSpeakFields: studySettings.manualSpeakFields,
+      speechLanguage: studySettings.speechLanguage,
+      noteDisplayMode: studySettings.noteDisplayMode,
+      progressMode: studySettings.progressMode,
+      motivateOnCorrect: studySettings.motivateOnCorrect,
+      cardMode: studySettings.cardMode,
+      adhdMode: studySettings.adhdMode,
+      motivationAdvanceMode: studySettings.motivationAdvanceMode,
+      motivationAutoSeconds: studySettings.motivationAutoSeconds,
       progressKey,
       currentIndex: restoredProgress.currentIndex,
       isAnswerRevealed: restoredProgress.isAnswerRevealed,
@@ -12124,14 +13237,34 @@ export default function CategoryWorkspace() {
     });
   }
 
+  function cancelDictionarySimilarRequest() {
+    dictionarySimilarAbortRef.current?.abort();
+    dictionarySimilarAbortRef.current = null;
+  }
+
+  function closeDictionaryStudySimilarWorkflow() {
+    cancelDictionarySimilarRequest();
+    setDictionarySimilarPopup(null);
+    setDictionaryStudySimilarAddPopup(null);
+  }
+
   function closeDictionaryStudy() {
     cancelDictionarySpeech();
     clearDictionaryMotivationTimer();
-    setDictionarySimilarPopup(null);
+    closeDictionaryStudySimilarWorkflow();
     setDictionaryStudy(null);
   }
 
-  async function openDictionaryStudySimilar(identity: SharedDictionaryEntryIdentity) {
+  async function openDictionaryStudySimilar(
+    identity: SharedDictionaryEntryIdentity,
+    options: { preserveAddPopup?: boolean } = {}
+  ) {
+    cancelDictionarySimilarRequest();
+    const controller = new AbortController();
+    dictionarySimilarAbortRef.current = controller;
+    if (!options.preserveAddPopup) {
+      setDictionaryStudySimilarAddPopup(null);
+    }
     setDictionarySimilarPopup({
       identity,
       groups: [],
@@ -12156,11 +13289,18 @@ export default function CategoryWorkspace() {
         `/api/dictionary-groups/similar?${params.toString()}`,
         {
           cache: "no-store",
+          signal: controller.signal,
         }
       );
       const payload = (await response.json()) as DictionaryGroupSimilarPayload;
       if (!response.ok || !payload.data) {
         throw new Error(payload.error ?? "Не удалось загрузить похожие слова.");
+      }
+      if (
+        controller.signal.aborted ||
+        dictionarySimilarAbortRef.current !== controller
+      ) {
+        return;
       }
 
       setDictionarySimilarPopup({
@@ -12171,6 +13311,12 @@ export default function CategoryWorkspace() {
         error: null,
       });
     } catch (error) {
+      if (
+        controller.signal.aborted ||
+        dictionarySimilarAbortRef.current !== controller
+      ) {
+        return;
+      }
       setDictionarySimilarPopup({
         identity,
         groups: [],
@@ -12178,7 +13324,62 @@ export default function CategoryWorkspace() {
         isLoading: false,
         error: toErrorMessage(error, "Не удалось загрузить похожие слова."),
       });
+    } finally {
+      if (dictionarySimilarAbortRef.current === controller) {
+        dictionarySimilarAbortRef.current = null;
+      }
     }
+  }
+
+  function openDictionaryStudySimilarAdd(
+    study: DictionaryStudyState,
+    entry: DictionaryEntry,
+    identity: SharedDictionaryEntryIdentity,
+    currentGroups: DictionaryWordGroup[]
+  ) {
+    cancelDictionarySimilarRequest();
+    setDictionarySimilarPopup(null);
+    setDictionaryStudySimilarAddPopup({
+      identity,
+      entry,
+      labels: study.labels,
+      columns: study.columns,
+      currentGroups,
+      availableGroups: dictionaryGroups,
+    });
+  }
+
+  function openDictionaryStudySimilarAddFromPopup() {
+    if (!dictionarySimilarPopup || !dictionaryStudy) {
+      return;
+    }
+
+    const identity = dictionarySimilarPopup.identity;
+    const identityKey = dictionaryEntryIdentityKey(identity);
+    const cachedAddPopupMatches =
+      dictionaryStudySimilarAddPopup &&
+      dictionaryEntryIdentityKey(dictionaryStudySimilarAddPopup.identity) ===
+        identityKey;
+    if (cachedAddPopupMatches) {
+      cancelDictionarySimilarRequest();
+      setDictionarySimilarPopup(null);
+      return;
+    }
+
+    const entry = dictionaryStudy.baseCards.find(
+      (candidate) => candidate.id === identity.entryId
+    );
+    if (!entry) {
+      pushNotice("Текущее слово больше не найдено в словаре.", "warn");
+      return;
+    }
+
+    openDictionaryStudySimilarAdd(
+      dictionaryStudy,
+      entry,
+      identity,
+      findDictionaryGroupsForIdentity(dictionaryGroups, identity)
+    );
   }
 
   function openDictionaryEditorFromStudy() {
@@ -12192,6 +13393,10 @@ export default function CategoryWorkspace() {
     setDictionaryImportDraft("");
     resetDictionaryEditorSearch();
     setDictionaryEditorTab("entries");
+    closeDictionaryStudySimilarWorkflow();
+    saveDictionaryStudyProgress(dictionaryStudy);
+    void persistDictionaryStudyProgress(dictionaryStudy);
+    const activeStudySettings = getDictionaryStudySettingsFromStudy(dictionaryStudy);
 
     if (dictionaryStudy.dictionaryId) {
       const sourceDocument = getContinuousDocumentForCategory(
@@ -12206,7 +13411,7 @@ export default function CategoryWorkspace() {
       }
 
       setDictionaryStudy(null);
-      setDictionaryEditor({
+      setDictionaryEditor(makeDictionaryEditorState({
         source: "continuous",
         sourceCategoryId: dictionaryStudy.sourceCategoryId,
         sourceMessageId: null,
@@ -12214,30 +13419,23 @@ export default function CategoryWorkspace() {
         titleDraft: dictionary.title,
         descriptionDraft: dictionary.description,
         tagsDraft: serializeDictionaryTags(dictionary.tags),
-        promptSide: dictionary.promptSide,
-        shuffle: dictionary.shuffle,
-        autoSpeak: dictionary.autoSpeak,
-        autoSpeakFields: normalizeDictionaryAutoSpeakFields(
-          dictionary.autoSpeakFields,
-          getDefaultDictionaryAutoSpeakFields(dictionary.columns),
-          dictionary.columns
-        ),
-        manualSpeakFields: normalizeDictionaryManualSpeakFields(
-          dictionary.manualSpeakFields,
-          getDefaultDictionaryManualSpeakFields(dictionary.columns),
-          dictionary.columns
-        ),
-        noteDisplayMode: dictionary.noteDisplayMode,
-        progressMode: dictionary.progressMode,
-        motivateOnCorrect: dictionary.motivateOnCorrect,
-        cardMode: dictionary.cardMode,
-        adhdMode: dictionary.adhdMode,
-        motivationAdvanceMode: dictionary.motivationAdvanceMode,
-        motivationAutoSeconds: dictionary.motivationAutoSeconds,
+        promptSide: activeStudySettings.promptSide,
+        shuffle: activeStudySettings.shuffle,
+        autoSpeak: activeStudySettings.autoSpeak,
+        autoSpeakFields: activeStudySettings.autoSpeakFields,
+        manualSpeakFields: activeStudySettings.manualSpeakFields,
+        speechLanguage: activeStudySettings.speechLanguage,
+        noteDisplayMode: activeStudySettings.noteDisplayMode,
+        progressMode: activeStudySettings.progressMode,
+        motivateOnCorrect: activeStudySettings.motivateOnCorrect,
+        cardMode: activeStudySettings.cardMode,
+        adhdMode: activeStudySettings.adhdMode,
+        motivationAdvanceMode: activeStudySettings.motivationAdvanceMode,
+        motivationAutoSeconds: activeStudySettings.motivationAutoSeconds,
         labels: normalizeDictionaryLabels(dictionary.labels, dictionary.columns),
         columns: dictionary.columns,
         entries: makeDictionaryEditorEntries(dictionary),
-      });
+      }));
       return;
     }
 
@@ -12257,7 +13455,7 @@ export default function CategoryWorkspace() {
 
     setSelectedMessageId(message.id);
     setDictionaryStudy(null);
-    setDictionaryEditor({
+    setDictionaryEditor(makeDictionaryEditorState({
       source: "block-message",
       sourceCategoryId: dictionaryStudy.sourceCategoryId,
       sourceMessageId: message.id,
@@ -12265,30 +13463,23 @@ export default function CategoryWorkspace() {
       titleDraft: message.title,
       descriptionDraft: payload.description,
       tagsDraft: serializeDictionaryTags(payload.tags),
-      promptSide: payload.promptSide,
-      shuffle: payload.shuffle,
-      autoSpeak: payload.autoSpeak,
-      autoSpeakFields: normalizeDictionaryAutoSpeakFields(
-        payload.autoSpeakFields,
-        getDefaultDictionaryAutoSpeakFields(payload.columns),
-        payload.columns
-      ),
-      manualSpeakFields: normalizeDictionaryManualSpeakFields(
-        payload.manualSpeakFields,
-        getDefaultDictionaryManualSpeakFields(payload.columns),
-        payload.columns
-      ),
-      noteDisplayMode: payload.noteDisplayMode,
-      progressMode: payload.progressMode,
-      motivateOnCorrect: payload.motivateOnCorrect,
-      cardMode: payload.cardMode,
-      adhdMode: payload.adhdMode,
-      motivationAdvanceMode: payload.motivationAdvanceMode,
-      motivationAutoSeconds: payload.motivationAutoSeconds,
+      promptSide: activeStudySettings.promptSide,
+      shuffle: activeStudySettings.shuffle,
+      autoSpeak: activeStudySettings.autoSpeak,
+      autoSpeakFields: activeStudySettings.autoSpeakFields,
+      manualSpeakFields: activeStudySettings.manualSpeakFields,
+      speechLanguage: activeStudySettings.speechLanguage,
+      noteDisplayMode: activeStudySettings.noteDisplayMode,
+      progressMode: activeStudySettings.progressMode,
+      motivateOnCorrect: activeStudySettings.motivateOnCorrect,
+      cardMode: activeStudySettings.cardMode,
+      adhdMode: activeStudySettings.adhdMode,
+      motivationAdvanceMode: activeStudySettings.motivationAdvanceMode,
+      motivationAutoSeconds: activeStudySettings.motivationAutoSeconds,
       labels: normalizeDictionaryLabels(payload.labels, payload.columns),
       columns: payload.columns,
       entries: makeDictionaryEditorEntries(payload),
-    });
+    }));
   }
 
   function toggleDictionaryStudySide() {
@@ -12313,8 +13504,6 @@ export default function CategoryWorkspace() {
       {
         ...dictionaryStudy,
         isAnswerRevealed: !dictionaryStudy.isAnswerRevealed,
-        activeWordIndexBySide: makeDefaultDictionaryStudyColumnIndexes(),
-        activeNoteIndexBySide: makeDefaultDictionaryStudyColumnIndexes(),
         transitionKey: dictionaryStudy.transitionKey + 1,
       },
       { autoSpeak: true }
@@ -12371,33 +13560,36 @@ export default function CategoryWorkspace() {
       return;
     }
 
-    setDictionaryStudy((prev) => {
-      if (!prev) {
-        return prev;
-      }
-
-      const source =
-        kind === "word" ? prev.activeWordIndexBySide : prev.activeNoteIndexBySide;
-      const nextIndex = wrapIndex((source[activeSide] ?? 0) + offset, values.length);
-      const nextIndexes = {
-        ...source,
-        [activeSide]: nextIndex,
-      };
-
-      return kind === "word"
+    cancelDictionarySpeech();
+    const source =
+      kind === "word"
+        ? dictionaryStudy.activeWordIndexBySide
+        : dictionaryStudy.activeNoteIndexBySide;
+    const nextIndex = wrapIndex((source[activeSide] ?? 0) + offset, values.length);
+    const nextIndexes = {
+      ...source,
+      [activeSide]: nextIndex,
+    };
+    const nextStudy: DictionaryStudyState =
+      kind === "word"
         ? {
-            ...prev,
+            ...dictionaryStudy,
             activeWordIndexBySide: nextIndexes,
             activeNoteIndexBySide: {
-              ...prev.activeNoteIndexBySide,
+              ...dictionaryStudy.activeNoteIndexBySide,
               [activeSide]: 0,
             },
           }
         : {
-            ...prev,
+            ...dictionaryStudy,
             activeNoteIndexBySide: nextIndexes,
           };
-    });
+
+    dictionaryStudyRef.current = nextStudy;
+    setDictionaryStudy(nextStudy);
+    if (nextStudy.autoSpeak) {
+      queueDictionaryAutoSpeech(nextStudy);
+    }
   }
 
   function moveDictionaryStudy(offset: number) {
@@ -12510,6 +13702,9 @@ export default function CategoryWorkspace() {
     if (!dictionaryStudy) {
       return;
     }
+    if (dictionaryStudy.shuffle === shuffle) {
+      return;
+    }
 
     cancelDictionarySpeech();
     clearDictionaryMotivationTimer();
@@ -12546,6 +13741,28 @@ export default function CategoryWorkspace() {
     }
 
     commitDictionaryStudyState(nextStudy, { autoSpeak: true });
+  }
+
+  async function handleDictionaryStudyReset() {
+    if (!dictionaryStudy || dictionaryStudy.cards.length === 0) {
+      return;
+    }
+
+    const shouldShuffle = dictionaryStudy.shuffle;
+    const confirmed = await requestConfirmation({
+      title: shouldShuffle ? "Перемешать карточки" : "Сбросить прогресс",
+      message: shouldShuffle
+        ? "Карточки будут перемешаны заново, а текущий прогресс заучивания — сброшен. Продолжить?"
+        : "Текущий прогресс заучивания будет сброшен, и показ начнётся с первой карточки. Продолжить?",
+      confirmLabel: shouldShuffle ? "перемешать" : "сбросить",
+      cancelLabel: "отмена",
+      tone: "danger",
+    });
+    if (!confirmed) {
+      return;
+    }
+
+    resetDictionaryStudyProgress();
   }
 
   function setDictionaryStudyAdhdMode(adhdMode: boolean) {
@@ -12925,7 +14142,15 @@ export default function CategoryWorkspace() {
     }
   }
 
-  function resolveDictionarySpeechLanguage(text: string): string {
+  function resolveDictionarySpeechLanguage(
+    text: string,
+    selectedLanguage: DictionarySpeechLanguage = DEFAULT_DICTIONARY_SPEECH_LANGUAGE
+  ): string {
+    const normalizedLanguage = normalizeDictionarySpeechLanguage(selectedLanguage);
+    if (normalizedLanguage !== DEFAULT_DICTIONARY_SPEECH_LANGUAGE) {
+      return normalizedLanguage;
+    }
+
     const latinCount = text.match(/[A-Za-z]/g)?.length ?? 0;
     const cyrillicCount = text.match(/[А-Яа-яЁё]/g)?.length ?? 0;
     const startsWithLatin = /^[^A-Za-zА-Яа-яЁё]*[A-Za-z]/.test(text);
@@ -12941,29 +14166,69 @@ export default function CategoryWorkspace() {
     return window.navigator.language || "ru-RU";
   }
 
-  function getDictionarySpeechVoice(lang: string): SpeechSynthesisVoice | null {
+  function refreshDictionarySpeechVoices(markLoaded = true): SpeechSynthesisVoice[] {
     if (typeof window === "undefined" || !("speechSynthesis" in window)) {
-      return null;
+      dictionarySpeechVoicesRef.current = [];
+      setDictionarySpeechVoices([]);
+      setDictionarySpeechVoicesLoaded(true);
+      return [];
     }
 
     const voices = window.speechSynthesis.getVoices();
-    if (voices.length === 0) {
-      return null;
+    dictionarySpeechVoicesRef.current = voices;
+    setDictionarySpeechVoices(voices);
+    setDictionarySpeechVoicesLoaded(markLoaded || voices.length > 0);
+    return voices;
+  }
+
+  function getDictionarySpeechVoice(lang: string): SpeechSynthesisVoice | null {
+    const voices =
+      dictionarySpeechVoicesRef.current.length > 0
+        ? dictionarySpeechVoicesRef.current
+        : refreshDictionarySpeechVoices(false);
+    return findDictionarySpeechVoiceForLanguage(voices, lang);
+  }
+
+  function pushMissingDictionarySpeechVoiceNotice(lang: string, warn: boolean) {
+    const normalizedLanguage = normalizeDictionarySpeechLanguage(lang);
+    const languageLabel = getDictionarySpeechLanguageLabel(normalizedLanguage);
+    const noticeKey = `${normalizedLanguage}:${dictionarySpeechVoices.length}`;
+
+    if (!warn && dictionaryMissingSpeechVoiceNoticeRef.current === noticeKey) {
+      return;
     }
 
-    const exact = voices.find(
-      (voice) => voice.lang.toLocaleLowerCase() === lang.toLocaleLowerCase()
-    );
-    if (exact) {
-      return exact;
+    dictionaryMissingSpeechVoiceNoticeRef.current = noticeKey;
+    const message = dictionarySpeechVoicesLoaded
+      ? `В браузере нет голоса «${languageLabel}» (${normalizedLanguage}). Установи этот голос в системе/браузере или выбери доступный язык.`
+      : `Голоса браузера ещё загружаются, «${languageLabel}» пока не найден. Попробуй озвучку ещё раз через секунду.`;
+
+    pushNotice(message, "warn");
+  }
+
+  function getDictionaryEditorSpeechStatus(
+    language: DictionarySpeechLanguage
+  ): string {
+    const normalizedLanguage = normalizeDictionarySpeechLanguage(language);
+    if (normalizedLanguage === DEFAULT_DICTIONARY_SPEECH_LANGUAGE) {
+      return dictionarySpeechVoices.length > 0
+        ? `авто: доступно голосов ${dictionarySpeechVoices.length}`
+        : dictionarySpeechVoicesLoaded
+          ? "авто: браузер не отдал список голосов"
+          : "авто: загружаю голоса браузера";
     }
 
-    const languagePrefix = lang.split("-")[0]?.toLocaleLowerCase() ?? "";
-    return (
-      voices.find((voice) =>
-        voice.lang.toLocaleLowerCase().startsWith(`${languagePrefix}-`)
-      ) ?? null
+    const voice = findDictionarySpeechVoiceForLanguage(
+      dictionarySpeechVoices,
+      normalizedLanguage
     );
+    if (voice) {
+      return `голос: ${formatDictionarySpeechVoiceLabel(voice)}`;
+    }
+
+    return dictionarySpeechVoicesLoaded
+      ? `нет голоса ${normalizedLanguage} в браузере`
+      : "загружаю голоса браузера";
   }
 
   function speakDictionaryStudyCurrentCard() {
@@ -13004,15 +14269,37 @@ export default function CategoryWorkspace() {
     }
 
     window.speechSynthesis.cancel();
+    const currentSpeechLanguage =
+      dictionaryStudyRef.current?.speechLanguage ??
+      dictionaryStudy?.speechLanguage ??
+      DEFAULT_DICTIONARY_SPEECH_LANGUAGE;
+    const normalizedCurrentSpeechLanguage =
+      normalizeDictionarySpeechLanguage(currentSpeechLanguage);
+    const requiresExactSpeechVoice =
+      normalizedCurrentSpeechLanguage !== DEFAULT_DICTIONARY_SPEECH_LANGUAGE;
+    let didQueueSpeech = false;
     for (const textToSpeak of textSegments) {
-      const speechLanguage = resolveDictionarySpeechLanguage(textToSpeak);
+      const speechLanguage = resolveDictionarySpeechLanguage(
+        textToSpeak,
+        normalizedCurrentSpeechLanguage
+      );
       const utterance = new SpeechSynthesisUtterance(textToSpeak);
       utterance.lang = speechLanguage;
       const voice = getDictionarySpeechVoice(speechLanguage);
+      if (requiresExactSpeechVoice && !voice) {
+        pushMissingDictionarySpeechVoiceNotice(speechLanguage, options.warn);
+        continue;
+      }
+
       if (voice) {
         utterance.voice = voice;
       }
       window.speechSynthesis.speak(utterance);
+      didQueueSpeech = true;
+    }
+
+    if (!didQueueSpeech) {
+      window.speechSynthesis.cancel();
     }
   }
 
@@ -13132,6 +14419,7 @@ export default function CategoryWorkspace() {
       checklists: nextChecklists,
       dictionaries: sourceDocument.dictionaries,
       schedules: sourceDocument.schedules,
+      rules: sourceDocument.rules,
     });
   }
 
@@ -13245,6 +14533,7 @@ export default function CategoryWorkspace() {
       checklists: nextChecklists,
       dictionaries: sourceDocument.dictionaries,
       schedules: sourceDocument.schedules,
+      rules: sourceDocument.rules,
     });
     setDragChecklistItem(null);
   }
@@ -13601,11 +14890,44 @@ export default function CategoryWorkspace() {
     );
   }
 
+  function updateDictionaryStudySimilarAddGroup(group: DictionaryWordGroup) {
+    const normalized = normalizeDictionaryWordGroup(group);
+    setDictionaryStudySimilarAddPopup((prev) => {
+      if (!prev) {
+        return prev;
+      }
+
+      const currentIdentityKey = dictionaryEntryIdentityKey(prev.identity);
+      const includesCurrentWord = normalized.items.some(
+        (item) =>
+          dictionaryEntryIdentityKey({
+            sourceCategoryId: item.sourceCategoryId,
+            sourceMessageId: item.sourceMessageId,
+            dictionaryId: item.dictionaryId,
+            entryId: item.entryId,
+          }) === currentIdentityKey
+      );
+      const currentGroups = includesCurrentWord
+        ? [...prev.currentGroups.filter((item) => item.id !== normalized.id), normalized]
+        : prev.currentGroups.filter((item) => item.id !== normalized.id);
+      const availableGroups = [
+        ...prev.availableGroups.filter((item) => item.id !== normalized.id),
+        normalized,
+      ];
+
+      return {
+        ...prev,
+        currentGroups: currentGroups.sort(sortDictionaryWordGroups),
+        availableGroups: availableGroups.sort(sortDictionaryWordGroups),
+      };
+    });
+  }
+
   function openDictionaryGroupEditor(group: DictionaryWordGroup) {
     setChecklistEditor(null);
     setDictionaryEditor(null);
     setDictionaryStudy(null);
-    setDictionarySimilarPopup(null);
+    closeDictionaryStudySimilarWorkflow();
     setDictionaryGroupEditor(normalizeDictionaryWordGroup(group));
     setSidebarTab("dictionaryGroups");
   }
@@ -13712,7 +15034,7 @@ export default function CategoryWorkspace() {
 
   function handleDictionarySimilarOpenSource(result: DictionaryGroupResolvedResult) {
     cancelDictionarySpeech();
-    setDictionarySimilarPopup(null);
+    closeDictionaryStudySimilarWorkflow();
     setDictionaryStudy(null);
     handleDictionaryGlobalSearchOpenSource({
       id: result.id,
@@ -14017,6 +15339,10 @@ export default function CategoryWorkspace() {
   }
 
   async function handleAuthSignIn() {
+    if (isAuthBusy) {
+      return;
+    }
+
     const normalizedUserId = normalizeUserId(authLoginUserIdDraft);
     const userIdValidationError = validateUserId(normalizedUserId);
 
@@ -15329,6 +16655,7 @@ export default function CategoryWorkspace() {
     if (!scheduleModal) {
       return null;
     }
+    const scheduleModalPayload = getSchedulePayloadForSource(scheduleModal);
 
     return (
       <div className="absolute inset-0 z-[72] flex items-center justify-center p-3">
@@ -15346,12 +16673,12 @@ export default function CategoryWorkspace() {
                 {scheduleModal.mode === "event"
                   ? scheduleModal.eventId
                     ? "Дело"
-                    : "Новое дело"
+                    : "Назначить дело"
                   : scheduleModal.mode === "assistant"
-                    ? "Помощник расписания"
+                    ? "Помощник"
                     : scheduleModal.mode === "spontaneous"
                       ? "Спонтанное действие"
-                      : "Нормы расписания"}
+                      : "База дел"}
               </h2>
               <span className="dictionary-editor-title-badge">Расписание</span>
             </div>
@@ -15369,7 +16696,64 @@ export default function CategoryWorkspace() {
             <>
               <div className="schedule-form-grid">
                 <label className="dictionary-editor-field">
-                  <span className="settings-label">название</span>
+                  <span className="settings-label">дело из базы</span>
+                  <select
+                    value={scheduleModal.draft.taskId}
+                    onChange={(event) => {
+                      const task = scheduleModalPayload?.taskBase?.find(
+                        (candidate) => candidate.id === event.target.value
+                      );
+                      setScheduleModal((prev) =>
+                        prev?.mode === "event"
+                          ? {
+                              ...prev,
+                              draft: {
+                                ...prev.draft,
+                                taskId: event.target.value,
+                                title: "",
+                                description: task?.details || task?.description || "",
+                                category: task?.category ?? "",
+                                priority: task?.priority ?? "medium",
+                                type: task?.isSpontaneous
+                                  ? "spontaneous"
+                                  : task?.type ?? "flexible",
+                                end: task?.approximateEnd ?? prev.draft.end,
+                                endMode: "time",
+                                durationMinutes: String(
+                                  task?.durationMinutes ??
+                                    (task?.minDurationMinutes &&
+                                    task.maxDurationMinutes
+                                      ? Math.round(
+                                          (task.minDurationMinutes +
+                                            task.maxDurationMinutes) /
+                                            2
+                                        )
+                                      : task?.goalMinutes ?? 60)
+                                ),
+                                approximate: Boolean(
+                                  task?.minDurationMinutes ||
+                                    task?.maxDurationMinutes ||
+                                    task?.approximateEnd
+                                ),
+                                canMove: task?.type !== "fixed",
+                                canSplit: task?.canSplit ?? false,
+                              },
+                            }
+                          : prev
+                      );
+                    }}
+                    className="settings-input"
+                  >
+                    <option value="">выбрать дело</option>
+                    {(scheduleModalPayload?.taskBase ?? []).map((task) => (
+                      <option key={task.id} value={task.id}>
+                        {task.title}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="dictionary-editor-field">
+                  <span className="settings-label">уточнение названия</span>
                   <input
                     value={scheduleModal.draft.title}
                     onChange={(event) =>
@@ -15383,7 +16767,7 @@ export default function CategoryWorkspace() {
                       )
                     }
                     className="settings-input"
-                    placeholder="Позаниматься английским"
+                    placeholder="можно оставить пустым"
                   />
                 </label>
                 <label className="dictionary-editor-field">
@@ -15407,20 +16791,59 @@ export default function CategoryWorkspace() {
                 <label className="dictionary-editor-field">
                   <span className="settings-label">начало</span>
                   <input
-                    type="time"
                     value={scheduleModal.draft.start}
+                    onChange={(event) =>
+                      updateScheduleEventDraft({ start: event.target.value }, "start")
+                    }
+                    className="settings-input"
+                    placeholder="16:00 или 04:00pm"
+                  />
+                </label>
+                <label className="dictionary-editor-field">
+                  <span className="settings-label">место</span>
+                  <input
+                    value={scheduleModal.draft.location}
                     onChange={(event) =>
                       setScheduleModal((prev) =>
                         prev?.mode === "event"
                           ? {
                               ...prev,
-                              draft: { ...prev.draft, start: event.target.value },
+                              draft: { ...prev.draft, location: event.target.value },
                             }
                           : prev
                       )
                     }
                     className="settings-input"
+                    placeholder="место"
                   />
+                </label>
+                <label className="dictionary-editor-field">
+                  <span className="settings-label">конец</span>
+                  <div className="schedule-end-mode-row">
+                    <select
+                      value={scheduleModal.draft.endMode}
+                      onChange={(event) =>
+                        updateScheduleEventDraft(
+                          { endMode: event.target.value as ScheduleEventEndMode },
+                          "endMode"
+                        )
+                      }
+                      className="settings-input"
+                    >
+                      <option value="time">время</option>
+                      <option value="until-morning">до утра</option>
+                    </select>
+                    {scheduleModal.draft.endMode === "time" && (
+                      <input
+                        value={scheduleModal.draft.end}
+                        onChange={(event) =>
+                          updateScheduleEventDraft({ end: event.target.value }, "end")
+                        }
+                        className="settings-input"
+                        placeholder="17:30 или 5:30pm"
+                      />
+                    )}
+                  </div>
                 </label>
                 <label className="dictionary-editor-field">
                   <span className="settings-label">длительность, мин</span>
@@ -15430,16 +16853,9 @@ export default function CategoryWorkspace() {
                     step="5"
                     value={scheduleModal.draft.durationMinutes}
                     onChange={(event) =>
-                      setScheduleModal((prev) =>
-                        prev?.mode === "event"
-                          ? {
-                              ...prev,
-                              draft: {
-                                ...prev.draft,
-                                durationMinutes: event.target.value,
-                              },
-                            }
-                          : prev
+                      updateScheduleEventDraft(
+                        { durationMinutes: event.target.value },
+                        "duration"
                       )
                     }
                     className="settings-input"
@@ -15492,6 +16908,7 @@ export default function CategoryWorkspace() {
                     <option value="low">низкая</option>
                     <option value="medium">средняя</option>
                     <option value="high">высокая</option>
+                    <option value="critical">максимальная</option>
                   </select>
                 </label>
                 <label className="dictionary-editor-field">
@@ -15533,7 +16950,7 @@ export default function CategoryWorkspace() {
                       )
                     }
                     className="settings-input"
-                    placeholder="учеба, работа, отдых"
+                    placeholder="категория"
                   />
                 </label>
                 <label className="dictionary-editor-field">
@@ -15556,24 +16973,57 @@ export default function CategoryWorkspace() {
                 </label>
                 <label className="dictionary-editor-field">
                   <span className="settings-label">повторяемость</span>
+                  <select
+                    value={scheduleModal.draft.recurrenceMode}
+                    onChange={(event) =>
+                      updateScheduleEventRecurrenceMode(
+                        event.target.value as ScheduleRecurrenceDraftMode
+                      )
+                    }
+                    className="settings-input"
+                  >
+                    <option value="none">не повторять</option>
+                    <option value="weekly">каждую неделю</option>
+                    <option value="custom">пользовательский</option>
+                  </select>
+                </label>
+                {scheduleModal.draft.recurrenceMode === "custom" && (
+                  <div className="dictionary-editor-field schedule-weekday-picker">
+                    <span className="settings-label">дни недели</span>
+                    <div className="schedule-weekday-options">
+                      {SCHEDULE_WEEKDAY_OPTIONS.map((weekday) => (
+                        <button
+                          key={weekday.value}
+                          type="button"
+                          className={`mini-action schedule-weekday-option ${
+                            scheduleModal.draft.recurrenceWeekdays.includes(weekday.value)
+                              ? "schedule-weekday-option-active"
+                              : ""
+                          }`}
+                          onClick={() => toggleScheduleEventRecurrenceWeekday(weekday.value)}
+                        >
+                          {weekday.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <label className="dictionary-editor-toggle">
                   <input
-                    value={scheduleModal.draft.recurrence}
+                    type="checkbox"
+                    checked={scheduleModal.draft.approximate}
                     onChange={(event) =>
                       setScheduleModal((prev) =>
                         prev?.mode === "event"
                           ? {
                               ...prev,
-                              draft: {
-                                ...prev.draft,
-                                recurrence: event.target.value,
-                              },
+                              draft: { ...prev.draft, approximate: event.target.checked },
                             }
                           : prev
                       )
                     }
-                    className="settings-input"
-                    placeholder="например: 5 раз в неделю"
                   />
+                  <span>время примерное</span>
                 </label>
                 <label className="dictionary-editor-toggle">
                   <input
@@ -15644,229 +17094,463 @@ export default function CategoryWorkspace() {
 
           {scheduleModal.mode === "assistant" && (
             <>
-              <label className="dictionary-editor-field">
-                <span className="settings-label">что нужно запланировать?</span>
-                <textarea
-                  value={scheduleModal.draft.text}
-                  onChange={(event) =>
-                    setScheduleModal((prev) =>
-                      prev?.mode === "assistant"
-                        ? {
-                            ...prev,
-                            draft: { ...prev.draft, text: event.target.value },
-                            suggestions: [],
-                            status: "",
-                          }
-                        : prev
-                    )
-                  }
-                  className="settings-input settings-textarea schedule-helper-textarea"
-                  placeholder="Например: позаниматься английским 1 час вечером на этой неделе"
-                />
-              </label>
-              <div className="schedule-form-grid mt-3">
-                <label className="dictionary-editor-field">
-                  <span className="settings-label">длительность, мин</span>
-                  <input
-                    type="number"
-                    min="5"
-                    value={scheduleModal.draft.durationMinutes}
-                    onChange={(event) =>
+              <div className="schedule-assistant-mode">
+                {(["slot", "autoplan"] as ScheduleAssistantMode[]).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    className={`mini-action schedule-tab ${
+                      scheduleModal.draft.assistantMode === mode
+                        ? "schedule-tab-active"
+                        : ""
+                    }`}
+                    onClick={() =>
                       setScheduleModal((prev) =>
                         prev?.mode === "assistant"
                           ? {
                               ...prev,
-                              draft: {
-                                ...prev.draft,
-                                durationMinutes: event.target.value,
-                              },
+                              draft: { ...prev.draft, assistantMode: mode },
+                              suggestions: [],
+                              autoplanPreview: null,
+                              status: "",
                             }
                           : prev
                       )
                     }
-                    className="settings-input"
-                  />
-                </label>
-                <label className="dictionary-editor-field">
-                  <span className="settings-label">день</span>
-                  <input
-                    type="date"
-                    value={scheduleModal.draft.date}
-                    onChange={(event) =>
-                      setScheduleModal((prev) =>
-                        prev?.mode === "assistant"
-                          ? {
-                              ...prev,
-                              draft: { ...prev.draft, date: event.target.value },
-                            }
-                          : prev
-                      )
-                    }
-                    className="settings-input"
-                  />
-                </label>
-                <label className="dictionary-editor-field">
-                  <span className="settings-label">диапазон с</span>
-                  <input
-                    type="date"
-                    value={scheduleModal.draft.dateRangeStart}
-                    onChange={(event) =>
-                      setScheduleModal((prev) =>
-                        prev?.mode === "assistant"
-                          ? {
-                              ...prev,
-                              draft: {
-                                ...prev.draft,
-                                dateRangeStart: event.target.value,
-                              },
-                            }
-                          : prev
-                      )
-                    }
-                    className="settings-input"
-                  />
-                </label>
-                <label className="dictionary-editor-field">
-                  <span className="settings-label">диапазон до</span>
-                  <input
-                    type="date"
-                    value={scheduleModal.draft.dateRangeEnd}
-                    onChange={(event) =>
-                      setScheduleModal((prev) =>
-                        prev?.mode === "assistant"
-                          ? {
-                              ...prev,
-                              draft: {
-                                ...prev.draft,
-                                dateRangeEnd: event.target.value,
-                              },
-                            }
-                          : prev
-                      )
-                    }
-                    className="settings-input"
-                  />
-                </label>
-                <label className="dictionary-editor-field">
-                  <span className="settings-label">предпочтительное время</span>
-                  <input
-                    value={scheduleModal.draft.preferredTime}
-                    onChange={(event) =>
-                      setScheduleModal((prev) =>
-                        prev?.mode === "assistant"
-                          ? {
-                              ...prev,
-                              draft: {
-                                ...prev.draft,
-                                preferredTime: event.target.value,
-                              },
-                            }
-                          : prev
-                      )
-                    }
-                    className="settings-input"
-                    placeholder="18:00 или вечером"
-                  />
-                </label>
-                <label className="dictionary-editor-field">
-                  <span className="settings-label">дедлайн</span>
-                  <input
-                    type="date"
-                    value={scheduleModal.draft.deadline}
-                    onChange={(event) =>
-                      setScheduleModal((prev) =>
-                        prev?.mode === "assistant"
-                          ? {
-                              ...prev,
-                              draft: { ...prev.draft, deadline: event.target.value },
-                            }
-                          : prev
-                      )
-                    }
-                    className="settings-input"
-                  />
-                </label>
-                <label className="dictionary-editor-field">
-                  <span className="settings-label">категория</span>
-                  <input
-                    value={scheduleModal.draft.category}
-                    onChange={(event) =>
-                      setScheduleModal((prev) =>
-                        prev?.mode === "assistant"
-                          ? {
-                              ...prev,
-                              draft: { ...prev.draft, category: event.target.value },
-                            }
-                          : prev
-                      )
-                    }
-                    className="settings-input"
-                  />
-                </label>
-                <label className="dictionary-editor-field">
-                  <span className="settings-label">важность</span>
-                  <select
-                    value={scheduleModal.draft.priority}
-                    onChange={(event) =>
-                      setScheduleModal((prev) =>
-                        prev?.mode === "assistant"
-                          ? {
-                              ...prev,
-                              draft: {
-                                ...prev.draft,
-                                priority: event.target.value as SchedulePriority,
-                              },
-                            }
-                          : prev
-                      )
-                    }
-                    className="settings-input"
                   >
-                    <option value="low">низкая</option>
-                    <option value="medium">средняя</option>
-                    <option value="high">высокая</option>
-                  </select>
-                </label>
-                <label className="dictionary-editor-toggle">
-                  <input
-                    type="checkbox"
-                    checked={scheduleModal.draft.canMove}
-                    onChange={(event) =>
-                      setScheduleModal((prev) =>
-                        prev?.mode === "assistant"
-                          ? {
-                              ...prev,
-                              draft: { ...prev.draft, canMove: event.target.checked },
-                            }
-                          : prev
-                      )
-                    }
-                  />
-                  <span>можно переносить</span>
-                </label>
-                <label className="dictionary-editor-toggle">
-                  <input
-                    type="checkbox"
-                    checked={scheduleModal.draft.canSplit}
-                    onChange={(event) =>
-                      setScheduleModal((prev) =>
-                        prev?.mode === "assistant"
-                          ? {
-                              ...prev,
-                              draft: { ...prev.draft, canSplit: event.target.checked },
-                            }
-                          : prev
-                      )
-                    }
-                  />
-                  <span>можно делить</span>
-                </label>
+                    {mode === "slot" ? "Найти место" : "Разложить дела"}
+                  </button>
+                ))}
               </div>
+
+              {scheduleModal.draft.assistantMode === "slot" && (
+                <>
+                  <label className="dictionary-editor-field">
+                    <span className="settings-label">дело из базы</span>
+                    <select
+                      value={scheduleModal.draft.selectedTaskId}
+                      onChange={(event) =>
+                        setScheduleModal((prev) =>
+                          prev?.mode === "assistant"
+                            ? {
+                                ...prev,
+                                draft: {
+                                  ...prev.draft,
+                                  selectedTaskId: event.target.value,
+                                },
+                                suggestions: [],
+                                autoplanPreview: null,
+                                status: "",
+                              }
+                            : prev
+                        )
+                      }
+                      className="settings-input"
+                    >
+                      <option value="">выбрать дело</option>
+                      {(scheduleModalPayload?.taskBase ?? []).map((task) => (
+                        <option key={task.id} value={task.id}>
+                          {task.title}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="dictionary-editor-field">
+                    <span className="settings-label">дополнительная заметка</span>
+                    <textarea
+                      value={scheduleModal.draft.text}
+                      onChange={(event) =>
+                        setScheduleModal((prev) =>
+                          prev?.mode === "assistant"
+                            ? {
+                                ...prev,
+                                draft: { ...prev.draft, text: event.target.value },
+                                suggestions: [],
+                                autoplanPreview: null,
+                                status: "",
+                              }
+                            : prev
+                        )
+                      }
+                      className="settings-input settings-textarea schedule-helper-textarea"
+                      placeholder="заметка к делу"
+                    />
+                  </label>
+                  <div className="schedule-form-grid mt-3">
+                    <label className="dictionary-editor-field">
+                      <span className="settings-label">длительность, мин</span>
+                      <input
+                        type="number"
+                        min="5"
+                        value={scheduleModal.draft.durationMinutes}
+                        onChange={(event) =>
+                          setScheduleModal((prev) =>
+                            prev?.mode === "assistant"
+                              ? {
+                                  ...prev,
+                                  draft: {
+                                    ...prev.draft,
+                                    durationMinutes: event.target.value,
+                                  },
+                                }
+                              : prev
+                          )
+                        }
+                        className="settings-input"
+                      />
+                    </label>
+                    <label className="dictionary-editor-field">
+                      <span className="settings-label">день</span>
+                      <input
+                        type="date"
+                        value={scheduleModal.draft.date}
+                        onChange={(event) =>
+                          setScheduleModal((prev) =>
+                            prev?.mode === "assistant"
+                              ? {
+                                  ...prev,
+                                  draft: { ...prev.draft, date: event.target.value },
+                                }
+                              : prev
+                          )
+                        }
+                        className="settings-input"
+                      />
+                    </label>
+                    <label className="dictionary-editor-field">
+                      <span className="settings-label">диапазон с</span>
+                      <input
+                        type="date"
+                        value={scheduleModal.draft.dateRangeStart}
+                        onChange={(event) =>
+                          setScheduleModal((prev) =>
+                            prev?.mode === "assistant"
+                              ? {
+                                  ...prev,
+                                  draft: {
+                                    ...prev.draft,
+                                    dateRangeStart: event.target.value,
+                                  },
+                                }
+                              : prev
+                          )
+                        }
+                        className="settings-input"
+                      />
+                    </label>
+                    <label className="dictionary-editor-field">
+                      <span className="settings-label">диапазон до</span>
+                      <input
+                        type="date"
+                        value={scheduleModal.draft.dateRangeEnd}
+                        onChange={(event) =>
+                          setScheduleModal((prev) =>
+                            prev?.mode === "assistant"
+                              ? {
+                                  ...prev,
+                                  draft: {
+                                    ...prev.draft,
+                                    dateRangeEnd: event.target.value,
+                                  },
+                                }
+                              : prev
+                          )
+                        }
+                        className="settings-input"
+                      />
+                    </label>
+                    <label className="dictionary-editor-field">
+                      <span className="settings-label">предпочтительное время</span>
+                      <input
+                        value={scheduleModal.draft.preferredTime}
+                        onChange={(event) =>
+                          setScheduleModal((prev) =>
+                            prev?.mode === "assistant"
+                              ? {
+                                  ...prev,
+                                  draft: {
+                                    ...prev.draft,
+                                    preferredTime: event.target.value,
+                                  },
+                                }
+                              : prev
+                          )
+                        }
+                        className="settings-input"
+                        placeholder="желаемое время"
+                      />
+                    </label>
+                    <label className="dictionary-editor-field">
+                      <span className="settings-label">дедлайн</span>
+                      <input
+                        type="date"
+                        value={scheduleModal.draft.deadline}
+                        onChange={(event) =>
+                          setScheduleModal((prev) =>
+                            prev?.mode === "assistant"
+                              ? {
+                                  ...prev,
+                                  draft: { ...prev.draft, deadline: event.target.value },
+                                }
+                              : prev
+                          )
+                        }
+                        className="settings-input"
+                      />
+                    </label>
+                    <label className="dictionary-editor-field">
+                      <span className="settings-label">категория</span>
+                      <input
+                        value={scheduleModal.draft.category}
+                        onChange={(event) =>
+                          setScheduleModal((prev) =>
+                            prev?.mode === "assistant"
+                              ? {
+                                  ...prev,
+                                  draft: { ...prev.draft, category: event.target.value },
+                                }
+                              : prev
+                          )
+                        }
+                        className="settings-input"
+                      />
+                    </label>
+                    <label className="dictionary-editor-field">
+                      <span className="settings-label">важность</span>
+                      <select
+                        value={scheduleModal.draft.priority}
+                        onChange={(event) =>
+                          setScheduleModal((prev) =>
+                            prev?.mode === "assistant"
+                              ? {
+                                  ...prev,
+                                  draft: {
+                                    ...prev.draft,
+                                    priority: event.target.value as SchedulePriority,
+                                  },
+                                }
+                              : prev
+                          )
+                        }
+                        className="settings-input"
+                      >
+                        <option value="low">низкая</option>
+                        <option value="medium">средняя</option>
+                        <option value="high">высокая</option>
+                        <option value="critical">максимальная</option>
+                      </select>
+                    </label>
+                    <label className="dictionary-editor-toggle">
+                      <input
+                        type="checkbox"
+                        checked={scheduleModal.draft.canMove}
+                        onChange={(event) =>
+                          setScheduleModal((prev) =>
+                            prev?.mode === "assistant"
+                              ? {
+                                  ...prev,
+                                  draft: { ...prev.draft, canMove: event.target.checked },
+                                }
+                              : prev
+                          )
+                        }
+                      />
+                      <span>можно переносить</span>
+                    </label>
+                    <label className="dictionary-editor-toggle">
+                      <input
+                        type="checkbox"
+                        checked={scheduleModal.draft.canSplit}
+                        onChange={(event) =>
+                          setScheduleModal((prev) =>
+                            prev?.mode === "assistant"
+                              ? {
+                                  ...prev,
+                                  draft: { ...prev.draft, canSplit: event.target.checked },
+                                }
+                              : prev
+                          )
+                        }
+                      />
+                      <span>можно делить</span>
+                    </label>
+                  </div>
+                </>
+              )}
+
+              {scheduleModal.draft.assistantMode === "autoplan" && (
+                <>
+                  {(() => {
+                    const assistantPayload = getSchedulePayloadForSource(scheduleModal);
+                    const tasks =
+                      assistantPayload?.taskBase?.filter(
+                        (task) => task.allowAutoplan !== false
+                      ) ?? [];
+                    return (
+                      <div className="schedule-routine-picker">
+                        <div className="dictionary-editor-transfer-head">
+                          <span className="settings-label">дела для распределения</span>
+                          {tasks.length > 0 && (
+                            <button
+                              type="button"
+                              className="mini-action"
+                              onClick={() =>
+                                setScheduleModal((prev) =>
+                                  prev?.mode === "assistant"
+                                    ? {
+                                        ...prev,
+                                        draft: {
+                                          ...prev.draft,
+                                          selectedTaskIds:
+                                            prev.draft.selectedTaskIds.length ===
+                                            tasks.length
+                                              ? []
+                                              : tasks.map((task) => task.id),
+                                        },
+                                        autoplanPreview: null,
+                                        status: "",
+                                      }
+                                    : prev
+                                )
+                              }
+                            >
+                              {scheduleModal.draft.selectedTaskIds.length ===
+                              tasks.length
+                                ? "снять все"
+                                : "выбрать все"}
+                            </button>
+                          )}
+                        </div>
+                        {tasks.length === 0 ? (
+                          <p className="settings-hint">
+                            Сначала добавьте дело в “Базу дел” и включите
+                            автозаполнение.
+                          </p>
+                        ) : (
+                          tasks.map((task) => (
+                            <label key={task.id} className="schedule-routine-option">
+                              <input
+                                type="checkbox"
+                                checked={scheduleModal.draft.selectedTaskIds.includes(
+                                  task.id
+                                )}
+                                onChange={(event) =>
+                                  setScheduleModal((prev) =>
+                                    prev?.mode === "assistant"
+                                      ? {
+                                          ...prev,
+                                          draft: {
+                                            ...prev.draft,
+                                            selectedTaskIds: event.target.checked
+                                              ? [
+                                                  ...prev.draft.selectedTaskIds,
+                                                  task.id,
+                                                ]
+                                              : prev.draft.selectedTaskIds.filter(
+                                                  (id) => id !== task.id
+                                                ),
+                                          },
+                                          autoplanPreview: null,
+                                          status: "",
+                                        }
+                                      : prev
+                                  )
+                                }
+                              />
+                              <span>
+                                <strong>{task.title}</strong>
+                                <small>{formatScheduleTaskTarget(task)}</small>
+                              </span>
+                            </label>
+                          ))
+                        )}
+                      </div>
+                    );
+                  })()}
+                  <details className="schedule-advanced-block">
+                    <summary>Быстро добавить текстом</summary>
+                    <label className="dictionary-editor-field">
+                      <span className="settings-label">дополнительные гибкие планы</span>
+                      <textarea
+                        value={scheduleModal.draft.autoplanText}
+                        onChange={(event) =>
+                          setScheduleModal((prev) =>
+                            prev?.mode === "assistant"
+                              ? {
+                                  ...prev,
+                                  draft: {
+                                    ...prev.draft,
+                                    autoplanText: event.target.value,
+                                  },
+                                  suggestions: [],
+                                  autoplanPreview: null,
+                                  status: "",
+                                }
+                              : prev
+                          )
+                        }
+                      className="settings-input settings-textarea schedule-helper-textarea"
+                      placeholder="список дел, по одному на строку"
+                      />
+                    </label>
+                  </details>
+                  <div className="schedule-form-grid mt-3">
+                    <label className="dictionary-editor-field">
+                      <span className="settings-label">начать с</span>
+                      <input
+                        type="date"
+                        value={scheduleModal.draft.dateRangeStart}
+                        onChange={(event) =>
+                          setScheduleModal((prev) =>
+                            prev?.mode === "assistant"
+                              ? {
+                                  ...prev,
+                                  draft: {
+                                    ...prev.draft,
+                                    dateRangeStart: event.target.value,
+                                  },
+                                  autoplanPreview: null,
+                                }
+                              : prev
+                          )
+                        }
+                        className="settings-input"
+                      />
+                    </label>
+                    <label className="dictionary-editor-field">
+                      <span className="settings-label">горизонт, дней</span>
+                      <input
+                        type="number"
+                        min="1"
+                        max="30"
+                        value={scheduleModal.draft.autoplanHorizonDays}
+                        onChange={(event) =>
+                          setScheduleModal((prev) =>
+                            prev?.mode === "assistant"
+                              ? {
+                                  ...prev,
+                                  draft: {
+                                    ...prev.draft,
+                                    autoplanHorizonDays: event.target.value,
+                                  },
+                                  autoplanPreview: null,
+                                }
+                              : prev
+                          )
+                        }
+                        className="settings-input"
+                      />
+                    </label>
+                  </div>
+                </>
+              )}
+
               <div className="schedule-suggestions">
                 {scheduleModal.status && (
                   <p className="dictionary-editor-import-status">{scheduleModal.status}</p>
                 )}
-                {scheduleModal.suggestions.map((suggestion) => (
+                {scheduleModal.draft.assistantMode === "slot" &&
+                  scheduleModal.suggestions.map((suggestion) => (
                   <div key={suggestion.id} className="schedule-suggestion">
                     <div>
                       <strong>
@@ -15884,18 +17568,59 @@ export default function CategoryWorkspace() {
                       вставить
                     </button>
                   </div>
-                ))}
+                  ))}
+                {scheduleModal.draft.assistantMode === "autoplan" &&
+                  scheduleModal.autoplanPreview &&
+                  scheduleModal.autoplanPreview.taskCoverage.length > 0 && (
+                    <div className="schedule-autoplan-coverage">
+                      {scheduleModal.autoplanPreview.taskCoverage.map((coverage) => (
+                        <span key={coverage.taskId}>
+                          {coverage.title}: {formatScheduleMinutes(coverage.plannedMinutes)} /{" "}
+                          {formatScheduleMinutes(coverage.targetMinutes)} ·{" "}
+                          {coverage.plannedCount} блок.
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                {scheduleModal.draft.assistantMode === "autoplan" &&
+                  scheduleModal.autoplanPreview?.changes.map((change) => (
+                    <div key={change.id} className="schedule-suggestion">
+                      <div>{renderSchedulePreviewChange(change)}</div>
+                    </div>
+                  ))}
+                {scheduleModal.draft.assistantMode === "autoplan" &&
+                  scheduleModal.autoplanPreview &&
+                  scheduleModal.autoplanPreview.unplaced.length > 0 && (
+                    <p className="settings-hint">
+                      Не влезло:{" "}
+                      {scheduleModal.autoplanPreview.unplaced
+                        .map((task) => task.title)
+                        .join(", ")}
+                    </p>
+                  )}
               </div>
               <div className="dictionary-editor-actions">
                 <button type="button" className="mini-action" onClick={closeScheduleModal}>
                   отмена
                 </button>
+                {scheduleModal.draft.assistantMode === "autoplan" &&
+                  scheduleModal.autoplanPreview && (
+                    <button
+                      type="button"
+                      className="mini-action"
+                      onClick={applyScheduleAutoplanPreviewFromModal}
+                    >
+                      применить
+                    </button>
+                  )}
                 <button
                   type="button"
                   className="mini-action"
                   onClick={calculateScheduleAssistantSuggestions}
                 >
-                  найти место
+                  {scheduleModal.draft.assistantMode === "slot"
+                    ? "найти место"
+                    : "распределить"}
                 </button>
               </div>
             </>
@@ -15920,7 +17645,7 @@ export default function CategoryWorkspace() {
                     )
                   }
                   className="settings-input settings-textarea schedule-helper-textarea"
-                  placeholder="Например: меня позвали гулять сегодня с 18:00 до 21:00"
+                  placeholder="что случилось и когда"
                 />
               </label>
               <div className="schedule-form-grid mt-3">
@@ -16004,6 +17729,7 @@ export default function CategoryWorkspace() {
                     <option value="low">низкая</option>
                     <option value="medium">средняя</option>
                     <option value="high">высокая</option>
+                    <option value="critical">максимальная</option>
                   </select>
                 </label>
                 <label className="dictionary-editor-field">
@@ -16084,7 +17810,7 @@ export default function CategoryWorkspace() {
             </>
           )}
 
-          {scheduleModal.mode === "goals" && (
+          {scheduleModal.mode === "taskBase" && (
             <>
               <div className="schedule-form-grid">
                 <label className="dictionary-editor-field">
@@ -16094,7 +17820,7 @@ export default function CategoryWorkspace() {
                     value={scheduleModal.settingsDraft.defaultDayStart ?? "08:00"}
                     onChange={(event) =>
                       setScheduleModal((prev) =>
-                        prev?.mode === "goals"
+                        prev?.mode === "taskBase"
                           ? {
                               ...prev,
                               settingsDraft: {
@@ -16115,7 +17841,7 @@ export default function CategoryWorkspace() {
                     value={scheduleModal.settingsDraft.defaultDayEnd ?? "22:00"}
                     onChange={(event) =>
                       setScheduleModal((prev) =>
-                        prev?.mode === "goals"
+                        prev?.mode === "taskBase"
                           ? {
                               ...prev,
                               settingsDraft: {
@@ -16137,7 +17863,7 @@ export default function CategoryWorkspace() {
                     value={scheduleModal.settingsDraft.bufferMinutes ?? 15}
                     onChange={(event) =>
                       setScheduleModal((prev) =>
-                        prev?.mode === "goals"
+                        prev?.mode === "taskBase"
                           ? {
                               ...prev,
                               settingsDraft: {
@@ -16152,12 +17878,35 @@ export default function CategoryWorkspace() {
                   />
                 </label>
                 <label className="dictionary-editor-field">
+                  <span className="settings-label">горизонт автоплана, дней</span>
+                  <input
+                    type="number"
+                    min="1"
+                    max="30"
+                    value={scheduleModal.settingsDraft.autoplanHorizonDays ?? 7}
+                    onChange={(event) =>
+                      setScheduleModal((prev) =>
+                        prev?.mode === "taskBase"
+                          ? {
+                              ...prev,
+                              settingsDraft: {
+                                ...prev.settingsDraft,
+                                autoplanHorizonDays: Number(event.target.value),
+                              },
+                            }
+                          : prev
+                      )
+                    }
+                    className="settings-input"
+                  />
+                </label>
+                <label className="dictionary-editor-field">
                   <span className="settings-label">энергия</span>
                   <select
                     value={scheduleModal.settingsDraft.energyMode ?? "normal"}
                     onChange={(event) =>
                       setScheduleModal((prev) =>
-                        prev?.mode === "goals"
+                        prev?.mode === "taskBase"
                           ? {
                               ...prev,
                               settingsDraft: {
@@ -16181,7 +17930,7 @@ export default function CategoryWorkspace() {
                     value={scheduleModal.settingsDraft.dayMode ?? "normal"}
                     onChange={(event) =>
                       setScheduleModal((prev) =>
-                        prev?.mode === "goals"
+                        prev?.mode === "taskBase"
                           ? {
                               ...prev,
                               settingsDraft: {
@@ -16205,7 +17954,7 @@ export default function CategoryWorkspace() {
                     value={scheduleModal.settingsDraft.rescheduleMode ?? "normal"}
                     onChange={(event) =>
                       setScheduleModal((prev) =>
-                        prev?.mode === "goals"
+                        prev?.mode === "taskBase"
                           ? {
                               ...prev,
                               settingsDraft: {
@@ -16230,7 +17979,7 @@ export default function CategoryWorkspace() {
                     checked={scheduleModal.settingsDraft.preserveFreeTime ?? true}
                     onChange={(event) =>
                       setScheduleModal((prev) =>
-                        prev?.mode === "goals"
+                        prev?.mode === "taskBase"
                           ? {
                               ...prev,
                               settingsDraft: {
@@ -16247,151 +17996,246 @@ export default function CategoryWorkspace() {
               </div>
               <div className="schedule-goal-editor">
                 <div className="dictionary-editor-transfer-head">
-                  <span className="settings-label">дневные и недельные нормы</span>
+                  <span className="settings-label">База дел</span>
                   <button
                     type="button"
                     className="mini-action"
-                    onClick={addScheduleGoalDraft}
+                    onClick={addScheduleTaskTemplateDraft}
                   >
-                    + норма
+                    + дело
                   </button>
                 </div>
-                {scheduleModal.goalDrafts.length === 0 ? (
+                {scheduleModal.taskDrafts.length === 0 ? (
                   <p className="settings-hint">
-                    Норм пока нет. Добавьте цель по количеству или минутам.
+                    Добавьте заготовку дела. Она сохранится в базе, но не попадёт в
+                    расписание, пока вы её не назначите.
                   </p>
                 ) : (
-                  scheduleModal.goalDrafts.map((goal) => (
-                    <div key={goal.id} className="schedule-goal-row">
+                  scheduleModal.taskDrafts.map((task) => (
+                    <div key={task.id} className="schedule-task-base-row">
                       <input
-                        value={goal.title}
+                        value={task.title}
                         onChange={(event) =>
-                          setScheduleModal((prev) =>
-                            prev?.mode === "goals"
-                              ? {
-                                  ...prev,
-                                  goalDrafts: prev.goalDrafts.map((candidate) =>
-                                    candidate.id === goal.id
-                                      ? { ...candidate, title: event.target.value }
-                                      : candidate
-                                  ),
-                                }
-                              : prev
-                          )
+                          updateScheduleTaskTemplateDraft(task.id, {
+                            title: event.target.value,
+                          })
                         }
                         className="settings-input"
-                        placeholder="Английский"
+                        placeholder="название дела"
                       />
                       <input
-                        value={goal.category}
+                        value={task.category}
                         onChange={(event) =>
-                          setScheduleModal((prev) =>
-                            prev?.mode === "goals"
-                              ? {
-                                  ...prev,
-                                  goalDrafts: prev.goalDrafts.map((candidate) =>
-                                    candidate.id === goal.id
-                                      ? { ...candidate, category: event.target.value }
-                                      : candidate
-                                  ),
-                                }
-                              : prev
-                          )
+                          updateScheduleTaskTemplateDraft(task.id, {
+                            category: event.target.value,
+                          })
                         }
                         className="settings-input"
                         placeholder="категория"
                       />
                       <select
-                        value={goal.period}
+                        value={task.type}
                         onChange={(event) =>
-                          setScheduleModal((prev) =>
-                            prev?.mode === "goals"
-                              ? {
-                                  ...prev,
-                                  goalDrafts: prev.goalDrafts.map((candidate) =>
-                                    candidate.id === goal.id
-                                      ? {
-                                          ...candidate,
-                                          period:
-                                            event.target.value as ScheduleGoalPeriod,
-                                        }
-                                      : candidate
-                                  ),
-                                }
-                              : prev
-                          )
+                          updateScheduleTaskTemplateDraft(task.id, {
+                            type: event.target.value as ScheduleEventType,
+                            isSpontaneous: event.target.value === "spontaneous",
+                          })
                         }
                         className="settings-input"
                       >
-                        <option value="day">день</option>
-                        <option value="week">неделя</option>
+                        <option value="flexible">гибкое</option>
+                        <option value="fixed">фиксированное</option>
+                        <option value="habit">привычка/норма</option>
+                        <option value="spontaneous">спонтанное</option>
+                      </select>
+                      <select
+                        value={task.priority}
+                        onChange={(event) =>
+                          updateScheduleTaskTemplateDraft(task.id, {
+                            priority: event.target.value as SchedulePriority,
+                          })
+                        }
+                        className="settings-input"
+                      >
+                        <option value="low">низкий</option>
+                        <option value="medium">средний</option>
+                        <option value="high">высокий</option>
+                        <option value="critical">максимум</option>
                       </select>
                       <input
                         type="number"
                         min="1"
-                        value={goal.targetCount}
+                        value={task.goalCount}
                         onChange={(event) =>
-                          setScheduleModal((prev) =>
-                            prev?.mode === "goals"
-                              ? {
-                                  ...prev,
-                                  goalDrafts: prev.goalDrafts.map((candidate) =>
-                                    candidate.id === goal.id
-                                      ? {
-                                          ...candidate,
-                                          targetCount: event.target.value,
-                                        }
-                                      : candidate
-                                  ),
-                                }
-                              : prev
-                          )
+                          updateScheduleTaskTemplateDraft(task.id, {
+                            goalCount: event.target.value,
+                          })
                         }
                         className="settings-input"
-                        placeholder="раз"
+                        placeholder="норма, раз"
                       />
                       <input
                         type="number"
                         min="1"
-                        value={goal.targetMinutes}
+                        value={task.goalMinutes}
                         onChange={(event) =>
-                          setScheduleModal((prev) =>
-                            prev?.mode === "goals"
-                              ? {
-                                  ...prev,
-                                  goalDrafts: prev.goalDrafts.map((candidate) =>
-                                    candidate.id === goal.id
-                                      ? {
-                                          ...candidate,
-                                          targetMinutes: event.target.value,
-                                        }
-                                      : candidate
-                                  ),
-                                }
-                              : prev
-                          )
+                          updateScheduleTaskTemplateDraft(task.id, {
+                            goalMinutes: event.target.value,
+                          })
                         }
                         className="settings-input"
-                        placeholder="мин"
+                        placeholder="норма, минуты"
+                      />
+                      <input
+                        type="number"
+                        min="5"
+                        value={task.minDurationMinutes}
+                        onChange={(event) =>
+                          updateScheduleTaskTemplateDraft(task.id, {
+                            minDurationMinutes: event.target.value,
+                          })
+                        }
+                        className="settings-input"
+                        placeholder="норма, минимум"
+                      />
+                      <input
+                        type="number"
+                        min="5"
+                        value={task.maxDurationMinutes}
+                        onChange={(event) =>
+                          updateScheduleTaskTemplateDraft(task.id, {
+                            maxDurationMinutes: event.target.value,
+                          })
+                        }
+                        className="settings-input"
+                        placeholder="норма, максимум"
                       />
                       <button
                         type="button"
                         className="danger-action schedule-small-danger"
-                        onClick={() =>
-                          setScheduleModal((prev) =>
-                            prev?.mode === "goals"
-                              ? {
-                                  ...prev,
-                                  goalDrafts: prev.goalDrafts.filter(
-                                    (candidate) => candidate.id !== goal.id
-                                  ),
-                                }
-                              : prev
-                          )
-                        }
+                        onClick={() => deleteScheduleTaskTemplateDraft(task.id)}
                       >
                         -
                       </button>
+                      <details className="schedule-routine-details">
+                        <summary>подробнее</summary>
+                        <div className="schedule-routine-detail-grid">
+                          <select
+                            value={task.goalPeriod}
+                            onChange={(event) =>
+                              updateScheduleTaskTemplateDraft(task.id, {
+                                goalPeriod: event.target.value as ScheduleGoalPeriod,
+                              })
+                            }
+                            className="settings-input"
+                          >
+                            <option value="day">норма в день</option>
+                            <option value="week">норма в неделю</option>
+                          </select>
+                          <input
+                            type="number"
+                            min="5"
+                            value={task.durationMinutes}
+                            onChange={(event) =>
+                              updateScheduleTaskTemplateDraft(task.id, {
+                                durationMinutes: event.target.value,
+                              })
+                            }
+                            className="settings-input"
+                            placeholder="примерно мин"
+                          />
+                          <input
+                            type="time"
+                            value={task.approximateEnd}
+                            onChange={(event) =>
+                              updateScheduleTaskTemplateDraft(task.id, {
+                                approximateEnd: event.target.value,
+                              })
+                            }
+                            className="settings-input"
+                            aria-label="Примерное окончание"
+                          />
+                          <input
+                            type="time"
+                            value={task.preferredTimeOfDay}
+                            onChange={(event) =>
+                              updateScheduleTaskTemplateDraft(task.id, {
+                                preferredTimeOfDay: event.target.value,
+                              })
+                            }
+                            className="settings-input"
+                            aria-label="Предпочтительное время"
+                          />
+                          <input
+                            type="time"
+                            value={task.avoidedTimeOfDay}
+                            onChange={(event) =>
+                              updateScheduleTaskTemplateDraft(task.id, {
+                                avoidedTimeOfDay: event.target.value,
+                              })
+                            }
+                            className="settings-input"
+                            aria-label="Нежелательное время"
+                          />
+                          <label className="dictionary-editor-toggle">
+                            <input
+                              type="checkbox"
+                              checked={task.allowAutoplan}
+                              onChange={(event) =>
+                                updateScheduleTaskTemplateDraft(task.id, {
+                                  allowAutoplan: event.target.checked,
+                                })
+                              }
+                            />
+                            <span>автозаполнение</span>
+                          </label>
+                          <label className="dictionary-editor-toggle">
+                            <input
+                              type="checkbox"
+                              checked={task.isSpontaneous}
+                              onChange={(event) =>
+                                updateScheduleTaskTemplateDraft(task.id, {
+                                  isSpontaneous: event.target.checked,
+                                  type: event.target.checked ? "spontaneous" : task.type,
+                                })
+                              }
+                            />
+                            <span>спонтанное</span>
+                          </label>
+                          <label className="dictionary-editor-toggle">
+                            <input
+                              type="checkbox"
+                              checked={task.canSplit}
+                              onChange={(event) =>
+                                updateScheduleTaskTemplateDraft(task.id, {
+                                  canSplit: event.target.checked,
+                                })
+                              }
+                            />
+                            <span>можно делить</span>
+                          </label>
+                          <textarea
+                            value={task.details}
+                            onChange={(event) =>
+                              updateScheduleTaskTemplateDraft(task.id, {
+                                details: event.target.value,
+                              })
+                            }
+                            className="settings-input settings-textarea schedule-taskbase-wide"
+                            placeholder="детали дела"
+                          />
+                          <textarea
+                            value={task.checklistText}
+                            onChange={(event) =>
+                              updateScheduleTaskTemplateDraft(task.id, {
+                                checklistText: event.target.value,
+                              })
+                            }
+                            className="settings-input settings-textarea schedule-taskbase-wide"
+                            placeholder="пункт чеклиста на строку"
+                          />
+                        </div>
+                      </details>
                     </div>
                   ))
                 )}
@@ -16403,11 +18247,229 @@ export default function CategoryWorkspace() {
                 <button
                   type="button"
                   className="mini-action"
-                  onClick={saveScheduleGoalsFromModal}
+                  onClick={saveScheduleTaskBaseFromModal}
                 >
                   сохранить
                 </button>
               </div>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  function renderScheduleStatsModal() {
+    if (!scheduleStatsModal) {
+      return null;
+    }
+
+    const payload = getSchedulePayloadForSource(scheduleStatsModal);
+    if (!payload) {
+      return null;
+    }
+
+    const stats = getScheduleStats(payload, {
+      startDate: scheduleStatsModal.startDate,
+      endDate: scheduleStatsModal.endDate,
+    });
+
+    const renderStatsBucket = (bucket: ScheduleStatsBucket) => (
+      <div className="schedule-stats-panel">
+        <div className="schedule-stats-metrics">
+          <span>дел: {bucket.eventCount}</span>
+          <span>время: {formatScheduleMinutes(bucket.totalMinutes)}</span>
+          <span>готово: {bucket.doneCount} / {formatScheduleMinutes(bucket.doneMinutes)}</span>
+          <span>план: {bucket.plannedCount} / {formatScheduleMinutes(bucket.plannedMinutes)}</span>
+          <span>пропуск: {bucket.skippedCount} / {formatScheduleMinutes(bucket.skippedMinutes)}</span>
+          <span>просрочено: {bucket.overdueCount} / {formatScheduleMinutes(bucket.overdueMinutes)}</span>
+        </div>
+        <div className="schedule-stats-columns">
+          <div>
+            <h3>категории</h3>
+            {Object.entries(bucket.byCategory).length === 0 ? (
+              <p className="settings-hint">Нет данных.</p>
+            ) : (
+              Object.entries(bucket.byCategory).map(([category, value]) => (
+                <span key={category}>
+                  {category}: {value.count} / {formatScheduleMinutes(value.minutes)}
+                </span>
+              ))
+            )}
+          </div>
+          <div>
+            <h3>приоритеты</h3>
+            {Object.entries(bucket.byPriority).map(([priority, value]) => (
+              <span key={priority}>
+                {toSchedulePriorityLabel(priority as SchedulePriority)}: {value.count} /{" "}
+                {formatScheduleMinutes(value.minutes)}
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+
+    return (
+      <div className="absolute inset-0 z-[73] flex items-center justify-center p-3">
+        <button
+          type="button"
+          className="absolute inset-0 bg-black/45"
+          onClick={closeScheduleStatsModal}
+          aria-label="Закрыть статистику расписания"
+        />
+
+        <div className="project-create-modal schedule-modal schedule-stats-modal popup-3d relative z-10 w-full max-w-5xl p-4 sm:p-5">
+          <div className="dictionary-editor-header mb-3 flex justify-between gap-3">
+            <div className="dictionary-editor-title-wrap">
+              <h2 className="font-display text-4xl leading-none">Статистика</h2>
+              <span className="dictionary-editor-title-badge">
+                {formatScheduleDateShort(stats.rangeStart)} - {formatScheduleDateShort(stats.rangeEnd)}
+              </span>
+            </div>
+            <button
+              type="button"
+              className="menu-action h-9 w-9 text-xl"
+              onClick={closeScheduleStatsModal}
+              aria-label="Закрыть статистику расписания"
+            >
+              x
+            </button>
+          </div>
+
+          <div className="schedule-stats-toolbar">
+            {(["day", "week", "horizon", "custom"] as ScheduleStatsRangeMode[]).map(
+              (rangeMode) => (
+                <button
+                  key={rangeMode}
+                  type="button"
+                  className={`mini-action schedule-tab ${
+                    scheduleStatsModal.rangeMode === rangeMode
+                      ? "schedule-tab-active"
+                      : ""
+                  }`}
+                  onClick={() => updateScheduleStatsRange(rangeMode)}
+                >
+                  {rangeMode === "day"
+                    ? "день"
+                    : rangeMode === "week"
+                      ? "неделя"
+                      : rangeMode === "horizon"
+                        ? "горизонт"
+                        : "свой"}
+                </button>
+              )
+            )}
+            <input
+              type="date"
+              className="settings-input schedule-date-input"
+              value={scheduleStatsModal.startDate}
+              onChange={(event) =>
+                updateScheduleStatsRange(
+                  scheduleStatsModal.rangeMode,
+                  event.target.value,
+                  scheduleStatsModal.endDate
+                )
+              }
+            />
+            {scheduleStatsModal.rangeMode === "custom" && (
+              <input
+                type="date"
+                className="settings-input schedule-date-input"
+                value={scheduleStatsModal.endDate}
+                onChange={(event) =>
+                  updateScheduleStatsRange(
+                    "custom",
+                    scheduleStatsModal.startDate,
+                    event.target.value
+                  )
+                }
+              />
+            )}
+          </div>
+
+          <div className="schedule-stats-tabs">
+            {(["past", "current", "future"] as ScheduleStatsTab[]).map((tab) => (
+              <button
+                key={tab}
+                type="button"
+                className={`mini-action schedule-tab ${
+                  scheduleStatsModal.tab === tab ? "schedule-tab-active" : ""
+                }`}
+                onClick={() =>
+                  setScheduleStatsModal((prev) => (prev ? { ...prev, tab } : prev))
+                }
+              >
+                {tab === "past" ? "Было" : tab === "current" ? "Сейчас" : "Планы"}
+              </button>
+            ))}
+          </div>
+
+          {scheduleStatsModal.tab === "past" && renderStatsBucket(stats.past)}
+
+          {scheduleStatsModal.tab === "current" && (
+            <div className="schedule-stats-panel">
+              {!stats.current.nowInRange && (
+                <p className="dictionary-editor-import-status">
+                  Сейчас вне выбранного бодрствующего периода.
+                </p>
+              )}
+              {stats.current.activeEvent ? (
+                <div className="schedule-stats-current">
+                  <strong>{stats.current.activeEvent.title}</strong>
+                  <span>{formatScheduleTimeRange(stats.current.activeEvent, payload)}</span>
+                  <span>
+                    осталось {formatScheduleMinutes(stats.current.activeRemainingMinutes)}
+                  </span>
+                </div>
+              ) : stats.current.currentFreeWindow ? (
+                <div className="schedule-stats-current">
+                  <strong>Свободное окно</strong>
+                  <span>
+                    {stats.current.currentFreeWindow.start}-
+                    {stats.current.currentFreeWindow.end}
+                  </span>
+                  <span>
+                    {formatScheduleMinutes(stats.current.currentFreeWindow.durationMinutes)}
+                  </span>
+                </div>
+              ) : (
+                <p className="settings-hint">Сейчас активного дела нет.</p>
+              )}
+              {stats.current.nextEvent && (
+                <div className="schedule-stats-current">
+                  <strong>Следующее: {stats.current.nextEvent.title}</strong>
+                  <span>{formatScheduleTimeRange(stats.current.nextEvent, payload)}</span>
+                  {stats.current.nextEventStartsInMinutes !== null && (
+                    <span>
+                      через {formatScheduleMinutes(stats.current.nextEventStartsInMinutes)}
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {scheduleStatsModal.tab === "future" && (
+            <>
+              {renderStatsBucket(stats.future)}
+              {stats.goalProgress.length > 0 && (
+                <div className="schedule-stats-panel">
+                  <h3>нормы</h3>
+                  <div className="schedule-stats-metrics">
+                    {stats.goalProgress.map((goal) => (
+                      <span key={goal.id}>
+                        {goal.title}:{" "}
+                        {goal.targetCount
+                          ? `${goal.currentCount}/${goal.targetCount}`
+                          : `${formatScheduleMinutes(goal.currentMinutes)} / ${formatScheduleMinutes(
+                              goal.targetMinutes ?? 0
+                            )}`}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
             </>
           )}
         </div>
@@ -16468,7 +18530,12 @@ export default function CategoryWorkspace() {
             </div>
 
             {authTab === "login" ? (
-              <>
+              <form
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void handleAuthSignIn();
+                }}
+              >
                 <label className="settings-label mt-4">user-id</label>
                 <input
                   type="text"
@@ -16504,9 +18571,8 @@ export default function CategoryWorkspace() {
 
                 <div className="mt-4 flex flex-wrap gap-2">
                   <button
-                    type="button"
+                    type="submit"
                     className="mini-action"
-                    onClick={() => void handleAuthSignIn()}
                     disabled={isAuthBusy}
                   >
                     войти
@@ -16518,7 +18584,7 @@ export default function CategoryWorkspace() {
                     забыли пароль
                   </a>
                 </div>
-              </>
+              </form>
             ) : (
               <>
                 <label className="settings-label mt-4">Email</label>
@@ -16872,6 +18938,22 @@ export default function CategoryWorkspace() {
                   >
                     Расписание
                   </button>
+                  <button
+                    type="button"
+                    className="mini-action rule-tool-button"
+                    onClick={handleAddRuleDocument}
+                    disabled={!currentCategoryId || !currentCategoryCanEdit || isMutating || isLoading}
+                  >
+                    Rule
+                  </button>
+                  <button
+                    type="button"
+                    className="mini-action"
+                    onClick={handleOpenRuleImportPicker}
+                    disabled={!currentCategoryId || !currentCategoryCanEdit || isMutating || isLoading}
+                  >
+                    Rule import
+                  </button>
                   {renderRichTextTools("block")}
                 </div>
 
@@ -16895,6 +18977,7 @@ export default function CategoryWorkspace() {
                       const checklistCard = blockChecklistCardsByMessageId.get(message.id);
                       const dictionaryCard = blockDictionaryCardsByMessageId.get(message.id);
                       const scheduleCard = blockScheduleCardsByMessageId.get(message.id);
+                      const ruleCard = blockRuleCardsByMessageId.get(message.id);
                       const scheduleSourceRef: ScheduleSourceRef = {
                         source: "block-message",
                         sourceCategoryId: message.category_id,
@@ -17026,8 +19109,7 @@ export default function CategoryWorkspace() {
                                 onDateChange={updateScheduleSelectedDate}
                                 onOpenEvent={openScheduleEventModal}
                                 onOpenAssistant={openScheduleAssistantModal}
-                                onOpenSpontaneous={openScheduleSpontaneousModal}
-                                onOpenGoals={openScheduleGoalsModal}
+                                onOpenTaskBase={openScheduleTaskBaseModal}
                                 onStatusChange={updateScheduleEventStatus}
                                 onDeleteEvent={deleteScheduleEvent}
                                 onDeleteBlock={(ref) => void deleteScheduleBlock(ref)}
@@ -17214,7 +19296,7 @@ export default function CategoryWorkspace() {
                                     className="mini-action"
                                     onClick={(event) => {
                                       event.stopPropagation();
-                                      openDictionaryStudy({
+                                      void openDictionaryStudy({
                                         sourceCategoryId: message.category_id,
                                         sourceMessageId: message.id,
                                         dictionaryId: null,
@@ -17242,6 +19324,18 @@ export default function CategoryWorkspace() {
                                 </div>
                               </div>
                             </div>
+                          ) : ruleCard ? (
+                            <RuleCard
+                              document={ruleCard}
+                              canEdit={currentCategoryCanEdit}
+                              onOpen={() => openRuleEditorForBlock(message.id, ruleCard)}
+                              onDelete={() => void deleteRuleDocument({
+                                source: "block-message",
+                                sourceCategoryId: message.category_id,
+                                sourceMessageId: message.id,
+                                ruleId: ruleCard.id,
+                              })}
+                            />
                           ) : (
                             <div
                               ref={(element) => setBlockEditorElement(message.id, element)}
@@ -17386,9 +19480,43 @@ export default function CategoryWorkspace() {
                   >
                     Расписание
                   </button>
+                  <button
+                    type="button"
+                    className="mini-action rule-tool-button"
+                    onClick={handleAddRuleDocument}
+                    disabled={!currentCategoryId || !currentCategoryCanEdit || isMutating || isLoading}
+                  >
+                    Rule
+                  </button>
+                  <button
+                    type="button"
+                    className="mini-action"
+                    onClick={handleOpenRuleImportPicker}
+                    disabled={!currentCategoryId || !currentCategoryCanEdit || isMutating || isLoading}
+                  >
+                    Rule import
+                  </button>
                   {renderRichTextTools("continuous")}
                 </div>
                 <div className="continuous-wrap">
+                  {continuousRules.length > 0 && (
+                    <div className="continuous-rule-board" style={editorTextScaleStyle}>
+                      {continuousRules.map((document) => (
+                        <RuleCard
+                          key={document.id}
+                          document={document}
+                          canEdit={currentCategoryCanEdit}
+                          onOpen={() => openRuleEditorForContinuous(document)}
+                          onDelete={() => void deleteRuleDocument({
+                            source: "continuous",
+                            sourceCategoryId: currentCategory?.id ?? "",
+                            sourceMessageId: null,
+                            ruleId: document.id,
+                          })}
+                        />
+                      ))}
+                    </div>
+                  )}
                   {continuousChecklistCards.length > 0 && (
                     <div
                       className="continuous-checklist-board"
@@ -17673,7 +19801,7 @@ export default function CategoryWorkspace() {
                               type="button"
                               className="mini-action"
                               onClick={() =>
-                                openDictionaryStudy({
+                                void openDictionaryStudy({
                                   sourceCategoryId: currentCategoryId ?? "",
                                   sourceMessageId: null,
                                   dictionaryId: dictionary.id,
@@ -17726,8 +19854,7 @@ export default function CategoryWorkspace() {
                             onDateChange={updateScheduleSelectedDate}
                             onOpenEvent={openScheduleEventModal}
                             onOpenAssistant={openScheduleAssistantModal}
-                            onOpenSpontaneous={openScheduleSpontaneousModal}
-                            onOpenGoals={openScheduleGoalsModal}
+                            onOpenTaskBase={openScheduleTaskBaseModal}
                             onStatusChange={updateScheduleEventStatus}
                             onDeleteEvent={deleteScheduleEvent}
                             onDeleteBlock={(ref) => void deleteScheduleBlock(ref)}
@@ -18555,6 +20682,28 @@ export default function CategoryWorkspace() {
               >
                 Расписание
               </button>
+              <button
+                type="button"
+                className="mini-action rule-tool-button"
+                onClick={() => {
+                  closeMobilePanel();
+                  handleAddRuleDocument();
+                }}
+                disabled={!currentCategoryId || !currentCategoryCanEdit || isMutating || isLoading}
+              >
+                Rule
+              </button>
+              <button
+                type="button"
+                className="mini-action"
+                onClick={() => {
+                  closeMobilePanel();
+                  handleOpenRuleImportPicker();
+                }}
+                disabled={!currentCategoryId || !currentCategoryCanEdit || isMutating || isLoading}
+              >
+                Rule import
+              </button>
               {renderEditorTextScaleControls()}
             </div>
 
@@ -18803,7 +20952,7 @@ export default function CategoryWorkspace() {
         )}
 
         {confirmDialog && (
-          <div className="absolute inset-0 z-[70] flex items-center justify-center p-3">
+          <div className="absolute inset-0 z-[90] flex items-center justify-center p-3">
             <button
               type="button"
               className="absolute inset-0 bg-black/45"
@@ -18851,6 +21000,34 @@ export default function CategoryWorkspace() {
         )}
 
         {renderScheduleModal()}
+        {renderScheduleStatsModal()}
+
+        <input
+          ref={ruleImportFileRef}
+          type="file"
+          accept=".json,.rule.json,application/json"
+          className="hidden"
+          onChange={(event) => void handleImportRuleForCreate(event)}
+        />
+
+        {ruleEditor && activeRuleDocument && (
+          <RuleEditor
+            document={activeRuleDocument}
+            canEdit={currentCategoryCanEdit}
+            saveState={
+              ruleEditor.source === "continuous"
+                ? isSavingCategory
+                  ? "saving"
+                  : "saved"
+                : isSavingMessages
+                  ? "saving"
+                  : "saved"
+            }
+            onChange={handleRuleDocumentChange}
+            onSave={flushActiveRuleSave}
+            onClose={() => setRuleEditor(null)}
+          />
+        )}
 
         {showProjectCreateModal && (
           <div className="absolute inset-0 z-50 flex items-center justify-center p-3">
@@ -19170,6 +21347,9 @@ export default function CategoryWorkspace() {
             const dictionaryTitleBadge = normalizeDictionaryTitle(
               dictionaryEditor.titleDraft
             );
+            const dictionarySpeechStatus = getDictionaryEditorSpeechStatus(
+              dictionaryEditor.speechLanguage
+            );
             const dictionarySearchHasQuery =
               dictionarySearchQuery.trim().length > 0;
             const dictionarySearchActiveMatch =
@@ -19204,7 +21384,7 @@ export default function CategoryWorkspace() {
             <button
               type="button"
               className="absolute inset-0 bg-black/45"
-              onClick={closeDictionaryEditor}
+              onClick={() => void requestCloseDictionaryEditor()}
               aria-label="Закрыть окно словаря"
             />
 
@@ -19221,7 +21401,7 @@ export default function CategoryWorkspace() {
                 <button
                   type="button"
                   className="menu-action h-9 w-9 text-xl"
-                  onClick={closeDictionaryEditor}
+                  onClick={() => void requestCloseDictionaryEditor()}
                   aria-label="Закрыть окно словаря"
                 >
                   x
@@ -19273,22 +21453,60 @@ export default function CategoryWorkspace() {
                         className="mini-action"
                         onClick={() => addDictionaryEditorColumn("side1")}
                       >
-                        + side 1
+                        + пояснение к карточке 1
                       </button>
                       <button
                         type="button"
                         className="mini-action"
                         onClick={() => addDictionaryEditorColumn("side2")}
                       >
-                        + side 2
+                        + пояснение к карточке 2
                       </button>
                     </div>
                     <table className="dictionary-editor-table dictionary-editor-table-dynamic">
                       <thead>
+                        <tr className="dictionary-editor-side-label-row">
+                          <th colSpan={dictionaryEditorSide1Columns.length}>
+                            Карточка 1
+                          </th>
+                          <th
+                            className="dictionary-editor-side-divider-head"
+                            aria-hidden="true"
+                          />
+                          <th colSpan={dictionaryEditorSide2Columns.length}>
+                            Карточка 2
+                          </th>
+                          <th
+                            className="dictionary-editor-side-add-head"
+                            aria-hidden="true"
+                          />
+                          <th aria-hidden="true" />
+                        </tr>
                         <tr>
-                          {dictionaryEditorSide1Columns.map((column) => (
+                          {dictionaryEditorSide1Columns.map((column) => {
+                            const columnTitle = getDictionaryEditorColumnTitle(
+                              column,
+                              dictionaryEditor.columns
+                            );
+                            const columnKindTitle =
+                              getDictionaryEditorColumnKindTitle(
+                                column,
+                                dictionaryEditor.columns
+                              );
+                            const columnLabel = getDictionaryFieldLabel(
+                              column.id,
+                              dictionaryEditorLabels,
+                              dictionaryEditor.columns
+                            );
+                            const columnDraftLabel =
+                              dictionaryEditor.labels[column.id] ?? column.label;
+
+                            return (
                             <th key={column.id}>
-                              <div className="dictionary-editor-column-head">
+                              <div
+                                className="dictionary-editor-column-head"
+                                aria-label={`${columnTitle}: ${columnLabel}`}
+                              >
                                 <select
                                   value={column.kind}
                                   className="settings-input dictionary-editor-column-type"
@@ -19298,10 +21516,22 @@ export default function CategoryWorkspace() {
                                       normalizeDictionaryColumnKind(event.target.value)
                                     )
                                   }
-                                  aria-label={`Тип столбца ${column.label}`}
+                                  aria-label={`Тип колонки: ${columnTitle}`}
                                 >
-                                  <option value="word">Слово</option>
-                                  <option value="note">Пояснение</option>
+                                  <option value="word">
+                                    {getDictionaryEditorColumnTitle(
+                                      column,
+                                      dictionaryEditor.columns,
+                                      "word"
+                                    )}
+                                  </option>
+                                  <option value="note">
+                                    {getDictionaryEditorColumnTitle(
+                                      column,
+                                      dictionaryEditor.columns,
+                                      "note"
+                                    )}
+                                  </option>
                                 </select>
                                 {column.kind === "note" && (
                                   <select
@@ -19316,7 +21546,7 @@ export default function CategoryWorkspace() {
                                         Number(event.target.value)
                                       )
                                     }
-                                    aria-label={`Привязка пояснения ${column.label} к слову`}
+                                    aria-label={`Привязка ${columnTitle} «${columnLabel}» к слову карточки 1`}
                                   >
                                     {dictionaryEditorSide1WordColumns.map(
                                       (wordColumn, wordIndex) => (
@@ -19324,14 +21554,19 @@ export default function CategoryWorkspace() {
                                           key={wordColumn.id}
                                           value={wordIndex}
                                         >
-                                          к слову {wordIndex + 1}
+                                          к слову {wordIndex + 1}:{" "}
+                                          {getDictionaryFieldLabel(
+                                            wordColumn.id,
+                                            dictionaryEditorLabels,
+                                            dictionaryEditor.columns
+                                          )}
                                         </option>
                                       )
                                     )}
                                   </select>
                                 )}
                                 <input
-                                  value={dictionaryEditorLabels[column.id] ?? column.label}
+                                  value={columnDraftLabel}
                                   onChange={(event) =>
                                     updateDictionaryEditorLabel(
                                       column.id,
@@ -19339,8 +21574,8 @@ export default function CategoryWorkspace() {
                                     )
                                   }
                                   className="settings-input dictionary-editor-label-input"
-                                  aria-label={`Подпись столбца ${column.label}`}
-                                  placeholder={column.label}
+                                  aria-label={`Название колонки: ${columnTitle}`}
+                                  placeholder={columnKindTitle}
                                 />
                                 {dictionaryEditor.columns.length > 2 && (
                                   <button
@@ -19349,27 +21584,50 @@ export default function CategoryWorkspace() {
                                     onClick={() =>
                                       void removeDictionaryEditorColumn(column.id)
                                     }
-                                    aria-label={`Удалить столбец ${column.label}`}
+                                    aria-label={`Удалить ${columnTitle} «${columnLabel}»`}
                                   >
                                     -
                                   </button>
                                 )}
                               </div>
                             </th>
-                          ))}
+                            );
+                          })}
                           <th className="dictionary-editor-side-divider-head">
                             <button
                               type="button"
                               className="mini-action dictionary-editor-column-add"
                               onClick={() => addDictionaryEditorColumn("side1")}
-                              aria-label="Добавить столбец к карточке 1"
+                              aria-label="Добавить пояснение к карточке 1"
+                              title="Добавить пояснение к карточке 1"
                             >
                               +
                             </button>
                           </th>
-                          {dictionaryEditorSide2Columns.map((column) => (
+                          {dictionaryEditorSide2Columns.map((column) => {
+                            const columnTitle = getDictionaryEditorColumnTitle(
+                              column,
+                              dictionaryEditor.columns
+                            );
+                            const columnKindTitle =
+                              getDictionaryEditorColumnKindTitle(
+                                column,
+                                dictionaryEditor.columns
+                              );
+                            const columnLabel = getDictionaryFieldLabel(
+                              column.id,
+                              dictionaryEditorLabels,
+                              dictionaryEditor.columns
+                            );
+                            const columnDraftLabel =
+                              dictionaryEditor.labels[column.id] ?? column.label;
+
+                            return (
                             <th key={column.id}>
-                              <div className="dictionary-editor-column-head">
+                              <div
+                                className="dictionary-editor-column-head"
+                                aria-label={`${columnTitle}: ${columnLabel}`}
+                              >
                                 <select
                                   value={column.kind}
                                   className="settings-input dictionary-editor-column-type"
@@ -19379,10 +21637,22 @@ export default function CategoryWorkspace() {
                                       normalizeDictionaryColumnKind(event.target.value)
                                     )
                                   }
-                                  aria-label={`Тип столбца ${column.label}`}
+                                  aria-label={`Тип колонки: ${columnTitle}`}
                                 >
-                                  <option value="word">Слово</option>
-                                  <option value="note">Пояснение</option>
+                                  <option value="word">
+                                    {getDictionaryEditorColumnTitle(
+                                      column,
+                                      dictionaryEditor.columns,
+                                      "word"
+                                    )}
+                                  </option>
+                                  <option value="note">
+                                    {getDictionaryEditorColumnTitle(
+                                      column,
+                                      dictionaryEditor.columns,
+                                      "note"
+                                    )}
+                                  </option>
                                 </select>
                                 {column.kind === "note" && (
                                   <select
@@ -19397,7 +21667,7 @@ export default function CategoryWorkspace() {
                                         Number(event.target.value)
                                       )
                                     }
-                                    aria-label={`Привязка пояснения ${column.label} к слову`}
+                                    aria-label={`Привязка ${columnTitle} «${columnLabel}» к слову карточки 2`}
                                   >
                                     {dictionaryEditorSide2WordColumns.map(
                                       (wordColumn, wordIndex) => (
@@ -19405,14 +21675,19 @@ export default function CategoryWorkspace() {
                                           key={wordColumn.id}
                                           value={wordIndex}
                                         >
-                                          к слову {wordIndex + 1}
+                                          к слову {wordIndex + 1}:{" "}
+                                          {getDictionaryFieldLabel(
+                                            wordColumn.id,
+                                            dictionaryEditorLabels,
+                                            dictionaryEditor.columns
+                                          )}
                                         </option>
                                       )
                                     )}
                                   </select>
                                 )}
                                 <input
-                                  value={dictionaryEditorLabels[column.id] ?? column.label}
+                                  value={columnDraftLabel}
                                   onChange={(event) =>
                                     updateDictionaryEditorLabel(
                                       column.id,
@@ -19420,8 +21695,8 @@ export default function CategoryWorkspace() {
                                     )
                                   }
                                   className="settings-input dictionary-editor-label-input"
-                                  aria-label={`Подпись столбца ${column.label}`}
-                                  placeholder={column.label}
+                                  aria-label={`Название колонки: ${columnTitle}`}
+                                  placeholder={columnKindTitle}
                                 />
                                 {dictionaryEditor.columns.length > 2 && (
                                   <button
@@ -19430,20 +21705,22 @@ export default function CategoryWorkspace() {
                                     onClick={() =>
                                       void removeDictionaryEditorColumn(column.id)
                                     }
-                                    aria-label={`Удалить столбец ${column.label}`}
+                                    aria-label={`Удалить ${columnTitle} «${columnLabel}»`}
                                   >
                                     -
                                   </button>
                                 )}
                               </div>
                             </th>
-                          ))}
+                            );
+                          })}
                           <th className="dictionary-editor-side-add-head">
                             <button
                               type="button"
                               className="mini-action dictionary-editor-column-add"
                               onClick={() => addDictionaryEditorColumn("side2")}
-                              aria-label="Добавить столбец к карточке 2"
+                              aria-label="Добавить пояснение к карточке 2"
+                              title="Добавить пояснение к карточке 2"
                             >
                               +
                             </button>
@@ -19470,8 +21747,11 @@ export default function CategoryWorkspace() {
                                   entry.id,
                                   column.id
                                 );
-                                const label =
-                                  dictionaryEditorLabels[column.id] ?? column.label;
+                                const label = getDictionaryEditorColumnCellLabel(
+                                  column,
+                                  dictionaryEditorLabels,
+                                  dictionaryEditor.columns
+                                );
 
                                 return (
                                   <td key={column.id} data-label={label}>
@@ -19501,7 +21781,7 @@ export default function CategoryWorkspace() {
                                           ? "dictionary-editor-cell-active-match"
                                           : ""
                                       }`}
-                                      placeholder={`${label} ${index + 1}`}
+                                      placeholder={`${label}, строка ${index + 1}`}
                                     />
                                   </td>
                                 );
@@ -19516,7 +21796,8 @@ export default function CategoryWorkspace() {
                                     type="button"
                                     className="mini-action dictionary-editor-column-add dictionary-editor-column-add-vertical"
                                     onClick={() => addDictionaryEditorColumn("side1")}
-                                    aria-label="Add side 1 column"
+                                    aria-label="Добавить пояснение к карточке 1"
+                                    title="Добавить пояснение к карточке 1"
                                   >
                                     +
                                   </button>
@@ -19527,8 +21808,11 @@ export default function CategoryWorkspace() {
                                   entry.id,
                                   column.id
                                 );
-                                const label =
-                                  dictionaryEditorLabels[column.id] ?? column.label;
+                                const label = getDictionaryEditorColumnCellLabel(
+                                  column,
+                                  dictionaryEditorLabels,
+                                  dictionaryEditor.columns
+                                );
 
                                 return (
                                   <td key={column.id} data-label={label}>
@@ -19558,7 +21842,7 @@ export default function CategoryWorkspace() {
                                           ? "dictionary-editor-cell-active-match"
                                           : ""
                                       }`}
-                                      placeholder={`${label} ${index + 1}`}
+                                      placeholder={`${label}, строка ${index + 1}`}
                                     />
                                   </td>
                                 );
@@ -19573,7 +21857,8 @@ export default function CategoryWorkspace() {
                                     type="button"
                                     className="mini-action dictionary-editor-column-add dictionary-editor-column-add-vertical"
                                     onClick={() => addDictionaryEditorColumn("side2")}
-                                    aria-label="Add side 2 column"
+                                    aria-label="Добавить пояснение к карточке 2"
+                                    title="Добавить пояснение к карточке 2"
                                   >
                                     +
                                   </button>
@@ -19852,13 +22137,6 @@ export default function CategoryWorkspace() {
                         >
                           экспорт TSV
                         </button>
-                        <button
-                          type="button"
-                          className="mini-action"
-                          onClick={handleOpenDictionaryImportFilePicker}
-                        >
-                          файл
-                        </button>
                       </div>
                     </div>
                     <textarea
@@ -19968,6 +22246,33 @@ export default function CategoryWorkspace() {
                           <option value="continuous">сплошной режим</option>
                           <option value="separate">отдельный режим</option>
                         </select>
+                      </label>
+
+                      <label className="dictionary-editor-field">
+                        <span className="settings-label">язык озвучки</span>
+                        <select
+                          value={dictionaryEditor.speechLanguage}
+                          className="settings-input"
+                          onChange={(event) =>
+                            updateDictionaryEditorSpeechLanguage(event.target.value)
+                          }
+                        >
+                          {DICTIONARY_SPEECH_LANGUAGE_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                        <span
+                          className={`dictionary-editor-speech-status ${
+                            dictionarySpeechStatus.startsWith("нет голоса")
+                              ? "dictionary-editor-speech-status-warning"
+                              : ""
+                          }`}
+                          aria-hidden="true"
+                        >
+                          {dictionarySpeechStatus}
+                        </span>
                       </label>
 
                       <label className="dictionary-editor-toggle">
@@ -20352,6 +22657,9 @@ export default function CategoryWorkspace() {
                 )
               )
               .join(" + ");
+            const speechLanguageLabel = getDictionarySpeechLanguageLabel(
+              dictionaryStudy.speechLanguage
+            );
             const activeWordItems = getDictionaryEntrySideValues(
               currentEntry,
               dictionaryStudy.columns,
@@ -20419,6 +22727,49 @@ export default function CategoryWorkspace() {
               currentSimilarGroups.length > 0 &&
               !dictionaryStudy.isProgressComplete &&
               !dictionaryStudy.motivationImageUrl;
+            const canAddSimilarDictionaryWords =
+              !dictionaryStudy.isProgressComplete &&
+              !dictionaryStudy.motivationImageUrl;
+            const dictionaryStudySimilarControl = (
+              <div className="dictionary-study-similar-control">
+                <button
+                  type="button"
+                  className={`mini-action dictionary-study-similar ${
+                    canOpenSimilarDictionaryWords
+                      ? "dictionary-study-similar-active"
+                      : "dictionary-study-similar-empty"
+                  }`}
+                  onClick={() =>
+                    void openDictionaryStudySimilar(currentEntryIdentity)
+                  }
+                  disabled={!canOpenSimilarDictionaryWords}
+                  title={
+                    canOpenSimilarDictionaryWords
+                      ? currentSimilarGroups.map((group) => group.title).join(", ")
+                      : "Слово не состоит в группе"
+                  }
+                >
+                  похожее
+                </button>
+                <button
+                  type="button"
+                  className="mini-action dictionary-study-similar-add"
+                  onClick={() =>
+                    openDictionaryStudySimilarAdd(
+                      dictionaryStudy,
+                      currentEntry,
+                      currentEntryIdentity,
+                      currentSimilarGroups
+                    )
+                  }
+                  disabled={!canAddSimilarDictionaryWords}
+                  aria-label="Добавить похожее слово"
+                  title="Добавить похожее слово из словарей"
+                >
+                  +
+                </button>
+              </div>
+            );
 
             return (
               <div className="dictionary-study-overlay absolute inset-0 z-[80]">
@@ -20481,7 +22832,7 @@ export default function CategoryWorkspace() {
                     <button
                       type="button"
                       className="mini-action dictionary-study-reset-button"
-                      onClick={resetDictionaryStudyProgress}
+                      onClick={() => void handleDictionaryStudyReset()}
                       disabled={dictionaryStudy.cards.length === 0}
                     >
                       {dictionaryStudy.shuffle ? "перемешать" : "сбросить прогресс"}
@@ -20497,6 +22848,9 @@ export default function CategoryWorkspace() {
                         автоозвучка: {autoSpeakFieldLabels}
                       </span>
                     )}
+                    <span className="dictionary-study-autospeak-badge">
+                      озвучка: {speechLanguageLabel}
+                    </span>
                   </div>
 
                   <div
@@ -20818,27 +23172,7 @@ export default function CategoryWorkspace() {
                         >
                           &lt;
                         </button>
-                        <button
-                          type="button"
-                          className={`mini-action dictionary-study-similar ${
-                            canOpenSimilarDictionaryWords
-                              ? "dictionary-study-similar-active"
-                              : "dictionary-study-similar-empty"
-                          }`}
-                          onClick={() =>
-                            void openDictionaryStudySimilar(currentEntryIdentity)
-                          }
-                          disabled={!canOpenSimilarDictionaryWords}
-                          title={
-                            canOpenSimilarDictionaryWords
-                              ? currentSimilarGroups
-                                  .map((group) => group.title)
-                                  .join(", ")
-                              : "Слово не состоит в группе"
-                          }
-                        >
-                          похожее
-                        </button>
+                        {dictionaryStudySimilarControl}
                         <button
                           type="button"
                           className="tool-button tool-yellow dictionary-study-speak"
@@ -20898,25 +23232,7 @@ export default function CategoryWorkspace() {
                       >
                         &lt;
                       </button>
-                      <button
-                        type="button"
-                        className={`mini-action dictionary-study-similar ${
-                          canOpenSimilarDictionaryWords
-                            ? "dictionary-study-similar-active"
-                            : "dictionary-study-similar-empty"
-                        }`}
-                        onClick={() =>
-                          void openDictionaryStudySimilar(currentEntryIdentity)
-                        }
-                        disabled={!canOpenSimilarDictionaryWords}
-                        title={
-                          canOpenSimilarDictionaryWords
-                            ? currentSimilarGroups.map((group) => group.title).join(", ")
-                            : "Слово не состоит в группе"
-                        }
-                      >
-                        похожее
-                      </button>
+                      {dictionaryStudySimilarControl}
                       <button
                         type="button"
                         className="tool-button tool-yellow dictionary-study-speak"
@@ -20967,8 +23283,33 @@ export default function CategoryWorkspace() {
         {dictionarySimilarPopup && (
           <DictionarySimilarPopup
             state={dictionarySimilarPopup}
-            onClose={() => setDictionarySimilarPopup(null)}
+            onClose={closeDictionaryStudySimilarWorkflow}
+            onOpenAdd={openDictionaryStudySimilarAddFromPopup}
             onOpenSource={handleDictionarySimilarOpenSource}
+          />
+        )}
+
+        {dictionaryStudySimilarAddPopup && (
+          <DictionaryStudySimilarAddPopup
+            state={dictionaryStudySimilarAddPopup}
+            isVisible={!dictionarySimilarPopup}
+            authorizedFetch={authorizedFetch}
+            onClose={closeDictionaryStudySimilarWorkflow}
+            onOpenSimilar={() =>
+              void openDictionaryStudySimilar(
+                dictionaryStudySimilarAddPopup.identity,
+                { preserveAddPopup: true }
+              )
+            }
+            onGroupUpdated={(group) => {
+              handleDictionaryGroupUpdated(group);
+              updateDictionaryStudySimilarAddGroup(group);
+            }}
+            onAdded={(group) => {
+              handleDictionaryGroupUpdated(group);
+              updateDictionaryStudySimilarAddGroup(group);
+              pushNotice("Похожее слово добавлено.");
+            }}
           />
         )}
 
@@ -22209,8 +24550,7 @@ type ScheduleCardProps = {
   onDateChange: (ref: ScheduleSourceRef, date: string) => void;
   onOpenEvent: (ref: ScheduleSourceRef, eventId?: string | null) => void;
   onOpenAssistant: (ref: ScheduleSourceRef) => void;
-  onOpenSpontaneous: (ref: ScheduleSourceRef) => void;
-  onOpenGoals: (ref: ScheduleSourceRef) => void;
+  onOpenTaskBase: (ref: ScheduleSourceRef) => void;
   onStatusChange: (
     ref: ScheduleSourceRef,
     eventId: string,
@@ -22243,8 +24583,7 @@ function ScheduleCard({
   onDateChange,
   onOpenEvent,
   onOpenAssistant,
-  onOpenSpontaneous,
-  onOpenGoals,
+  onOpenTaskBase,
   onStatusChange,
   onDeleteEvent,
   onDeleteBlock,
@@ -22257,67 +24596,98 @@ function ScheduleCard({
   const goalProgress = getScheduleGoalProgress(normalized, normalized.selectedDate);
   const dayEvents = getScheduleDayEvents(normalized, normalized.selectedDate);
   const listEvents = getScheduleListEvents(normalized);
-  const freeWindows = getScheduleFreeWindows(normalized, normalized.selectedDate)
-    .filter((window) => window.durationMinutes >= 15)
-    .slice(0, 3);
-
-  const renderEvent = (event: ScheduleEvent) => (
-    <div key={event.id} className={`schedule-event schedule-event-${event.type}`}>
-      <div className="schedule-event-main">
-        <div className="schedule-event-line">
-          <span className="schedule-event-time">{formatScheduleTimeRange(event)}</span>
-          <span className="schedule-event-title">{event.title}</span>
-        </div>
-        <div className="schedule-event-meta">
-          <span>{SCHEDULE_EVENT_TYPE_LABELS[event.type]}</span>
-          <span>{SCHEDULE_STATUS_LABELS[event.status]}</span>
-          {event.priority && <span>{toSchedulePriorityLabel(event.priority)}</span>}
-          {event.category && <span>{event.category}</span>}
-          {event.canMove === false && <span>не двигать</span>}
-          {event.canSplit && <span>делить</span>}
-        </div>
-        {event.description && (
-          <p className="schedule-event-description">{event.description}</p>
-        )}
-      </div>
-
-      <div className="schedule-event-actions">
-        <select
-          value={event.status}
-          className="settings-input schedule-status-select"
-          onChange={(changeEvent) =>
-            onStatusChange(
-              sourceRef,
-              event.id,
-              changeEvent.target.value as ScheduleStatus
-            )
-          }
-          disabled={!canEdit}
-          aria-label={`Статус ${event.title}`}
-        >
-          <option value="planned">план</option>
-          <option value="done">готово</option>
-          <option value="skipped">пропуск</option>
-        </select>
-        <button
-          type="button"
-          className="mini-action"
-          onClick={() => onOpenEvent(sourceRef, event.id)}
-          disabled={!canEdit}
-        >
-          править
-        </button>
-        <button
-          type="button"
-          className="danger-action schedule-small-danger"
-          onClick={() => onDeleteEvent(sourceRef, event.id)}
-          disabled={!canEdit}
-        >
-          -
-        </button>
-      </div>
-    </div>
+  const allFreeWindows = getScheduleFreeWindows(normalized, normalized.selectedDate).filter(
+    (window) => window.durationMinutes >= 15
   );
+  const freeWindows = allFreeWindows.slice(0, 3);
+  const freeWindowsText =
+    allFreeWindows.length > 0
+      ? allFreeWindows
+          .map((window) => {
+            const nextDay =
+              window.date !== normalized.selectedDate ||
+              (window.endDate && window.endDate !== window.date)
+                ? " +1д"
+                : "";
+            return `${window.start}-${window.end}${nextDay}`;
+          })
+          .join(", ")
+      : "свободных окон нет";
+  const taskTitleById = new Map(
+    (normalized.taskBase ?? []).map((task) => [task.id, task.title])
+  );
+
+  const renderEvent = (event: ScheduleEvent) => {
+    const sourceEventId = event.recurrenceSourceId ?? event.id;
+
+    return (
+      <div key={event.id} className={`schedule-event schedule-event-${event.type}`}>
+        <div className="schedule-event-main">
+          <div className="schedule-event-line">
+            <span className="schedule-event-time">
+              {formatScheduleTimeRange(event, normalized)}
+            </span>
+            <span className="schedule-event-title">{event.title}</span>
+          </div>
+          <div className="schedule-event-meta">
+            <span>{SCHEDULE_EVENT_TYPE_LABELS[event.type]}</span>
+            <span>{SCHEDULE_STATUS_LABELS[event.status]}</span>
+            {event.priority && <span>{toSchedulePriorityLabel(event.priority)}</span>}
+            {event.category && <span>{event.category}</span>}
+            {event.taskId && taskTitleById.get(event.taskId) && (
+              <span>из базы: {taskTitleById.get(event.taskId)}</span>
+            )}
+            {event.location && <span>{event.location}</span>}
+            {event.approximate && <span>примерно</span>}
+            {event.endMode === "until-morning" && <span>до утра</span>}
+            {event.recurrenceRule && <span>{formatScheduleRecurrenceLabel(event)}</span>}
+            {event.recurrenceSourceId && <span>повтор</span>}
+            {event.canMove === false && <span>не двигать</span>}
+            {event.canSplit && <span>делить</span>}
+          </div>
+          {event.description && (
+            <p className="schedule-event-description">{event.description}</p>
+          )}
+        </div>
+
+        <div className="schedule-event-actions">
+          <select
+            value={event.status}
+            className="settings-input schedule-status-select"
+            onChange={(changeEvent) =>
+              onStatusChange(
+                sourceRef,
+                sourceEventId,
+                changeEvent.target.value as ScheduleStatus
+              )
+            }
+            disabled={!canEdit}
+            aria-label={`Статус ${event.title}`}
+          >
+            <option value="planned">план</option>
+            <option value="done">готово</option>
+            <option value="skipped">пропуск</option>
+          </select>
+          <button
+            type="button"
+            className="mini-action"
+            onClick={() => onOpenEvent(sourceRef, sourceEventId)}
+            disabled={!canEdit}
+          >
+            править
+          </button>
+          <button
+            type="button"
+            className="danger-action schedule-small-danger"
+            onClick={() => onDeleteEvent(sourceRef, sourceEventId)}
+            disabled={!canEdit}
+          >
+            -
+          </button>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <article className="schedule-card" style={style}>
@@ -22365,10 +24735,18 @@ function ScheduleCard({
         <button
           type="button"
           className="mini-action"
+          onClick={() => onOpenTaskBase(sourceRef)}
+          disabled={!canEdit}
+        >
+          База дел
+        </button>
+        <button
+          type="button"
+          className="mini-action"
           onClick={() => onOpenEvent(sourceRef, null)}
           disabled={!canEdit}
         >
-          + дело
+          Назначить дело
         </button>
         <button
           type="button"
@@ -22376,31 +24754,28 @@ function ScheduleCard({
           onClick={() => onOpenAssistant(sourceRef)}
           disabled={!canEdit}
         >
-          помощник
-        </button>
-        <button
-          type="button"
-          className="mini-action"
-          onClick={() => onOpenSpontaneous(sourceRef)}
-          disabled={!canEdit}
-        >
-          спонтанное
-        </button>
-        <button
-          type="button"
-          className="mini-action"
-          onClick={() => onOpenGoals(sourceRef)}
-          disabled={!canEdit}
-        >
-          нормы
+          Помощник
         </button>
       </div>
 
       <div className="schedule-summary">
         <span>дел: {summary.eventCount}</span>
+        <span>в базе: {(normalized.taskBase ?? []).length}</span>
         <span>план: {formatScheduleMinutes(summary.plannedMinutes)}</span>
         <span>готово: {formatScheduleMinutes(summary.doneMinutes)}</span>
-        <span>свободно: {formatScheduleMinutes(summary.freeMinutes)}</span>
+        <span className="schedule-free-summary">
+          свободно: {formatScheduleMinutes(summary.freeMinutes)}
+          <button
+            type="button"
+            className="schedule-free-info"
+            aria-label={`Свободные окна: ${freeWindowsText}`}
+          >
+            !
+          </button>
+          <span className="schedule-free-tooltip" role="tooltip">
+            {freeWindowsText}
+          </span>
+        </span>
       </div>
 
       {goalProgress.length > 0 && (
@@ -22425,13 +24800,17 @@ function ScheduleCard({
               {freeWindows.map((window) => (
                 <span key={`${window.date}-${window.start}-${window.end}`}>
                   окно {window.start}-{window.end}
+                  {window.date !== normalized.selectedDate ||
+                  (window.endDate && window.endDate !== window.date)
+                    ? " +1д"
+                    : ""}
                 </span>
               ))}
             </div>
           )}
           {dayEvents.length === 0 ? (
             <p className="schedule-empty">
-              Пока расписание пустое. Добавьте дело вручную или воспользуйтесь помощником.
+              Пока расписание пустое. Сначала заполните Базу дел, потом назначьте дело.
             </p>
           ) : (
             <div className="schedule-event-list">{dayEvents.map(renderEvent)}</div>
@@ -22467,7 +24846,7 @@ function ScheduleCard({
         <div className="schedule-body">
           {listEvents.length === 0 ? (
             <p className="schedule-empty">
-              Пока расписание пустое. Добавьте дело вручную или воспользуйтесь помощником.
+              Пока расписание пустое. Сначала заполните Базу дел, потом назначьте дело.
             </p>
           ) : (
             <div className="schedule-event-list">{listEvents.map(renderEvent)}</div>
@@ -22479,6 +24858,9 @@ function ScheduleCard({
 }
 
 function toSchedulePriorityLabel(priority: SchedulePriority): string {
+  if (priority === "critical") {
+    return "максимум";
+  }
   if (priority === "high") {
     return "важно";
   }
@@ -22486,6 +24868,44 @@ function toSchedulePriorityLabel(priority: SchedulePriority): string {
     return "низко";
   }
   return "средне";
+}
+
+function formatScheduleRecurrenceLabel(event: ScheduleEvent): string {
+  if (event.recurrenceRule?.mode === "weekly") {
+    return "еженедельно";
+  }
+
+  if (event.recurrenceRule?.mode === "custom") {
+    const labels = event.recurrenceRule.weekdays
+      .map(
+        (weekday) =>
+          SCHEDULE_WEEKDAY_OPTIONS.find((option) => option.value === weekday)?.label
+      )
+      .filter(Boolean);
+    return labels.length > 0 ? labels.join(", ") : "повтор";
+  }
+
+  return "повтор";
+}
+
+function formatScheduleTaskTarget(task: ScheduleTaskTemplate): string {
+  const targetText = task.goalMinutes
+    ? formatScheduleMinutes(task.goalMinutes)
+    : task.goalCount
+      ? `${task.goalCount} раз`
+      : "без нормы";
+  const periodText = task.goalPeriod === "day" ? "день" : "нед";
+  const parts = [`${targetText}/${periodText}`, toSchedulePriorityLabel(task.priority ?? "medium")];
+  if (task.allowAutoplan === false) {
+    parts.push("без автозаполнения");
+  }
+  if (task.isSpontaneous) {
+    parts.push("спонтанное");
+  }
+  if (task.canSplit === false) {
+    parts.push("одним блоком");
+  }
+  return parts.join(" · ");
 }
 
 function renderSchedulePreviewChange(change: SchedulePreviewChange) {
@@ -22554,14 +24974,54 @@ function schedulePayloadToPlainText(payload: SchedulePayload, title = "Расп�
         .join(" ")
     )
     .join("\n");
+  const taskBaseText = (normalized.taskBase ?? [])
+    .map((task) =>
+      [
+        task.title,
+        task.description,
+        task.details,
+        task.category,
+        task.type,
+        task.goalPeriod,
+        task.goalCount ? `${task.goalCount} раз` : "",
+        task.goalMinutes ? `${task.goalMinutes} минут` : "",
+        task.priority,
+      ]
+        .filter(Boolean)
+        .join(" ")
+    )
+    .join("\n");
 
-  return [title, eventText, goalText].filter(Boolean).join("\n");
+  return [title, eventText, goalText, taskBaseText].filter(Boolean).join("\n");
 }
 
 type SiteSearchPlainTextCacheEntry = {
   signature: string;
   value: string;
 };
+
+function ruleDocumentToPlainText(document: RuleDocument): string {
+  return [
+    document.title,
+    document.tags.join(" "),
+    ...document.blocks.map(getRuleBlockText),
+    ...document.annotations.flatMap((annotation) => [
+      annotation.targetText,
+      annotation.translation,
+      annotation.explanation,
+      annotation.example,
+    ]),
+    ...document.glossary.flatMap((entry) => [
+      entry.term,
+      entry.translation,
+      entry.explanation,
+      ...entry.examples,
+      ...entry.tags,
+    ]),
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
 
 const siteSearchCategoryPlainContentCache = new Map<
   string,
@@ -22591,7 +25051,8 @@ function getSiteSearchCategoryPlainContent(category: CategoryRow): string {
           const scheduleText = document.schedules
             .map((schedule) => schedulePayloadToPlainText(schedule, schedule.title))
             .join("\n");
-          return `${richTextToPlainText(document.text)}\n${dictionaryText}\n${scheduleText}`.trim();
+          const ruleText = document.rules.map(ruleDocumentToPlainText).join("\n");
+          return `${richTextToPlainText(document.text)}\n${dictionaryText}\n${scheduleText}\n${ruleText}`.trim();
         })()
       : richTextToPlainText(category.content);
 
@@ -22609,12 +25070,15 @@ function getSiteSearchMessagePlainContent(message: MessageRow): string {
   const checklistPayload = parseMessageChecklistContent(message.content);
   const dictionaryPayload = parseMessageDictionaryContent(message.content);
   const schedulePayload = parseMessageScheduleContent(message.content);
+  const ruleDocument = parseMessageRuleContent(message.content);
   const value = checklistPayload
     ? ""
     : dictionaryPayload
       ? dictionaryPayloadToPlainText(dictionaryPayload)
       : schedulePayload
         ? schedulePayloadToPlainText(schedulePayload, message.title)
+        : ruleDocument
+          ? ruleDocumentToPlainText(ruleDocument)
       : richTextToPlainText(message.content);
 
   siteSearchMessagePlainContentCache.set(message.id, { signature, value });
@@ -23527,13 +25991,442 @@ function DictionaryGroupEditorPopup({
   );
 }
 
+function DictionaryStudySimilarAddPopup({
+  state,
+  isVisible,
+  authorizedFetch,
+  onClose,
+  onOpenSimilar,
+  onGroupUpdated,
+  onAdded,
+}: {
+  state: DictionaryStudySimilarAddPopupState;
+  isVisible: boolean;
+  authorizedFetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  onClose: () => void;
+  onOpenSimilar: () => void;
+  onGroupUpdated: (group: DictionaryWordGroup) => void;
+  onAdded: (group: DictionaryWordGroup) => void;
+}) {
+  const currentIdentityKey = useMemo(
+    () => dictionaryEntryIdentityKey(state.identity),
+    [state.identity]
+  );
+  const [selectedGroupId, setSelectedGroupId] = useState(
+    state.currentGroups[0]?.id ?? DICTIONARY_STUDY_SIMILAR_NEW_GROUP_ID
+  );
+  const [query, setQuery] = useState("");
+  const deferredQuery = useDeferredValue(query);
+  const trimmedQuery = deferredQuery.trim();
+  const [results, setResults] = useState<GlobalDictionarySearchResult[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const latestRequestKeyRef = useRef("");
+  const compiledDictionaryQuery = useMemo(
+    () => compileDictionarySearchQuery(trimmedQuery),
+    [trimmedQuery]
+  );
+  const selectedGroup = useMemo(
+    () => state.availableGroups.find((group) => group.id === selectedGroupId) ?? null,
+    [selectedGroupId, state.availableGroups]
+  );
+  const selectedGroupIdentityKeys = useMemo(
+    () =>
+      new Set(
+        selectedGroup?.items.map((item) =>
+          dictionaryEntryIdentityKey({
+            sourceCategoryId: item.sourceCategoryId,
+            sourceMessageId: item.sourceMessageId,
+            dictionaryId: item.dictionaryId,
+            entryId: item.entryId,
+          })
+        ) ?? []
+      ),
+    [selectedGroup]
+  );
+  const selectedGroupHasCurrentWord = selectedGroupIdentityKeys.has(
+    currentIdentityKey
+  );
+  const currentText = getDictionaryEntryCompactTitle(
+    state.entry,
+    state.columns
+  );
+
+  useEffect(() => {
+    setSelectedGroupId(DICTIONARY_STUDY_SIMILAR_NEW_GROUP_ID);
+    setQuery("");
+    setResults([]);
+    setError(null);
+    setIsLoading(false);
+    latestRequestKeyRef.current = "";
+  }, [currentIdentityKey]);
+
+  useEffect(() => {
+    setSelectedGroupId((currentGroupId) => {
+      if (
+        currentGroupId !== DICTIONARY_STUDY_SIMILAR_NEW_GROUP_ID &&
+        state.availableGroups.some((group) => group.id === currentGroupId)
+      ) {
+        return currentGroupId;
+      }
+
+      return state.currentGroups[0]?.id ?? DICTIONARY_STUDY_SIMILAR_NEW_GROUP_ID;
+    });
+  }, [state.availableGroups, state.currentGroups]);
+
+  useEffect(() => {
+    if (!trimmedQuery || !compiledDictionaryQuery) {
+      setIsLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    const requestKey = `${currentIdentityKey}:${trimmedQuery}`;
+    latestRequestKeyRef.current = requestKey;
+    const timer = setTimeout(() => {
+      const params = new URLSearchParams({
+        q: trimmedQuery,
+        scope: "workspace",
+        includeContinuous: "true",
+        includeBlock: "true",
+      });
+
+      setIsLoading(true);
+      setError(null);
+      void authorizedFetch(`/api/dictionaries/search?${params.toString()}`, {
+        cache: "no-store",
+        signal: controller.signal,
+      })
+        .then(async (response) => {
+          const payload = (await response.json()) as DictionarySearchPayload;
+          if (!response.ok || !payload.data) {
+            throw new Error(payload.error ?? "Не удалось выполнить поиск.");
+          }
+          if (latestRequestKeyRef.current !== requestKey) {
+            return;
+          }
+          setResults(payload.data);
+        })
+        .catch((fetchError) => {
+          if (controller.signal.aborted || latestRequestKeyRef.current !== requestKey) {
+            return;
+          }
+          setResults([]);
+          setError(toErrorMessage(fetchError, "Не удалось выполнить поиск."));
+        })
+        .finally(() => {
+          if (
+            !controller.signal.aborted &&
+            latestRequestKeyRef.current === requestKey
+          ) {
+            setIsLoading(false);
+          }
+        });
+    }, 180);
+
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [authorizedFetch, compiledDictionaryQuery, currentIdentityKey, trimmedQuery]);
+
+  function updateQuery(nextQuery: string) {
+    latestRequestKeyRef.current = "";
+    setQuery(nextQuery);
+    setResults([]);
+    setError(null);
+    setIsLoading(Boolean(compileDictionarySearchQuery(nextQuery.trim())));
+  }
+
+  async function createSimilarGroup(
+    result: GlobalDictionarySearchResult
+  ): Promise<DictionaryWordGroup> {
+    const response = await authorizedFetch("/api/dictionary-groups", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: makeDictionaryStudySimilarGroupTitle(
+          state.entry,
+          state.columns,
+          result.entry,
+          result.columns
+        ),
+      }),
+    });
+    const payload = (await response.json()) as DictionaryGroupPayload;
+    if (!response.ok || !payload.data) {
+      throw new Error(payload.error ?? "Не удалось создать группу словарей.");
+    }
+
+    return normalizeDictionaryWordGroup(payload.data);
+  }
+
+  async function addIdentityToGroup(
+    groupId: string,
+    identity: SharedDictionaryEntryIdentity
+  ): Promise<DictionaryWordGroup> {
+    const response = await authorizedFetch(`/api/dictionary-groups/${groupId}/items`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(identity),
+    });
+    const payload = (await response.json()) as DictionaryGroupPayload;
+    if (!response.ok || !payload.data) {
+      throw new Error(payload.error ?? "Не удалось добавить запись.");
+    }
+
+    return normalizeDictionaryWordGroup(payload.data);
+  }
+
+  async function addResult(result: GlobalDictionarySearchResult) {
+    const resultIdentity = getDictionarySearchResultIdentity(result);
+    const resultIdentityKey = dictionaryEntryIdentityKey(resultIdentity);
+    if (resultIdentityKey === currentIdentityKey) {
+      setError("Это текущее слово. Выбери другое слово из словаря.");
+      return;
+    }
+
+    if (
+      selectedGroupId !== DICTIONARY_STUDY_SIMILAR_NEW_GROUP_ID &&
+      selectedGroupHasCurrentWord &&
+      selectedGroupIdentityKeys.has(resultIdentityKey)
+    ) {
+      setError("Эти слова уже есть в выбранной группе.");
+      return;
+    }
+
+    setIsSaving(true);
+    setError(null);
+    try {
+      let targetGroupId = selectedGroupId;
+      let targetGroup: DictionaryWordGroup | null = null;
+      if (targetGroupId === DICTIONARY_STUDY_SIMILAR_NEW_GROUP_ID) {
+        const created = await createSimilarGroup(result);
+        onGroupUpdated(created);
+        const withCurrent = await addIdentityToGroup(created.id, state.identity);
+        onGroupUpdated(withCurrent);
+        targetGroupId = withCurrent.id;
+        targetGroup = withCurrent;
+      } else if (!selectedGroup) {
+        throw new Error("Выбери группу для похожего слова.");
+      } else {
+        targetGroup = selectedGroup;
+        if (!selectedGroupHasCurrentWord) {
+          targetGroup = await addIdentityToGroup(targetGroupId, state.identity);
+          onGroupUpdated(targetGroup);
+        }
+      }
+
+      const targetGroupHasResult =
+        targetGroup?.items.some(
+          (item) =>
+            dictionaryEntryIdentityKey({
+              sourceCategoryId: item.sourceCategoryId,
+              sourceMessageId: item.sourceMessageId,
+              dictionaryId: item.dictionaryId,
+              entryId: item.entryId,
+            }) === resultIdentityKey
+        ) ?? false;
+      const updated = targetGroupHasResult
+        ? targetGroup
+        : await addIdentityToGroup(targetGroupId, resultIdentity);
+      if (updated) {
+        onAdded(updated);
+        setSelectedGroupId(updated.id);
+      }
+    } catch (addError) {
+      setError(toErrorMessage(addError, "Не удалось добавить похожее слово."));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  const statusText = !query.trim()
+    ? "Найди слово в любом #DICT и добавь его как похожее."
+    : !compiledDictionaryQuery
+      ? "Минимум 2 буквы для поиска."
+      : isLoading
+        ? "Ищу..."
+        : error
+          ? error
+          : results.length === 0
+            ? "Ничего не найдено."
+            : `${results.length} совпадений`;
+
+  return (
+    <div
+      className={`absolute inset-0 z-[95] flex items-center justify-center p-3 ${
+        isVisible ? "" : "dictionary-study-similar-popup-hidden"
+      }`}
+      aria-hidden={!isVisible}
+    >
+      <button
+        type="button"
+        className="absolute inset-0 bg-black/50"
+        onClick={isSaving ? undefined : onClose}
+        aria-label="Закрыть добавление похожего слова"
+      />
+
+      <div className="project-create-modal dictionary-global-search-modal dictionary-study-similar-add-modal popup-3d relative z-10 w-full max-w-6xl p-4 sm:p-5">
+        <div className="dictionary-editor-header dictionary-similar-header mb-3 flex justify-between gap-3">
+          <div className="dictionary-editor-title-wrap">
+            <h2 className="font-display text-4xl leading-none">Добавить похожее</h2>
+            <span className="dictionary-editor-title-badge">во время заучивания</span>
+          </div>
+          <div className="dictionary-similar-header-actions">
+            <button
+              type="button"
+              className="mini-action"
+              onClick={onOpenSimilar}
+              disabled={isSaving}
+            >
+              похожее
+            </button>
+            <button
+              type="button"
+              className="menu-action h-9 w-9 text-xl"
+              onClick={onClose}
+              disabled={isSaving}
+              aria-label="Закрыть добавление похожего слова"
+            >
+              x
+            </button>
+          </div>
+        </div>
+
+        <div className="dictionary-study-similar-add-settings">
+          <div className="dictionary-study-similar-current">
+            <span className="settings-label">текущее слово</span>
+            <strong>{currentText || "слово"}</strong>
+          </div>
+
+          {state.availableGroups.length > 0 ? (
+            <label className="dictionary-editor-field">
+              <span className="settings-label">куда добавить</span>
+              <select
+                value={selectedGroupId}
+                onChange={(event) => {
+                  setSelectedGroupId(event.target.value);
+                  setError(null);
+                }}
+                className="settings-input"
+                disabled={isSaving}
+              >
+                {state.availableGroups.map((group) => (
+                  <option key={group.id} value={group.id}>
+                    {group.title}
+                  </option>
+                ))}
+                <option value={DICTIONARY_STUDY_SIMILAR_NEW_GROUP_ID}>
+                  новая группа
+                </option>
+              </select>
+            </label>
+          ) : (
+            <div className="dictionary-study-similar-new-group-note">
+              будет создана новая группа
+            </div>
+          )}
+
+          <label className="dictionary-global-search-field">
+            <span className="settings-label">поиск #DICT</span>
+            <input
+              value={query}
+              onChange={(event) => updateQuery(event.target.value)}
+              className="settings-input"
+              placeholder="слово или точная фраза..."
+              disabled={isSaving}
+              autoFocus
+            />
+          </label>
+        </div>
+
+        <p
+          className={`dictionary-global-search-status ${
+            error ? "dictionary-global-search-status-error" : ""
+          }`}
+          aria-live="polite"
+        >
+          {statusText}
+        </p>
+
+        <div className="dictionary-global-search-table-wrap">
+          <table className="dictionary-editor-table dictionary-global-search-table dictionary-group-table dictionary-study-similar-add-table">
+            <thead>
+              <tr>
+                <th>{DEFAULT_DICTIONARY_FIELD_LABELS.side1}</th>
+                <th>{DEFAULT_DICTIONARY_FIELD_LABELS.side2}</th>
+                <th>Источник</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {results.map((result) => {
+                const resultIdentity = getDictionarySearchResultIdentity(result);
+                const resultIdentityKey = dictionaryEntryIdentityKey(resultIdentity);
+                const isCurrent = resultIdentityKey === currentIdentityKey;
+                const exists =
+                  selectedGroupId !== DICTIONARY_STUDY_SIMILAR_NEW_GROUP_ID &&
+                  selectedGroupHasCurrentWord &&
+                  selectedGroupIdentityKeys.has(resultIdentityKey);
+                const rowClassName = [
+                  result.hasFuzzyMatch ? "dictionary-editor-row-match" : "",
+                  isCurrent ? "dictionary-group-current-row" : "",
+                  exists ? "dictionary-study-similar-existing-row" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ");
+
+                return (
+                  <tr key={result.id} className={rowClassName || undefined}>
+                    {renderDictionaryGlobalSearchSideCell(result, "side1")}
+                    {renderDictionaryGlobalSearchSideCell(result, "side2")}
+                    <td data-label="Источник">
+                      <div className="dictionary-global-search-source dictionary-group-static-source">
+                        <span>{result.dictionaryTitle}</span>
+                        <small>
+                          {result.categoryPath}
+                          {result.sourceMessageId ? " / сообщение" : ""}
+                        </small>
+                      </div>
+                    </td>
+                    <td data-label="">
+                      <button
+                        type="button"
+                        className="mini-action dictionary-group-add"
+                        onClick={() => void addResult(result)}
+                        disabled={isSaving || isCurrent || exists}
+                      >
+                        {isCurrent
+                          ? "текущее"
+                          : exists
+                            ? "в группе"
+                            : isSaving
+                              ? "..."
+                              : "добавить"}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DictionarySimilarPopup({
   state,
   onClose,
+  onOpenAdd,
   onOpenSource,
 }: {
   state: DictionarySimilarPopupState;
   onClose: () => void;
+  onOpenAdd: () => void;
   onOpenSource: (result: DictionaryGroupResolvedResult) => void;
 }) {
   const statusText = state.isLoading
@@ -23554,19 +26447,28 @@ function DictionarySimilarPopup({
       />
 
       <div className="project-create-modal dictionary-global-search-modal dictionary-similar-modal popup-3d relative z-10 w-full max-w-6xl p-4 sm:p-5">
-        <div className="dictionary-editor-header mb-3 flex justify-between gap-3">
+        <div className="dictionary-editor-header dictionary-similar-header mb-3 flex justify-between gap-3">
           <div className="dictionary-editor-title-wrap">
             <h2 className="font-display text-4xl leading-none">Похожее</h2>
             <span className="dictionary-editor-title-badge">группы словарей</span>
           </div>
-          <button
-            type="button"
-            className="menu-action h-9 w-9 text-xl"
-            onClick={onClose}
-            aria-label="Закрыть похожие слова"
-          >
-            x
-          </button>
+          <div className="dictionary-similar-header-actions">
+            <button
+              type="button"
+              className="mini-action"
+              onClick={onOpenAdd}
+            >
+              добавить
+            </button>
+            <button
+              type="button"
+              className="menu-action h-9 w-9 text-xl"
+              onClick={onClose}
+              aria-label="Закрыть похожие слова"
+            >
+              x
+            </button>
+          </div>
         </div>
 
         <div className="dictionary-similar-groups">
@@ -23685,6 +26587,43 @@ function renderDictionaryResultSideCell(
       </div>
     </td>
   );
+}
+
+function getDictionaryEntryCompactTitle(
+  entry: DictionaryEntry,
+  columns: DictionaryColumn[]
+): string {
+  const sourceColumns = columns.length > 0 ? columns : DEFAULT_DICTIONARY_COLUMNS;
+  const wordText = sourceColumns
+    .filter((column) => column.kind === "word")
+    .map((column) => getDictionaryEntryFieldText(entry, column.id).trim())
+    .find(Boolean);
+  const fallbackText = sourceColumns
+    .map((column) => getDictionaryEntryFieldText(entry, column.id).trim())
+    .find(Boolean);
+
+  return compactDictionaryStudySimilarTitlePart(wordText ?? fallbackText ?? "");
+}
+
+function compactDictionaryStudySimilarTitlePart(text: string): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= 28) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, 27)}...`;
+}
+
+function makeDictionaryStudySimilarGroupTitle(
+  currentEntry: DictionaryEntry,
+  currentColumns: DictionaryColumn[],
+  resultEntry: DictionaryEntry,
+  resultColumns: DictionaryColumn[]
+): string {
+  const currentText = getDictionaryEntryCompactTitle(currentEntry, currentColumns);
+  const resultText = getDictionaryEntryCompactTitle(resultEntry, resultColumns);
+
+  return ["Похожее:", currentText || "слово", "/", resultText || "слово"].join(" ");
 }
 
 function normalizeCategoryRow(category: CategoryRow): CategoryRow {
@@ -25040,6 +27979,87 @@ const DEFAULT_DICTIONARY_AUTO_SPEAK_FIELDS: DictionaryEntryField[] = [
 const DEFAULT_DICTIONARY_MANUAL_SPEAK_FIELDS: DictionaryEntryField[] = [
   ...DICTIONARY_EDITOR_SEARCH_FIELDS,
 ];
+const DEFAULT_DICTIONARY_SPEECH_LANGUAGE = "auto";
+const DICTIONARY_SPEECH_LANGUAGE_OPTIONS: Array<{
+  value: DictionarySpeechLanguage;
+  label: string;
+}> = [
+  { value: DEFAULT_DICTIONARY_SPEECH_LANGUAGE, label: "авто по тексту" },
+  { value: "ru-RU", label: "русский" },
+  { value: "en-US", label: "английский (США)" },
+  { value: "en-GB", label: "английский (Британия)" },
+  { value: "en-AU", label: "английский (Австралия)" },
+  { value: "en-CA", label: "английский (Канада)" },
+  { value: "en-IN", label: "английский (Индия)" },
+  { value: "fr-FR", label: "французский" },
+  { value: "fr-CA", label: "французский (Канада)" },
+  { value: "de-DE", label: "немецкий" },
+  { value: "de-AT", label: "немецкий (Австрия)" },
+  { value: "de-CH", label: "немецкий (Швейцария)" },
+  { value: "es-ES", label: "испанский" },
+  { value: "es-MX", label: "испанский (Мексика)" },
+  { value: "es-US", label: "испанский (США)" },
+  { value: "ca-ES", label: "каталанский" },
+  { value: "it-IT", label: "итальянский" },
+  { value: "pt-PT", label: "португальский" },
+  { value: "pt-BR", label: "португальский (Бразилия)" },
+  { value: "nl-NL", label: "нидерландский" },
+  { value: "pl-PL", label: "польский" },
+  { value: "uk-UA", label: "украинский" },
+  { value: "be-BY", label: "белорусский" },
+  { value: "cs-CZ", label: "чешский" },
+  { value: "sk-SK", label: "словацкий" },
+  { value: "ro-RO", label: "румынский" },
+  { value: "hu-HU", label: "венгерский" },
+  { value: "bg-BG", label: "болгарский" },
+  { value: "hr-HR", label: "хорватский" },
+  { value: "sr-RS", label: "сербский" },
+  { value: "sl-SI", label: "словенский" },
+  { value: "lt-LT", label: "литовский" },
+  { value: "lv-LV", label: "латышский" },
+  { value: "et-EE", label: "эстонский" },
+  { value: "sv-SE", label: "шведский" },
+  { value: "da-DK", label: "датский" },
+  { value: "nb-NO", label: "норвежский" },
+  { value: "fi-FI", label: "финский" },
+  { value: "is-IS", label: "исландский" },
+  { value: "ga-IE", label: "ирландский" },
+  { value: "cy-GB", label: "валлийский" },
+  { value: "el-GR", label: "греческий" },
+  { value: "tr-TR", label: "турецкий" },
+  { value: "ar-SA", label: "арабский" },
+  { value: "fa-IR", label: "персидский" },
+  { value: "he-IL", label: "иврит" },
+  { value: "hi-IN", label: "хинди" },
+  { value: "bn-IN", label: "бенгальский" },
+  { value: "ur-PK", label: "урду" },
+  { value: "ta-IN", label: "тамильский" },
+  { value: "te-IN", label: "телугу" },
+  { value: "mr-IN", label: "маратхи" },
+  { value: "gu-IN", label: "гуджарати" },
+  { value: "kn-IN", label: "каннада" },
+  { value: "ml-IN", label: "малаялам" },
+  { value: "pa-IN", label: "панджаби" },
+  { value: "id-ID", label: "индонезийский" },
+  { value: "ms-MY", label: "малайский" },
+  { value: "fil-PH", label: "филиппинский" },
+  { value: "vi-VN", label: "вьетнамский" },
+  { value: "th-TH", label: "тайский" },
+  { value: "ja-JP", label: "японский" },
+  { value: "ko-KR", label: "корейский" },
+  { value: "zh-CN", label: "китайский (упрощенный)" },
+  { value: "zh-TW", label: "китайский (традиционный)" },
+  { value: "af-ZA", label: "африкаанс" },
+  { value: "sw-KE", label: "суахили" },
+  { value: "am-ET", label: "амхарский" },
+  { value: "hy-AM", label: "армянский" },
+  { value: "ka-GE", label: "грузинский" },
+  { value: "az-AZ", label: "азербайджанский" },
+  { value: "sq-AL", label: "албанский" },
+  { value: "mk-MK", label: "македонский" },
+  { value: "kk-KZ", label: "казахский" },
+  { value: "uz-UZ", label: "узбекский" },
+];
 const DEFAULT_DICTIONARY_MOTIVATION_ADVANCE_MODE: DictionaryMotivationAdvanceMode =
   "auto";
 const DEFAULT_DICTIONARY_NOTE_DISPLAY_MODE: DictionaryNoteDisplayMode =
@@ -25102,6 +28122,68 @@ function normalizeDictionaryNoteDisplayMode(
   value: unknown
 ): DictionaryNoteDisplayMode {
   return value === "separate" ? "separate" : DEFAULT_DICTIONARY_NOTE_DISPLAY_MODE;
+}
+
+function normalizeDictionarySpeechLanguage(
+  value: unknown
+): DictionarySpeechLanguage {
+  if (typeof value !== "string") {
+    return DEFAULT_DICTIONARY_SPEECH_LANGUAGE;
+  }
+
+  return DICTIONARY_SPEECH_LANGUAGE_OPTIONS.some(
+    (option) => option.value === value
+  )
+    ? value
+    : DEFAULT_DICTIONARY_SPEECH_LANGUAGE;
+}
+
+function getDictionarySpeechLanguageLabel(value: unknown): string {
+  const normalizedValue = normalizeDictionarySpeechLanguage(value);
+  return (
+    DICTIONARY_SPEECH_LANGUAGE_OPTIONS.find(
+      (option) => option.value === normalizedValue
+    )?.label ?? DICTIONARY_SPEECH_LANGUAGE_OPTIONS[0].label
+  );
+}
+
+function normalizeDictionarySpeechVoiceLanguage(value: string): string {
+  return value.trim().toLowerCase().replaceAll("_", "-");
+}
+
+function findDictionarySpeechVoiceForLanguage(
+  voices: SpeechSynthesisVoice[],
+  language: string
+): SpeechSynthesisVoice | null {
+  const normalizedLanguage = normalizeDictionarySpeechVoiceLanguage(language);
+  if (!normalizedLanguage) {
+    return null;
+  }
+
+  const exactVoice = voices.find(
+    (voice) =>
+      normalizeDictionarySpeechVoiceLanguage(voice.lang) === normalizedLanguage
+  );
+  if (exactVoice) {
+    return exactVoice;
+  }
+
+  const languagePrefix = normalizedLanguage.split("-")[0] ?? "";
+  if (!languagePrefix) {
+    return null;
+  }
+
+  return (
+    voices.find(
+      (voice) =>
+        normalizeDictionarySpeechVoiceLanguage(voice.lang).split("-")[0] ===
+        languagePrefix
+    ) ?? null
+  );
+}
+
+function formatDictionarySpeechVoiceLabel(voice: SpeechSynthesisVoice): string {
+  return `${voice.name} (${voice.lang})`;
 }
 
 function normalizeDictionaryMotivationAutoSeconds(value: unknown): number {
@@ -25452,6 +28534,72 @@ function getDictionarySideColumns(
   );
 }
 
+function getDictionaryEditorSideLabel(side: DictionaryPromptSide): string {
+  return side === "side1" ? "Карточка 1" : "Карточка 2";
+}
+
+function getDictionaryEditorColumnKindName(kind: DictionaryColumnKind): string {
+  return kind === "word" ? "Слово" : "Пояснение";
+}
+
+function getDictionaryEditorColumnKindIndex(
+  columns: DictionaryColumn[],
+  targetColumn: DictionaryColumn,
+  targetKind: DictionaryColumnKind = targetColumn.kind
+): number {
+  let index = 0;
+
+  for (const column of columns) {
+    if (column.side !== targetColumn.side) {
+      continue;
+    }
+
+    if (column.id === targetColumn.id) {
+      return index + 1;
+    }
+
+    if (column.kind === targetKind) {
+      index += 1;
+    }
+  }
+
+  return index + 1;
+}
+
+function getDictionaryEditorColumnKindTitle(
+  column: DictionaryColumn,
+  columns: DictionaryColumn[],
+  kind: DictionaryColumnKind = column.kind
+): string {
+  return `${getDictionaryEditorColumnKindName(kind)} ${getDictionaryEditorColumnKindIndex(
+    columns,
+    column,
+    kind
+  )}`;
+}
+
+function getDictionaryEditorColumnTitle(
+  column: DictionaryColumn,
+  columns: DictionaryColumn[],
+  kind: DictionaryColumnKind = column.kind
+): string {
+  return `${getDictionaryEditorSideLabel(
+    column.side
+  )} · ${getDictionaryEditorColumnKindTitle(column, columns, kind)}`;
+}
+
+function getDictionaryEditorColumnCellLabel(
+  column: DictionaryColumn,
+  labels: DictionaryFieldLabels,
+  columns: DictionaryColumn[]
+): string {
+  return `${getDictionaryEditorColumnTitle(column, columns)} · ${getDictionaryFieldLabel(
+    column.id,
+    labels,
+    columns
+  )}`;
+}
+
 function getDictionaryFieldLabel(
   field: DictionaryEntryField,
   labels: DictionaryFieldLabels = DEFAULT_DICTIONARY_FIELD_LABELS,
@@ -25553,6 +28701,7 @@ function normalizeMessageDictionaryPayload(
       getDefaultDictionaryManualSpeakFields(columns),
       columns
     ),
+    speechLanguage: normalizeDictionarySpeechLanguage(payload.speechLanguage),
     noteDisplayMode: normalizeDictionaryNoteDisplayMode(payload.noteDisplayMode),
     progressMode: Boolean(payload.progressMode),
     motivateOnCorrect: Boolean(payload.motivateOnCorrect),
@@ -25702,6 +28851,7 @@ function parseMessageDictionaryContent(
             (field): field is string => typeof field === "string"
           )
         : [],
+      speechLanguage: normalizeDictionarySpeechLanguage(parsed.speechLanguage),
       noteDisplayMode: normalizeDictionaryNoteDisplayMode(parsed.noteDisplayMode),
       progressMode: Boolean(parsed.progressMode),
       motivateOnCorrect: Boolean(parsed.motivateOnCorrect),
@@ -25733,6 +28883,7 @@ function serializeMessageDictionaryContent(payload: MessageDictionaryPayload): s
     autoSpeak: normalized.autoSpeak,
     autoSpeakFields: normalized.autoSpeakFields,
     manualSpeakFields: normalized.manualSpeakFields,
+    speechLanguage: normalized.speechLanguage,
     noteDisplayMode: normalized.noteDisplayMode,
     progressMode: normalized.progressMode,
     motivateOnCorrect: normalized.motivateOnCorrect,
@@ -25750,7 +28901,8 @@ function isSpecialMessageContent(value: string | null | undefined): boolean {
   return Boolean(
     parseMessageChecklistContent(value) ||
       parseMessageDictionaryContent(value) ||
-      parseMessageScheduleContent(value)
+      parseMessageScheduleContent(value) ||
+      parseMessageRuleContent(value)
   );
 }
 
@@ -25768,6 +28920,11 @@ function normalizePersistedMessageContent(value: string): string {
   const schedulePayload = parseMessageScheduleContent(value);
   if (schedulePayload) {
     return serializeMessageScheduleContent(schedulePayload);
+  }
+
+  const ruleDocument = parseMessageRuleContent(value);
+  if (ruleDocument) {
+    return serializeMessageRuleContent(ruleDocument);
   }
 
   return sanitizeRichTextHtml(value);
@@ -25876,6 +29033,9 @@ function parseContinuousDictionaryCollection(value: unknown): DictionaryBlock[] 
             (field): field is string => typeof field === "string"
           )
         : [],
+      speechLanguage: normalizeDictionarySpeechLanguage(
+        rawDictionary.speechLanguage
+      ),
       noteDisplayMode: normalizeDictionaryNoteDisplayMode(
         rawDictionary.noteDisplayMode
       ),
@@ -25935,6 +29095,7 @@ function parseContinuousContent(value: string | null | undefined): ContinuousCon
       checklists: [],
       dictionaries: [],
       schedules: [],
+      rules: [],
     };
   }
 
@@ -25946,6 +29107,7 @@ function parseContinuousContent(value: string | null | undefined): ContinuousCon
         checklists: [],
         dictionaries: [],
         schedules: [],
+        rules: [],
       };
     }
 
@@ -25959,6 +29121,7 @@ function parseContinuousContent(value: string | null | undefined): ContinuousCon
         checklists: [],
         dictionaries: [],
         schedules: [],
+        rules: [],
       };
     }
 
@@ -25967,6 +29130,7 @@ function parseContinuousContent(value: string | null | undefined): ContinuousCon
       checklists: parseContinuousChecklistCollection(parsed.checklists),
       dictionaries: parseContinuousDictionaryCollection(parsed.dictionaries),
       schedules: parseContinuousScheduleCollection(parsed.schedules),
+      rules: normalizeRuleDocuments(parsed.rules),
     };
   } catch {
     return {
@@ -25974,6 +29138,7 @@ function parseContinuousContent(value: string | null | undefined): ContinuousCon
       checklists: [],
       dictionaries: [],
       schedules: [],
+      rules: [],
     };
   }
 }
@@ -25984,12 +29149,14 @@ function serializeContinuousContent(document: ContinuousContentModel): string {
     checklists: normalizeChecklistBlocks(document.checklists),
     dictionaries: normalizeDictionaryBlocks(document.dictionaries),
     schedules: normalizeScheduleBlocks(document.schedules),
+    rules: normalizeRuleDocuments(document.rules),
   };
 
   if (
     nextDocument.checklists.length === 0 &&
     nextDocument.dictionaries.length === 0 &&
-    nextDocument.schedules.length === 0
+    nextDocument.schedules.length === 0 &&
+    nextDocument.rules.length === 0
   ) {
     return nextDocument.text;
   }
@@ -26000,6 +29167,7 @@ function serializeContinuousContent(document: ContinuousContentModel): string {
     checklists: nextDocument.checklists,
     dictionaries: nextDocument.dictionaries,
     schedules: nextDocument.schedules,
+    rules: nextDocument.rules,
   });
 }
 
@@ -26128,6 +29296,88 @@ function makeDictionaryEditorEntries(
     : [createEmptyDictionaryEntry(payload.columns)];
 }
 
+function makeDictionaryEditorSnapshotEntries(
+  entries: DictionaryEntry[],
+  columns: DictionaryColumn[]
+): DictionaryEntry[] {
+  return entries
+    .map((entry, index): DictionaryEntry | null => {
+      const values = normalizeDictionaryEntryValues(entry, columns);
+      if (!Object.values(values).some(Boolean)) {
+        return null;
+      }
+
+      return {
+        id: normalizeDictionaryText(entry.id) || `entry-${index + 1}`,
+        values,
+      };
+    })
+    .filter((entry): entry is DictionaryEntry => Boolean(entry));
+}
+
+function makeDictionaryEditorSnapshot(
+  editor: DictionaryEditorDraft | DictionaryEditorState
+): DictionaryEditorSnapshot {
+  const columns = normalizeDictionaryColumns(editor.columns, editor.labels);
+  const labels = normalizeDictionaryLabels(editor.labels, columns);
+
+  return {
+    title: normalizeDictionaryTitle(editor.titleDraft),
+    payload: {
+      description: normalizeDictionaryDescription(editor.descriptionDraft),
+      tags: parseDictionaryTags(editor.tagsDraft),
+      promptSide: normalizeDictionaryPromptSide(editor.promptSide),
+      shuffle: Boolean(editor.shuffle),
+      autoSpeak: Boolean(editor.autoSpeak),
+      autoSpeakFields: normalizeDictionaryAutoSpeakFields(
+        editor.autoSpeakFields,
+        [],
+        columns
+      ),
+      manualSpeakFields: normalizeDictionaryManualSpeakFields(
+        editor.manualSpeakFields,
+        [],
+        columns
+      ),
+      speechLanguage: normalizeDictionarySpeechLanguage(editor.speechLanguage),
+      noteDisplayMode: normalizeDictionaryNoteDisplayMode(editor.noteDisplayMode),
+      progressMode: Boolean(editor.progressMode),
+      motivateOnCorrect: Boolean(editor.motivateOnCorrect),
+      cardMode: Boolean(editor.cardMode),
+      adhdMode: Boolean(editor.adhdMode),
+      motivationAdvanceMode: normalizeDictionaryMotivationAdvanceMode(
+        editor.motivationAdvanceMode
+      ),
+      motivationAutoSeconds: normalizeDictionaryMotivationAutoSeconds(
+        editor.motivationAutoSeconds
+      ),
+      labels,
+      columns,
+      entries: makeDictionaryEditorSnapshotEntries(editor.entries, columns),
+    },
+  };
+}
+
+function makeDictionaryEditorState(
+  editor: DictionaryEditorDraft
+): DictionaryEditorState {
+  return {
+    ...editor,
+    initialSnapshot: makeDictionaryEditorSnapshot(editor),
+  };
+}
+
+function isDictionaryEditorDirty(
+  editor: DictionaryEditorState,
+  importDraft: string
+): boolean {
+  return (
+    importDraft.trim().length > 0 ||
+    JSON.stringify(makeDictionaryEditorSnapshot(editor)) !==
+      JSON.stringify(editor.initialSnapshot)
+  );
+}
+
 function validateDictionaryEditorEntries(
   entries: DictionaryEntry[],
   columns: DictionaryColumn[]
@@ -26194,6 +29444,7 @@ function buildDictionaryExportDocument(
     autoSpeak: normalized.autoSpeak,
     autoSpeakFields: normalized.autoSpeakFields,
     manualSpeakFields: normalized.manualSpeakFields,
+    speechLanguage: normalized.speechLanguage,
     noteDisplayMode: normalized.noteDisplayMode,
     progressMode: normalized.progressMode,
     motivateOnCorrect: normalized.motivateOnCorrect,
@@ -26261,6 +29512,7 @@ function parseDictionaryJsonImport(value: string): DictionaryImportPreview {
             (field): field is string => typeof field === "string"
           )
         : [],
+      speechLanguage: normalizeDictionarySpeechLanguage(parsed.speechLanguage),
       noteDisplayMode: normalizeDictionaryNoteDisplayMode(parsed.noteDisplayMode),
       progressMode: Boolean(parsed.progressMode),
       motivateOnCorrect: Boolean(parsed.motivateOnCorrect),
@@ -26669,19 +29921,208 @@ function makeDictionaryStudyProgressKey(options: {
   dictionaryId: string | null;
   title: string;
 }): string {
-  const sourceKey = options.dictionaryId
-    ? `dictionary:${options.dictionaryId}`
-    : options.sourceMessageId
-      ? `message:${options.sourceMessageId}`
+  const source = makeDictionaryStudyProgressSource(options);
+  const sourceKey = source?.dictionaryId
+    ? `dictionary:${source.dictionaryId}`
+    : source?.sourceMessageId
+      ? `message:${source.sourceMessageId}`
       : `title:${options.title}`;
 
   return [
     DICTIONARY_STUDY_PROGRESS_STORAGE_PREFIX,
-    options.sourceCategoryId,
+    source?.sourceCategoryId ?? options.sourceCategoryId,
     sourceKey,
   ]
     .map((part) => encodeURIComponent(part))
     .join(":");
+}
+
+function makeDictionaryStudyProgressSource(options: {
+  sourceCategoryId: string;
+  sourceMessageId: string | null;
+  dictionaryId: string | null;
+}): DictionaryStudyProgressSourceIdentity | null {
+  return normalizeDictionaryStudyProgressSource(options);
+}
+
+function makeDictionaryStudyProgressSearchParams(
+  source: DictionaryStudyProgressSourceIdentity
+): URLSearchParams {
+  const params = new URLSearchParams({
+    sourceCategoryId: source.sourceCategoryId,
+  });
+  if (source.sourceMessageId) {
+    params.set("sourceMessageId", source.sourceMessageId);
+  }
+  if (source.dictionaryId) {
+    params.set("dictionaryId", source.dictionaryId);
+  }
+
+  return params;
+}
+
+function getDictionaryStudySettingsFromPayload(
+  payload: MessageDictionaryPayload
+): DictionaryStudyProgressSettings {
+  return {
+    promptSide: payload.promptSide,
+    shuffle: payload.shuffle,
+    autoSpeak: payload.autoSpeak,
+    autoSpeakFields: normalizeDictionaryAutoSpeakFields(
+      payload.autoSpeakFields,
+      getDefaultDictionaryAutoSpeakFields(payload.columns),
+      payload.columns
+    ),
+    manualSpeakFields: normalizeDictionaryManualSpeakFields(
+      payload.manualSpeakFields,
+      getDefaultDictionaryManualSpeakFields(payload.columns),
+      payload.columns
+    ),
+    speechLanguage: normalizeDictionarySpeechLanguage(payload.speechLanguage),
+    noteDisplayMode: payload.noteDisplayMode,
+    progressMode: payload.progressMode,
+    motivateOnCorrect: payload.motivateOnCorrect,
+    cardMode: payload.cardMode,
+    adhdMode: payload.adhdMode,
+    motivationAdvanceMode: payload.motivationAdvanceMode,
+    motivationAutoSeconds: payload.motivationAutoSeconds,
+  };
+}
+
+function getDictionaryStudySettingsFromStudy(
+  study: DictionaryStudyState
+): DictionaryStudyProgressSettings {
+  return {
+    promptSide: study.promptSide,
+    shuffle: study.shuffle,
+    autoSpeak: study.autoSpeak,
+    autoSpeakFields: [...study.autoSpeakFields],
+    manualSpeakFields: [...study.manualSpeakFields],
+    speechLanguage: study.speechLanguage,
+    noteDisplayMode: study.noteDisplayMode,
+    progressMode: study.progressMode,
+    motivateOnCorrect: study.motivateOnCorrect,
+    cardMode: study.cardMode,
+    adhdMode: study.adhdMode,
+    motivationAdvanceMode: study.motivationAdvanceMode,
+    motivationAutoSeconds: study.motivationAutoSeconds,
+  };
+}
+
+function resolveDictionaryStudySettings(
+  payload: MessageDictionaryPayload,
+  progress: DictionaryStudyProgress | null
+): DictionaryStudyProgressSettings {
+  const persisted = progress?.settings ?? null;
+  const payloadSettings = getDictionaryStudySettingsFromPayload(payload);
+  const rawSettings = persisted ?? payloadSettings;
+  const isLegacyProgress = Boolean(progress && !persisted);
+
+  return {
+    promptSide: normalizeDictionaryPromptSide(rawSettings.promptSide),
+    shuffle: persisted
+      ? persisted.shuffle
+      : isLegacyProgress
+        ? Boolean(progress?.shuffle)
+        : payloadSettings.shuffle,
+    autoSpeak: persisted ? persisted.autoSpeak : payloadSettings.autoSpeak,
+    autoSpeakFields: normalizeDictionaryAutoSpeakFields(
+      persisted ? persisted.autoSpeakFields : payloadSettings.autoSpeakFields,
+      getDefaultDictionaryAutoSpeakFields(payload.columns),
+      payload.columns
+    ),
+    manualSpeakFields: normalizeDictionaryManualSpeakFields(
+      persisted ? persisted.manualSpeakFields : payloadSettings.manualSpeakFields,
+      getDefaultDictionaryManualSpeakFields(payload.columns),
+      payload.columns
+    ),
+    speechLanguage: normalizeDictionarySpeechLanguage(rawSettings.speechLanguage),
+    noteDisplayMode: normalizeDictionaryNoteDisplayMode(rawSettings.noteDisplayMode),
+    progressMode: persisted
+      ? persisted.progressMode
+      : isLegacyProgress
+        ? Boolean(progress?.progressMode)
+        : payloadSettings.progressMode,
+    motivateOnCorrect: persisted
+      ? persisted.motivateOnCorrect
+      : payloadSettings.motivateOnCorrect,
+    cardMode: persisted ? persisted.cardMode : payloadSettings.cardMode,
+    adhdMode: persisted ? persisted.adhdMode : payloadSettings.adhdMode,
+    motivationAdvanceMode: normalizeDictionaryMotivationAdvanceMode(
+      rawSettings.motivationAdvanceMode
+    ),
+    motivationAutoSeconds: normalizeDictionaryMotivationAutoSeconds(
+      rawSettings.motivationAutoSeconds
+    ),
+  };
+}
+
+function makeDefaultDictionaryStudyCards(
+  entries: DictionaryEntry[],
+  settings: DictionaryStudyProgressSettings
+): DictionaryEntry[] {
+  return settings.shuffle && entries.length > 1
+    ? shuffleDictionaryEntries(entries)
+    : [...entries];
+}
+
+function selectDictionaryStudyProgress(
+  localProgress: DictionaryStudyProgress | null,
+  serverProgress: DictionaryStudyProgress | null | undefined
+): DictionaryStudyProgress | null {
+  if (!localProgress) {
+    return serverProgress ?? null;
+  }
+
+  if (!serverProgress) {
+    return localProgress;
+  }
+
+  if (localProgress.savedAt === null || serverProgress.savedAt === null) {
+    return localProgress;
+  }
+
+  return serverProgress.savedAt > localProgress.savedAt
+    ? serverProgress
+    : localProgress;
+}
+
+function resolveDictionaryStudySettingsForLocalProgress(
+  options: {
+    sourceCategoryId: string;
+    sourceMessageId: string | null;
+    dictionaryId: string | null;
+    title: string;
+  },
+  payload: MessageDictionaryPayload
+): DictionaryStudyProgressSettings {
+  return resolveDictionaryStudySettings(
+    payload,
+    readDictionaryStudyProgress(makeDictionaryStudyProgressKey(options))
+  );
+}
+
+function getDictionaryStudyProgressSnapshot(
+  study: DictionaryStudyState
+): DictionaryStudyProgress {
+  const settings = getDictionaryStudySettingsFromStudy(study);
+
+  return {
+    schemaVersion: DICTIONARY_STUDY_PROGRESS_SCHEMA_VERSION,
+    savedAt: Date.now(),
+    currentIndex: study.currentIndex,
+    isAnswerRevealed: study.isAnswerRevealed,
+    cardIds: study.cards.map((entry) => entry.id),
+    shuffle: settings.shuffle,
+    progressMode: settings.progressMode,
+    progressStartedAt: study.progressStartedAt,
+    progressCompletedAt: study.progressCompletedAt,
+    correctCount: study.correctCount,
+    wrongCount: study.wrongCount,
+    answerResultsByEntryId: study.answerResultsByEntryId,
+    isProgressComplete: study.isProgressComplete,
+    settings,
+  };
 }
 
 function readDictionaryStudyProgress(
@@ -26698,84 +30139,42 @@ function readDictionaryStudyProgress(
     }
 
     const parsed: unknown = JSON.parse(raw);
-    if (!isObjectRecord(parsed)) {
-      return null;
-    }
-
-    const cardIds = Array.isArray(parsed.cardIds)
-      ? parsed.cardIds.filter((id): id is string => typeof id === "string")
-      : [];
-    const answerResultsByEntryId =
-      parseDictionaryStudyAnswerResultsByEntryId(parsed.answerResultsByEntryId);
-
-    return {
-      currentIndex:
-        typeof parsed.currentIndex === "number" &&
-        Number.isFinite(parsed.currentIndex)
-          ? Math.max(0, Math.floor(parsed.currentIndex))
-          : 0,
-      isAnswerRevealed: Boolean(parsed.isAnswerRevealed),
-      cardIds,
-      shuffle: Boolean(parsed.shuffle),
-      progressMode: Boolean(parsed.progressMode),
-      progressStartedAt:
-        typeof parsed.progressStartedAt === "number" &&
-        Number.isFinite(parsed.progressStartedAt)
-          ? Math.max(0, parsed.progressStartedAt)
-          : Date.now(),
-      progressCompletedAt:
-        typeof parsed.progressCompletedAt === "number" &&
-        Number.isFinite(parsed.progressCompletedAt)
-          ? Math.max(0, parsed.progressCompletedAt)
-          : null,
-      correctCount:
-        typeof parsed.correctCount === "number" &&
-        Number.isFinite(parsed.correctCount)
-          ? Math.max(0, Math.floor(parsed.correctCount))
-          : 0,
-      wrongCount:
-        typeof parsed.wrongCount === "number" && Number.isFinite(parsed.wrongCount)
-          ? Math.max(0, Math.floor(parsed.wrongCount))
-          : 0,
-      answerResultsByEntryId,
-      isProgressComplete: Boolean(parsed.isProgressComplete),
-    };
+    return normalizePersistedDictionaryStudyProgress(parsed);
   } catch {
     return null;
   }
 }
 
-function saveDictionaryStudyProgress(study: DictionaryStudyState) {
+function writeDictionaryStudyProgress(
+  progressKey: string,
+  progress: DictionaryStudyProgress
+) {
   if (typeof window === "undefined") {
     return;
   }
 
   try {
-    const progress: DictionaryStudyProgress = {
-      currentIndex: study.currentIndex,
-      isAnswerRevealed: study.isAnswerRevealed,
-      cardIds: study.cards.map((entry) => entry.id),
-      shuffle: study.shuffle,
-      progressMode: study.progressMode,
-      progressStartedAt: study.progressStartedAt,
-      progressCompletedAt: study.progressCompletedAt,
-      correctCount: study.correctCount,
-      wrongCount: study.wrongCount,
-      answerResultsByEntryId: study.answerResultsByEntryId,
-      isProgressComplete: study.isProgressComplete,
-    };
-    window.localStorage.setItem(study.progressKey, JSON.stringify(progress));
+    window.localStorage.setItem(
+      progressKey,
+      JSON.stringify(progress)
+    );
   } catch {
     return;
   }
+}
+
+function saveDictionaryStudyProgress(study: DictionaryStudyState) {
+  writeDictionaryStudyProgress(
+    study.progressKey,
+    getDictionaryStudyProgressSnapshot(study)
+  );
 }
 
 function restoreDictionaryStudyProgress(
   progress: DictionaryStudyProgress | null,
   baseCards: DictionaryEntry[],
   defaultCards: DictionaryEntry[],
-  shuffle: boolean,
-  progressMode: boolean
+  settings: DictionaryStudyProgressSettings
 ): {
   cards: DictionaryEntry[];
   currentIndex: number;
@@ -26803,57 +30202,59 @@ function restoreDictionaryStudyProgress(
     return fresh;
   }
 
-  if (progressMode && !progress.progressMode) {
-    return fresh;
-  }
-
   const cardsById = new Map(baseCards.map((entry) => [entry.id, entry]));
+  const restoredCardIds = new Set(progress.cardIds);
   const restoredCards =
-    shuffle && progress.shuffle
+    progress.cardIds.length > 0
       ? [
           ...progress.cardIds
             .map((id) => cardsById.get(id))
             .filter((entry): entry is DictionaryEntry => Boolean(entry)),
-          ...baseCards.filter((entry) => !progress.cardIds.includes(entry.id)),
+          ...baseCards.filter((entry) => !restoredCardIds.has(entry.id)),
         ]
-      : [...baseCards];
+      : defaultCards;
   const cards = restoredCards.length > 0 ? restoredCards : defaultCards;
-  const answerResultsByEntryId = normalizeDictionaryStudyAnswerResultsByEntryId(
-    progress.answerResultsByEntryId,
-    cards
-  );
+  const shouldRestoreAnswers = settings.progressMode && progress.progressMode;
+  const answerResultsByEntryId = shouldRestoreAnswers
+    ? normalizeDictionaryStudyAnswerResultsByEntryId(
+        progress.answerResultsByEntryId,
+        cards
+      )
+    : {};
   const counts = getDictionaryStudyAnswerResultCounts(
     answerResultsByEntryId,
     cards
   );
   if (
-    progressMode &&
-    progress.progressMode &&
+    shouldRestoreAnswers &&
     counts.answered === 0 &&
     progress.correctCount + progress.wrongCount > 0
   ) {
-    return fresh;
+    return {
+      ...fresh,
+      cards,
+      currentIndex: Math.min(progress.currentIndex, cards.length - 1),
+      progressStartedAt: progress.progressStartedAt,
+    };
   }
 
   return {
     cards,
     currentIndex: Math.min(progress.currentIndex, cards.length - 1),
     isAnswerRevealed:
-      !progressMode || !progress.isProgressComplete
+      !settings.progressMode || !progress.isProgressComplete
         ? progress.isAnswerRevealed
         : true,
-    progressStartedAt: progress.progressMode
+    progressStartedAt: settings.progressMode
       ? progress.progressStartedAt
       : Date.now(),
     progressCompletedAt:
-      progressMode && progress.progressMode ? progress.progressCompletedAt : null,
-    correctCount: progressMode && progress.progressMode ? counts.correct : 0,
-    wrongCount: progressMode && progress.progressMode ? counts.wrong : 0,
-    answerResultsByEntryId:
-      progressMode && progress.progressMode ? answerResultsByEntryId : {},
+      shouldRestoreAnswers ? progress.progressCompletedAt : null,
+    correctCount: shouldRestoreAnswers ? counts.correct : 0,
+    wrongCount: shouldRestoreAnswers ? counts.wrong : 0,
+    answerResultsByEntryId,
     isProgressComplete:
-      progressMode &&
-      progress.progressMode &&
+      shouldRestoreAnswers &&
       progress.isProgressComplete &&
       counts.answered >= cards.length,
   };
@@ -26988,6 +30389,42 @@ function getDictionaryStudyActiveTextSegments(
           ),
           study.columns
         );
+
+  if (study.noteDisplayMode === "separate") {
+    const fieldSet = new Set(fieldsToSpeak);
+    const wordValues = getDictionaryEntrySideValues(
+      currentEntry,
+      study.columns,
+      activeSide,
+      "word"
+    );
+    const activeWordIndex = wrapIndex(
+      study.activeWordIndexBySide[activeSide] ?? 0,
+      Math.max(1, wordValues.length)
+    );
+    const activeWord = wordValues[activeWordIndex] ?? null;
+    const noteValues = activeWord
+      ? getDictionaryEntrySideValues(
+          currentEntry,
+          study.columns,
+          activeSide,
+          "note"
+        ).filter((note) => note.wordIndex === activeWord.wordIndex)
+      : [];
+    const activeNoteIndex = wrapIndex(
+      study.activeNoteIndexBySide[activeSide] ?? 0,
+      Math.max(1, noteValues.length)
+    );
+    const activeNote = noteValues[activeNoteIndex] ?? null;
+
+    return [activeWord, activeNote]
+      .filter(
+        (item): item is DictionaryEntrySideValue =>
+          Boolean(item) && fieldSet.has(item.column.id)
+      )
+      .map((item) => item.text.trim())
+      .filter(Boolean);
+  }
 
   return fieldsToSpeak
     .map((field) => getDictionaryEntryFieldText(currentEntry, field))
@@ -27325,6 +30762,8 @@ type CompiledDictionarySearchQuery = {
 };
 
 const DICTIONARY_SEARCH_FUZZY_MIN_LENGTH = 5;
+const DICTIONARY_SEARCH_MIN_SIGNIFICANT_LENGTH = 2;
+const DICTIONARY_EDITOR_SEARCH_MIN_SIGNIFICANT_LENGTH = 1;
 
 function normalizeDictionarySearchText(value: string): string {
   return value
@@ -27336,7 +30775,7 @@ function normalizeDictionarySearchText(value: string): string {
 
 function getDictionarySearchTokens(value: string): DictionarySearchToken[] {
   const tokens: DictionarySearchToken[] = [];
-  const wordPattern = /[0-9A-Za-zА-Яа-яЁё]+/g;
+  const wordPattern = /[\p{L}\p{N}]+/gu;
   let match: RegExpExecArray | null = wordPattern.exec(value);
 
   while (match) {
@@ -27353,11 +30792,14 @@ function getDictionarySearchTokens(value: string): DictionarySearchToken[] {
 }
 
 function compileDictionarySearchQuery(
-  query: string
+  query: string,
+  options: { minSignificantLength?: number } = {}
 ): CompiledDictionarySearchQuery | null {
   const tokens = getDictionarySearchTokens(query).map((token) => token.text);
   const significantLength = tokens.join("").length;
-  if (significantLength < 2 || tokens.length === 0) {
+  const minSignificantLength =
+    options.minSignificantLength ?? DICTIONARY_SEARCH_MIN_SIGNIFICANT_LENGTH;
+  if (significantLength < minSignificantLength || tokens.length === 0) {
     return null;
   }
 

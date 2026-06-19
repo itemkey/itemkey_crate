@@ -2,6 +2,7 @@ export type DictionaryPromptSide = "side1" | "side2";
 export type DictionaryMotivationAdvanceMode = "auto" | "manual";
 export type DictionaryColumnKind = "word" | "note";
 export type DictionaryNoteDisplayMode = "continuous" | "separate";
+export type DictionarySpeechLanguage = string;
 
 export type DictionaryColumn = {
   id: string;
@@ -36,6 +37,7 @@ export type DictionaryBlock = {
   autoSpeak: boolean;
   autoSpeakFields: DictionaryEntryField[];
   manualSpeakFields: DictionaryEntryField[];
+  speechLanguage: DictionarySpeechLanguage;
   noteDisplayMode: DictionaryNoteDisplayMode;
   progressMode: boolean;
   motivateOnCorrect: boolean;
@@ -56,6 +58,7 @@ export type MessageDictionaryPayload = {
   autoSpeak: boolean;
   autoSpeakFields: DictionaryEntryField[];
   manualSpeakFields: DictionaryEntryField[];
+  speechLanguage: DictionarySpeechLanguage;
   noteDisplayMode: DictionaryNoteDisplayMode;
   progressMode: boolean;
   motivateOnCorrect: boolean;
@@ -193,6 +196,85 @@ export const DEFAULT_DICTIONARY_MANUAL_SPEAK_FIELDS: DictionaryEntryField[] = [
   ...DICTIONARY_EDITOR_SEARCH_FIELDS,
 ];
 
+export const DEFAULT_DICTIONARY_SPEECH_LANGUAGE = "auto";
+export const DICTIONARY_SPEECH_LANGUAGE_VALUES = [
+  DEFAULT_DICTIONARY_SPEECH_LANGUAGE,
+  "ru-RU",
+  "en-US",
+  "en-GB",
+  "en-AU",
+  "en-CA",
+  "en-IN",
+  "fr-FR",
+  "fr-CA",
+  "de-DE",
+  "de-AT",
+  "de-CH",
+  "es-ES",
+  "es-MX",
+  "es-US",
+  "ca-ES",
+  "it-IT",
+  "pt-PT",
+  "pt-BR",
+  "nl-NL",
+  "pl-PL",
+  "uk-UA",
+  "be-BY",
+  "cs-CZ",
+  "sk-SK",
+  "ro-RO",
+  "hu-HU",
+  "bg-BG",
+  "hr-HR",
+  "sr-RS",
+  "sl-SI",
+  "lt-LT",
+  "lv-LV",
+  "et-EE",
+  "sv-SE",
+  "da-DK",
+  "nb-NO",
+  "fi-FI",
+  "is-IS",
+  "ga-IE",
+  "cy-GB",
+  "el-GR",
+  "tr-TR",
+  "ar-SA",
+  "fa-IR",
+  "he-IL",
+  "hi-IN",
+  "bn-IN",
+  "ur-PK",
+  "ta-IN",
+  "te-IN",
+  "mr-IN",
+  "gu-IN",
+  "kn-IN",
+  "ml-IN",
+  "pa-IN",
+  "id-ID",
+  "ms-MY",
+  "fil-PH",
+  "vi-VN",
+  "th-TH",
+  "ja-JP",
+  "ko-KR",
+  "zh-CN",
+  "zh-TW",
+  "af-ZA",
+  "sw-KE",
+  "am-ET",
+  "hy-AM",
+  "ka-GE",
+  "az-AZ",
+  "sq-AL",
+  "mk-MK",
+  "kk-KZ",
+  "uz-UZ",
+] as const;
+
 export const DEFAULT_DICTIONARY_MOTIVATION_ADVANCE_MODE: DictionaryMotivationAdvanceMode =
   "auto";
 export const DEFAULT_DICTIONARY_NOTE_DISPLAY_MODE: DictionaryNoteDisplayMode =
@@ -245,6 +327,20 @@ export function normalizeDictionaryNoteDisplayMode(
   value: unknown
 ): DictionaryNoteDisplayMode {
   return value === "separate" ? "separate" : DEFAULT_DICTIONARY_NOTE_DISPLAY_MODE;
+}
+
+export function normalizeDictionarySpeechLanguage(
+  value: unknown
+): DictionarySpeechLanguage {
+  if (typeof value !== "string") {
+    return DEFAULT_DICTIONARY_SPEECH_LANGUAGE;
+  }
+
+  return DICTIONARY_SPEECH_LANGUAGE_VALUES.includes(
+    value as (typeof DICTIONARY_SPEECH_LANGUAGE_VALUES)[number]
+  )
+    ? value
+    : DEFAULT_DICTIONARY_SPEECH_LANGUAGE;
 }
 
 export function normalizeDictionaryMotivationAutoSeconds(value: unknown): number {
@@ -678,6 +774,7 @@ export function normalizeMessageDictionaryPayload(
       getDefaultDictionaryManualSpeakFields(columns),
       columns
     ),
+    speechLanguage: normalizeDictionarySpeechLanguage(payload.speechLanguage),
     noteDisplayMode: normalizeDictionaryNoteDisplayMode(payload.noteDisplayMode),
     progressMode: Boolean(payload.progressMode),
     motivateOnCorrect: Boolean(payload.motivateOnCorrect),
@@ -758,6 +855,7 @@ export function parseMessageDictionaryContent(
       manualSpeakFields: Array.isArray(parsed.manualSpeakFields)
         ? parsed.manualSpeakFields.filter((field): field is string => typeof field === "string")
         : [],
+      speechLanguage: normalizeDictionarySpeechLanguage(parsed.speechLanguage),
       noteDisplayMode: normalizeDictionaryNoteDisplayMode(parsed.noteDisplayMode),
       progressMode: Boolean(parsed.progressMode),
       motivateOnCorrect: Boolean(parsed.motivateOnCorrect),
@@ -791,6 +889,7 @@ export function serializeMessageDictionaryContent(
     autoSpeak: normalized.autoSpeak,
     autoSpeakFields: normalized.autoSpeakFields,
     manualSpeakFields: normalized.manualSpeakFields,
+    speechLanguage: normalized.speechLanguage,
     noteDisplayMode: normalized.noteDisplayMode,
     progressMode: normalized.progressMode,
     motivateOnCorrect: normalized.motivateOnCorrect,
@@ -840,6 +939,9 @@ export function parseContinuousDictionaryCollection(
             (field): field is string => typeof field === "string"
           )
         : [],
+      speechLanguage: normalizeDictionarySpeechLanguage(
+        rawDictionary.speechLanguage
+      ),
       noteDisplayMode: normalizeDictionaryNoteDisplayMode(
         rawDictionary.noteDisplayMode
       ),
@@ -973,6 +1075,7 @@ export type CompiledDictionarySearchQuery = {
 };
 
 const DICTIONARY_SEARCH_FUZZY_MIN_LENGTH = 5;
+const DICTIONARY_SEARCH_MIN_SIGNIFICANT_LENGTH = 2;
 
 export function normalizeDictionarySearchText(value: string): string {
   return value
@@ -984,7 +1087,7 @@ export function normalizeDictionarySearchText(value: string): string {
 
 export function getDictionarySearchTokens(value: string): DictionarySearchToken[] {
   const tokens: DictionarySearchToken[] = [];
-  const wordPattern = /[0-9A-Za-zА-Яа-яЁё]+/g;
+  const wordPattern = /[\p{L}\p{N}]+/gu;
   let match: RegExpExecArray | null = wordPattern.exec(value);
 
   while (match) {
@@ -1017,11 +1120,14 @@ export function findDictionaryEditorSearchMatch(
 }
 
 export function compileDictionarySearchQuery(
-  query: string
+  query: string,
+  options: { minSignificantLength?: number } = {}
 ): CompiledDictionarySearchQuery | null {
   const tokens = getDictionarySearchTokens(query).map((token) => token.text);
   const significantLength = tokens.join("").length;
-  if (significantLength < 2 || tokens.length === 0) {
+  const minSignificantLength =
+    options.minSignificantLength ?? DICTIONARY_SEARCH_MIN_SIGNIFICANT_LENGTH;
+  if (significantLength < minSignificantLength || tokens.length === 0) {
     return null;
   }
 

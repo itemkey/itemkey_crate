@@ -9,6 +9,7 @@ drop table if exists public.public_category_members cascade;
 drop table if exists public.public_category_roots cascade;
 drop table if exists public.friendships cascade;
 drop table if exists public.projects cascade;
+drop table if exists public.dictionary_study_progress cascade;
 drop table if exists public.dictionary_word_group_items cascade;
 drop table if exists public.dictionary_word_groups cascade;
 drop table if exists public.category_messages cascade;
@@ -289,6 +290,41 @@ create index dictionary_word_group_items_group_position_idx
 create index dictionary_word_group_items_lookup_idx
   on public.dictionary_word_group_items(workspace_id, source_category_id, source_message_id, dictionary_id, entry_id);
 
+create table public.dictionary_study_progress (
+  id uuid primary key default gen_random_uuid(),
+  app_user_id uuid not null references public.app_users(id) on delete cascade,
+  workspace_id uuid not null references public.workspaces(id) on delete cascade,
+  source_category_id uuid not null,
+  source_message_id uuid null,
+  dictionary_id text null,
+  progress_data jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint dictionary_study_progress_category_fk
+    foreign key (workspace_id, source_category_id)
+    references public.categories(workspace_id, id)
+    on delete cascade,
+  constraint dictionary_study_progress_message_fk
+    foreign key (workspace_id, source_message_id)
+    references public.category_messages(workspace_id, id)
+    on delete cascade,
+  constraint dictionary_study_progress_source_check check (
+    (source_message_id is not null and dictionary_id is null)
+    or (source_message_id is null and dictionary_id is not null)
+  )
+);
+
+create unique index dictionary_study_progress_block_unique_idx
+  on public.dictionary_study_progress(app_user_id, workspace_id, source_category_id, source_message_id)
+  where source_message_id is not null and dictionary_id is null;
+
+create unique index dictionary_study_progress_continuous_unique_idx
+  on public.dictionary_study_progress(app_user_id, workspace_id, source_category_id, dictionary_id)
+  where source_message_id is null and dictionary_id is not null;
+
+create index dictionary_study_progress_user_updated_idx
+  on public.dictionary_study_progress(app_user_id, updated_at desc);
+
 create table public.friendships (
   id uuid primary key default gen_random_uuid(),
   requester_user_id uuid not null references public.app_users(id) on delete cascade,
@@ -409,6 +445,10 @@ for each row execute function public.set_updated_at();
 
 create trigger trg_category_messages_updated_at
 before update on public.category_messages
+for each row execute function public.set_updated_at();
+
+create trigger trg_dictionary_study_progress_updated_at
+before update on public.dictionary_study_progress
 for each row execute function public.set_updated_at();
 
 create trigger trg_friendships_updated_at
