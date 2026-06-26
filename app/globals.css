@@ -216,6 +216,12 @@ body {
 }
 
 /* Rule documents */
+.analytics-tool-button {
+  border-color: #45664a !important;
+  background: #cde9bd !important;
+  font-weight: 900;
+}
+
 .rule-tool-button {
   border-color: #634e96 !important;
   background: #cfc4e9 !important;
@@ -3668,6 +3674,20 @@ body {
 
 .dictionary-study-card-shell-flippable {
   cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.dictionary-study-card-shell:not(.dictionary-study-card-shell-flippable) ::selection {
+  background: #315fa3;
+  color: #ffffff;
+  text-shadow: none;
+}
+
+.dictionary-study-card-shell:not(.dictionary-study-card-shell-flippable) ::-moz-selection {
+  background: #315fa3;
+  color: #ffffff;
+  text-shadow: none;
 }
 
 .dictionary-study-card-shell-flippable:focus-visible {

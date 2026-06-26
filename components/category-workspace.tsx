@@ -100,6 +100,7 @@ import {
   type ScheduleWeekday,
 } from "@/lib/schedules";
 import RuleEditor, { RuleCard } from "@/components/rule-editor";
+import ContentAnalytics from "@/components/content-analytics";
 import {
   createDefaultRuleDocument,
   createRuleId,
@@ -1018,6 +1019,7 @@ export default function CategoryWorkspace() {
   );
   const [continuousRules, setContinuousRules] = useState<RuleDocument[]>([]);
   const [ruleEditor, setRuleEditor] = useState<RuleEditorSource | null>(null);
+  const [contentAnalyticsOpen, setContentAnalyticsOpen] = useState(false);
   const [editorTextScalePercent, setEditorTextScalePercent] = useState(
     DEFAULT_EDITOR_TEXT_SCALE_PERCENT
   );
@@ -11497,6 +11499,17 @@ export default function CategoryWorkspace() {
     setDictionaryStudy(null);
     setScheduleModal(null);
     setScheduleStatsModal(null);
+    setContentAnalyticsOpen(false);
+  }
+
+  function handleOpenContentAnalytics() {
+    setChecklistEditor(null);
+    setDictionaryEditor(null);
+    setDictionaryStudy(null);
+    setScheduleModal(null);
+    setScheduleStatsModal(null);
+    setRuleEditor(null);
+    setContentAnalyticsOpen(true);
   }
 
   function getCurrentRuleTitles(): string[] {
@@ -13508,6 +13521,16 @@ export default function CategoryWorkspace() {
       },
       { autoSpeak: true }
     );
+  }
+
+  function handleDictionaryStudyCardClick(
+    event: React.MouseEvent<HTMLDivElement>
+  ) {
+    if (event.detail > 1) {
+      return;
+    }
+
+    toggleDictionaryStudySide();
   }
 
   function moveDictionaryStudySideValue(
@@ -18940,6 +18963,14 @@ export default function CategoryWorkspace() {
                   </button>
                   <button
                     type="button"
+                    className="mini-action analytics-tool-button"
+                    onClick={handleOpenContentAnalytics}
+                    disabled={!currentCategoryId || isLoading}
+                  >
+                    Аналитика
+                  </button>
+                  <button
+                    type="button"
                     className="mini-action rule-tool-button"
                     onClick={handleAddRuleDocument}
                     disabled={!currentCategoryId || !currentCategoryCanEdit || isMutating || isLoading}
@@ -19479,6 +19510,14 @@ export default function CategoryWorkspace() {
                     disabled={!currentCategoryId || !currentCategoryCanEdit || isMutating || isLoading}
                   >
                     Расписание
+                  </button>
+                  <button
+                    type="button"
+                    className="mini-action analytics-tool-button"
+                    onClick={handleOpenContentAnalytics}
+                    disabled={!currentCategoryId || isLoading}
+                  >
+                    Аналитика
                   </button>
                   <button
                     type="button"
@@ -20684,6 +20723,17 @@ export default function CategoryWorkspace() {
               </button>
               <button
                 type="button"
+                className="mini-action analytics-tool-button"
+                onClick={() => {
+                  closeMobilePanel();
+                  handleOpenContentAnalytics();
+                }}
+                disabled={!currentCategoryId || isLoading}
+              >
+                Аналитика
+              </button>
+              <button
+                type="button"
                 className="mini-action rule-tool-button"
                 onClick={() => {
                   closeMobilePanel();
@@ -21009,6 +21059,10 @@ export default function CategoryWorkspace() {
           className="hidden"
           onChange={(event) => void handleImportRuleForCreate(event)}
         />
+
+        {contentAnalyticsOpen && (
+          <ContentAnalytics onClose={() => setContentAnalyticsOpen(false)} />
+        )}
 
         {ruleEditor && activeRuleDocument && (
           <RuleEditor
@@ -22862,7 +22916,7 @@ export default function CategoryWorkspace() {
                     }`}
                     onClick={
                       dictionaryStudy.cardMode && canToggleDictionarySide
-                        ? toggleDictionaryStudySide
+                        ? handleDictionaryStudyCardClick
                         : undefined
                     }
                     onKeyDown={(event) => {

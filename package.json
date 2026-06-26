@@ -9,6 +9,7 @@
     "start:local": "next start -H 127.0.0.1 -p 3000",
     "public": "node scripts/start-public.mjs",
     "test:rule": "node --no-warnings --test lib/rule-document.test.ts",
+    "test:analytics": "node --no-warnings --test lib/content-analytics.test.ts",
     "lint": "eslint",
     "check:no-supabase": "node scripts/check-no-supabase.mjs"
   },
