@@ -20,6 +20,9 @@
 # production
 /build
 
+# local docker media/output
+/data/
+
 # misc
 .DS_Store
 *.pem

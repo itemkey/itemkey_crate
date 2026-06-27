@@ -87,10 +87,10 @@ async function nextUniqueOutputPath(
       suffix === 0
         ? `${baseName}.${extensionWithoutDot}`
         : `${baseName} (${suffix}).${extensionWithoutDot}`;
-    const candidatePath = path.join(outputDir, candidateName);
+    const candidatePath = path.join(/* turbopackIgnore: true */ outputDir, candidateName);
 
     try {
-      await access(candidatePath);
+      await access(/* turbopackIgnore: true */ candidatePath);
       suffix += 1;
     } catch {
       return candidatePath;
@@ -444,15 +444,17 @@ export async function POST(request: Request) {
     }
 
     const outputDir = path.resolve(/* turbopackIgnore: true */ outputDirRaw.trim());
-    await mkdir(outputDir, { recursive: true });
+    await mkdir(/* turbopackIgnore: true */ outputDir, { recursive: true });
 
     const sourceBuffer = Buffer.from(await source.arrayBuffer());
     const sourceExt = sanitizeSourceExtension(source.name);
     const outputBase = sanitizeOutputBaseName(source.name);
 
-    workingDir = await mkdtemp(path.join(tmpdir(), "item-key-converter-"));
-    const sourcePath = path.join(workingDir, `source${sourceExt}`);
-    await writeFile(sourcePath, sourceBuffer);
+    workingDir = await mkdtemp(
+      path.join(/* turbopackIgnore: true */ tmpdir(), "item-key-converter-")
+    );
+    const sourcePath = path.join(/* turbopackIgnore: true */ workingDir, `source${sourceExt}`);
+    await writeFile(/* turbopackIgnore: true */ sourcePath, sourceBuffer);
 
     const probe = await probeMediaStreams(sourcePath);
     if (allowedTargetInfo.sourceKind === "video" && !probe.hasVideo) {
@@ -466,7 +468,7 @@ export async function POST(request: Request) {
     const outputPath = await nextUniqueOutputPath(outputDir, outputBase, targetFormat);
     await runFfmpegConversion(sourcePath, outputPath, targetFormat);
 
-    const outputStats = await stat(outputPath);
+    const outputStats = await stat(/* turbopackIgnore: true */ outputPath);
     if (outputStats.size === 0) {
       throw new ConverterRouteError("Конвертация завершилась с пустым файлом.", 500);
     }
@@ -514,7 +516,7 @@ export async function POST(request: Request) {
     );
   } finally {
     if (workingDir) {
-      await rm(workingDir, { recursive: true, force: true });
+      await rm(/* turbopackIgnore: true */ workingDir, { recursive: true, force: true });
     }
   }
 }

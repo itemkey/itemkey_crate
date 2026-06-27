@@ -2,6 +2,8 @@ import "server-only";
 
 import { createHash, randomBytes } from "node:crypto";
 
+import { shouldUseSecureCookies } from "@/lib/auth/cookies";
+
 export const SESSION_COOKIE_NAME = "item_key_session";
 
 const SESSION_HASH_PEPPER = process.env.SESSION_HASH_PEPPER?.trim() ?? "";
@@ -49,7 +51,7 @@ export function getSessionCookieBaseOptions(): {
   return {
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    secure: shouldUseSecureCookies(),
     path: "/",
   };
 }

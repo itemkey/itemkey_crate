@@ -228,7 +228,7 @@ function buildResolutionSelector(height: number): string {
 }
 
 function buildOutputTemplate(outputDir: string): string {
-  return path.join(outputDir, "%(title)s.%(ext)s");
+  return path.join(/* turbopackIgnore: true */ outputDir, "%(title)s.%(ext)s");
 }
 
 export async function analyzeYoutubeResolutions(

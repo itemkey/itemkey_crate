@@ -1,0 +1,6 @@
+# Use this only for a brand-new empty Docker Postgres volume.
+# postgres/schema.sql drops and recreates tables, so never apply this file to existing data.
+services:
+  db:
+    volumes:
+      - ./postgres/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro

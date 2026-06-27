@@ -1,0 +1,46 @@
+services:
+  app:
+    image: itemkey-crate:local
+    build:
+      context: .
+      args:
+        NEXT_PUBLIC_WORKSPACE_SLUG: ${NEXT_PUBLIC_WORKSPACE_SLUG:-main}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DB_PROVIDER: ${DB_PROVIDER:-postgres}
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+      APP_BASE_URL: ${APP_BASE_URL:?Set APP_BASE_URL in .env}
+      NEXT_PUBLIC_WORKSPACE_SLUG: ${NEXT_PUBLIC_WORKSPACE_SLUG:-main}
+      WORKSPACE_SLUG: ${WORKSPACE_SLUG:-main}
+      SESSION_TTL_DAYS: ${SESSION_TTL_DAYS:-30}
+      SESSION_HASH_PEPPER: ${SESSION_HASH_PEPPER:?Set SESSION_HASH_PEPPER in .env}
+      AUTH_SESSION_MAX_PER_USER: ${AUTH_SESSION_MAX_PER_USER:-5}
+      USER_ID_CHANGE_COOLDOWN_DAYS: ${USER_ID_CHANGE_COOLDOWN_DAYS:-30}
+      MIGRATION_CODE_TTL_MINUTES: ${MIGRATION_CODE_TTL_MINUTES:-20}
+      MIGRATION_CODE_PEPPER: ${MIGRATION_CODE_PEPPER:?Set MIGRATION_CODE_PEPPER in .env}
+      AUTH_REQUIRE_EMAIL_VERIFICATION: ${AUTH_REQUIRE_EMAIL_VERIFICATION:-true}
+      EMAIL_VERIFICATION_TTL_MINUTES: ${EMAIL_VERIFICATION_TTL_MINUTES:-1440}
+      PASSWORD_RESET_TTL_MINUTES: ${PASSWORD_RESET_TTL_MINUTES:-30}
+      AUTH_TOKEN_PEPPER: ${AUTH_TOKEN_PEPPER:?Set AUTH_TOKEN_PEPPER in .env}
+      AUTH_RATE_LIMIT_PEPPER: ${AUTH_RATE_LIMIT_PEPPER:?Set AUTH_RATE_LIMIT_PEPPER in .env}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-true}
+      SMTP_HOST: ${SMTP_HOST:?Set SMTP_HOST in .env}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:?Set SMTP_USER in .env}
+      SMTP_PASS: ${SMTP_PASS:?Set SMTP_PASS in .env}
+      SMTP_FROM: ${SMTP_FROM:?Set SMTP_FROM in .env}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    volumes:
+      - media_data:/data/media
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  media_data:

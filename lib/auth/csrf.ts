@@ -2,6 +2,8 @@ import "server-only";
 
 import { randomBytes, timingSafeEqual } from "node:crypto";
 
+import { shouldUseSecureCookies } from "@/lib/auth/cookies";
+
 export const CSRF_COOKIE_NAME = "item_key_csrf";
 
 export function buildCsrfToken(): string {
@@ -17,7 +19,7 @@ export function getCsrfCookieBaseOptions(): {
   return {
     httpOnly: false,
     sameSite: "strict",
-    secure: process.env.NODE_ENV === "production",
+    secure: shouldUseSecureCookies(),
     path: "/",
   };
 }

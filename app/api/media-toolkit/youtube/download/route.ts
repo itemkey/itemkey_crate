@@ -86,7 +86,7 @@ export async function POST(request: Request) {
     }
 
     const outputDir = normalizeOutputDir(body.outputDir);
-    await mkdir(outputDir, { recursive: true });
+    await mkdir(/* turbopackIgnore: true */ outputDir, { recursive: true });
 
     const auth = {
       cookiesBrowser: asOptionalString(body.cookiesBrowser),

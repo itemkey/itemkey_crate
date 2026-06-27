@@ -42,6 +42,13 @@ npm.cmd run build
 npm.cmd run start:local
 ```
 
+## Run on a home Docker host
+
+See `DEPLOY.ru.md` for the Docker Compose setup, environment variables, reverse
+proxy notes, media output folder, updates, and database backup commands. The
+default compose file only connects to `DATABASE_URL`; it does not run schema or
+migration SQL automatically.
+
 ## Stack
 
 - Next.js App Router
@@ -72,6 +79,7 @@ Optional:
 - `PASSWORD_RESET_TTL_MINUTES` (default `30`)
 - `AUTH_TOKEN_PEPPER` (recommended in production)
 - `AUTH_RATE_LIMIT_PEPPER` (recommended in production)
+- `AUTH_COOKIE_SECURE` (default `true` in production; set `false` only for private HTTP/LAN testing)
 - `SMTP_SECURE` (`true` for SMTPS/465, иначе `false`)
 
 See `.env.example`.
@@ -84,6 +92,7 @@ See `.env.example`.
 
 > `postgres/schema.sql` intentionally drops existing tables before recreate.
 > This fully resets all user data.
+> The default Docker Compose setup does not run this file automatically.
 
 ## Auth model
 
