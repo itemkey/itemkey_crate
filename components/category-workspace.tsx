@@ -2363,11 +2363,17 @@ export default function CategoryWorkspace() {
 
   const loadAuthSession = useCallback(async () => {
     setIsAuthReady(false);
+    const abortController = new AbortController();
+    const timeoutId = window.setTimeout(
+      () => abortController.abort(),
+      AUTH_SESSION_TIMEOUT_MS
+    );
 
     try {
       const response = await fetch("/api/auth/session", {
         cache: "no-store",
         credentials: "same-origin",
+        signal: abortController.signal,
       });
       const payload = (await response.json()) as AuthSessionPayload;
       if (!response.ok) {
@@ -2388,6 +2394,7 @@ export default function CategoryWorkspace() {
       setAuthUser(null);
       setAuthError(toErrorMessage(error, "Не удалось инициализировать аккаунт."));
     } finally {
+      window.clearTimeout(timeoutId);
       setIsAuthReady(true);
     }
   }, []);
@@ -27980,6 +27987,7 @@ const MESSAGE_CHECKLIST_KIND = "itemkey-message-checklist-v1";
 const MESSAGE_DICTIONARY_KIND = "itemkey-message-dictionary-v1";
 const DICTIONARY_EXPORT_KIND = "itemkey-dict-export";
 const DICTIONARY_EXPORT_SCHEMA_VERSION = 2;
+const AUTH_SESSION_TIMEOUT_MS = 15000;
 const DICTIONARY_LABEL_MAX_LENGTH = 42;
 const DICTIONARY_STUDY_PROGRESS_STORAGE_PREFIX =
   "itemkey:dictionary-study-progress:v1";
