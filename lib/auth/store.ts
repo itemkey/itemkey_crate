@@ -62,6 +62,7 @@ const AUTH_CLEANUP_INTERVAL_MS = parseBoundedIntEnv(
   60,
   86400
 ) * 1000;
+const SESSION_TOUCH_THROTTLE_MS = 5 * 60 * 1000;
 
 type SqlExecutor = {
   query<T extends QueryResultRow = QueryResultRow>(
@@ -77,6 +78,7 @@ type AuthUserRow = AppUserRow & {
 type SessionJoinRow = AppUserRow & {
   session_id: string;
   expires_at: string;
+  last_seen_at: string;
 };
 
 type VerificationTokenRow = {
@@ -524,6 +526,20 @@ async function touchSession(sessionId: string): Promise<void> {
   );
 }
 
+function shouldTouchSession(lastSeenAt: string): boolean {
+  const lastSeenTime = new Date(lastSeenAt).getTime();
+  return (
+    !Number.isFinite(lastSeenTime) ||
+    Date.now() - lastSeenTime >= SESSION_TOUCH_THROTTLE_MS
+  );
+}
+
+function touchSessionSoon(sessionId: string): void {
+  void touchSession(sessionId).catch((error) => {
+    console.warn("[auth] Failed to touch session.", error);
+  });
+}
+
 async function deleteSessionById(sessionId: string): Promise<void> {
   const pool = getPostgresPool();
   await pool.query(
@@ -549,6 +565,7 @@ export async function getUserBySessionToken(token: string): Promise<AppUserRow |
       select
         sessions.id as session_id,
         sessions.expires_at,
+        sessions.last_seen_at,
         ${APP_USER_COLUMNS_FROM_USERS}
       from public.app_sessions as sessions
       join public.app_users as users
@@ -570,7 +587,9 @@ export async function getUserBySessionToken(token: string): Promise<AppUserRow |
     return null;
   }
 
-  await touchSession(session.session_id);
+  if (shouldTouchSession(session.last_seen_at)) {
+    touchSessionSoon(session.session_id);
+  }
   maybeRunAuthCleanup();
   return normalizeAppUser(session);
 }

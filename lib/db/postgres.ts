@@ -26,6 +26,12 @@ export function getPostgresPool(): Pool {
       process.env.PG_CONNECTION_TIMEOUT_MS,
       5000
     ),
+    query_timeout: parsePositiveIntEnv(process.env.PG_QUERY_TIMEOUT_MS, 15000),
+    statement_timeout: parsePositiveIntEnv(
+      process.env.PG_STATEMENT_TIMEOUT_MS,
+      15000
+    ),
+    lock_timeout: parsePositiveIntEnv(process.env.PG_LOCK_TIMEOUT_MS, 5000),
     max: 20,
   });
 

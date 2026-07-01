@@ -4,16 +4,31 @@ import { getAccountStore } from "@/lib/account-store";
 import { getInitialCategoryId } from "@/lib/categories";
 import { getCategoryStore } from "@/lib/category-store";
 import { getCollaborationStore } from "@/lib/collaboration-store";
-import { getDictionaryGroupStore } from "@/lib/dictionary-groups";
 import { toErrorMessage } from "@/lib/errors";
 import { getProjectStore } from "@/lib/project-store";
 import { getRequestUser } from "@/lib/request-user";
 
 export const dynamic = "force-dynamic";
 
+function createBootstrapTimer() {
+  const startedAt = Date.now();
+  let phaseStartedAt = startedAt;
+
+  return (phase: string) => {
+    const now = Date.now();
+    console.info(
+      `[workspace/bootstrap] ${phase}=${now - phaseStartedAt}ms total=${now - startedAt}ms`
+    );
+    phaseStartedAt = now;
+  };
+}
+
 export async function GET(request: NextRequest) {
+  const logPhase = createBootstrapTimer();
+
   try {
     const user = await getRequestUser(request);
+    logPhase("session");
     if (!user) {
       return Response.json(
         {
@@ -32,26 +47,17 @@ export async function GET(request: NextRequest) {
 
     const accountStore = await getAccountStore();
     const categoryStore = await getCategoryStore(user.id);
-    const dictionaryGroupStore = await getDictionaryGroupStore(user.id);
     const projectStore = await getProjectStore(user.id);
     const collaborationStore = await getCollaborationStore();
 
-    const [
-      availability,
-      activeMigrationCode,
-      categories,
-      projects,
-      friends,
-      dictionaryGroups,
-    ] =
+    const [availability, activeMigrationCode, categories, projects] =
       await Promise.all([
         accountStore.getUserIdChangeAvailability(user.id),
         accountStore.getActiveMigrationCode(user.id),
         categoryStore.list(),
         projectStore.list(),
-        collaborationStore.listFriends(user.id),
-        dictionaryGroupStore.list(),
       ]);
+    logPhase("main-data");
 
     const initialCategoryId = getInitialCategoryId(categories) ?? categories[0]?.id ?? null;
     const [initialMessages, publicPanel] = await Promise.all([
@@ -60,6 +66,7 @@ export async function GET(request: NextRequest) {
         ? collaborationStore.getPublicPanel(user.id, initialCategoryId)
         : Promise.resolve(null),
     ]);
+    logPhase("initial");
 
     return Response.json(
       {
@@ -84,8 +91,6 @@ export async function GET(request: NextRequest) {
           },
           categories,
           projects,
-          friends,
-          dictionaryGroups,
           initialCategoryId,
           initialMessages,
           publicPanel,

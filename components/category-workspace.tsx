@@ -271,6 +271,21 @@ type AuthSessionPayload = {
   error?: string;
 };
 
+type AuthSessionUser = NonNullable<AuthSessionPayload["data"]>;
+
+type AuthSessionResult =
+  | {
+      status: "authenticated";
+      user: AuthSessionUser;
+    }
+  | {
+      status: "anonymous";
+    }
+  | {
+      status: "error";
+      message: string;
+    };
+
 type AuthMutationPayload = {
   data?: {
     id: string;
@@ -774,6 +789,7 @@ type DictionaryEntryField = string;
 type DictionaryLabelField = string;
 type DictionaryEditorTab = "entries" | "transfer" | "general";
 type AccountWindowTab = "account" | "settings" | "friends" | "motivation";
+type StartupPhase = "auth" | "workspace" | "ready";
 
 type DictionaryEditorSearchMatch = {
   entryId: string;
@@ -1122,7 +1138,7 @@ export default function CategoryWorkspace() {
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(
     null
   );
-  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [startupPhase, setStartupPhase] = useState<StartupPhase>("auth");
   const [isAuthBusy, setIsAuthBusy] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [authInfo, setAuthInfo] = useState<string | null>(null);
@@ -1225,6 +1241,7 @@ export default function CategoryWorkspace() {
     Map<string, Promise<string | null>>
   >(new Map());
   const dictionaryMotivationRequestIdRef = useRef(0);
+  const secondaryStartupUserIdRef = useRef<string | null>(null);
   const dictionaryDoomscrollClickInFlightRef = useRef(false);
   const richImageFileRef = useRef<HTMLInputElement | null>(null);
   const richFileRef = useRef<HTMLInputElement | null>(null);
@@ -2361,28 +2378,25 @@ export default function CategoryWorkspace() {
     [fetchWithCsrf, handleUnauthorizedState]
   );
 
-  const loadAuthSession = useCallback(async () => {
-    setIsAuthReady(false);
-    const abortController = new AbortController();
-    const timeoutId = window.setTimeout(
-      () => abortController.abort(),
-      AUTH_SESSION_TIMEOUT_MS
-    );
-
+  const loadAuthSession = useCallback(async (): Promise<AuthSessionResult> => {
     try {
-      const response = await fetch("/api/auth/session", {
-        cache: "no-store",
-        credentials: "same-origin",
-        signal: abortController.signal,
-      });
-      const payload = (await response.json()) as AuthSessionPayload;
+      const { response, payload } = await fetchJsonWithTimeout<AuthSessionPayload>(
+        "/api/auth/session",
+        {
+          cache: "no-store",
+          credentials: "same-origin",
+        },
+        AUTH_SESSION_TIMEOUT_MS,
+        "Сервер слишком долго проверяет сессию аккаунта. Попробуй ещё раз."
+      );
       if (!response.ok) {
         throw new Error(payload.error ?? "Не удалось проверить сессию.");
       }
 
       if (!payload.data) {
         setAuthUser(null);
-        return;
+        setAuthError(null);
+        return { status: "anonymous" };
       }
 
       setAuthUser({
@@ -2390,28 +2404,37 @@ export default function CategoryWorkspace() {
         email: payload.data.email,
       });
       setAuthError(null);
+      return {
+        status: "authenticated",
+        user: payload.data,
+      };
     } catch (error) {
+      const message = toErrorMessage(error, "Не удалось инициализировать аккаунт.");
       setAuthUser(null);
-      setAuthError(toErrorMessage(error, "Не удалось инициализировать аккаунт."));
-    } finally {
-      window.clearTimeout(timeoutId);
-      setIsAuthReady(true);
+      setAuthError(message);
+      return {
+        status: "error",
+        message,
+      };
     }
   }, []);
 
-  void loadAuthSession;
-
   const loadWorkspaceBootstrap = useCallback(async (): Promise<boolean> => {
-    setIsAuthReady(false);
+    setStartupPhase("workspace");
     setIsLoading(true);
     setLoadError(null);
 
     try {
-      const response = await fetch("/api/workspace/bootstrap", {
-        cache: "no-store",
-        credentials: "same-origin",
-      });
-      const payload = (await response.json()) as WorkspaceBootstrapPayload;
+      const { response, payload } =
+        await fetchJsonWithTimeout<WorkspaceBootstrapPayload>(
+          "/api/workspace/bootstrap",
+          {
+            cache: "no-store",
+            credentials: "same-origin",
+          },
+          WORKSPACE_BOOTSTRAP_TIMEOUT_MS,
+          "Сервер слишком долго загружает рабочее пространство. Попробуй ещё раз."
+        );
       if (!response.ok || !payload.data) {
         throw new Error(payload.error ?? "Unable to bootstrap workspace.");
       }
@@ -2489,10 +2512,6 @@ export default function CategoryWorkspace() {
       setAuthError(null);
       setCategories(rows);
       setProjects((payload.data.projects ?? []).map(normalizeProjectRow));
-      setDictionaryGroups(
-        (payload.data.dictionaryGroups ?? []).map(normalizeDictionaryWordGroup)
-      );
-      setFriends(payload.data.friends ?? []);
       setCurrentCategoryId(initialId);
       setInsertionTargetId(initialId);
       setSelectedMessageId(null);
@@ -2528,15 +2547,29 @@ export default function CategoryWorkspace() {
       return true;
     } catch (error) {
       const message = toErrorMessage(error, "Unable to bootstrap workspace.");
-      setAuthUser(null);
       setLoadError(message);
-      setAuthError(message);
+      setAuthError(null);
       return false;
     } finally {
       setIsLoading(false);
-      setIsAuthReady(true);
+      setStartupPhase("ready");
     }
   }, [resetWorkspaceState]);
+
+  const loadInitialWorkspace = useCallback(async () => {
+    setStartupPhase("auth");
+    setIsLoading(true);
+    setLoadError(null);
+
+    const session = await loadAuthSession();
+    if (!session || session.status !== "authenticated") {
+      setIsLoading(false);
+      setStartupPhase("ready");
+      return false;
+    }
+
+    return loadWorkspaceBootstrap();
+  }, [loadAuthSession, loadWorkspaceBootstrap]);
 
   function syncCategorySavingState() {
     const hasTimers = Object.keys(categorySaveTimersRef.current).length > 0;
@@ -3091,8 +3124,8 @@ export default function CategoryWorkspace() {
   );
 
   useLayoutEffect(() => {
-    void loadWorkspaceBootstrap();
-  }, [loadWorkspaceBootstrap]);
+    void loadInitialWorkspace();
+  }, [loadInitialWorkspace]);
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -3281,6 +3314,26 @@ export default function CategoryWorkspace() {
       closeEventSource();
     };
   }, [getClientId, isAuthenticated]);
+
+  useEffect(() => {
+    const userId = authUser?.id ?? null;
+    if (!userId) {
+      secondaryStartupUserIdRef.current = null;
+      return;
+    }
+
+    if (isLoading || loadError) {
+      return;
+    }
+
+    if (secondaryStartupUserIdRef.current === userId) {
+      return;
+    }
+
+    secondaryStartupUserIdRef.current = userId;
+    void loadFriends();
+    void loadDictionaryGroups();
+  }, [authUser?.id, isLoading, loadError, loadDictionaryGroups, loadFriends]);
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -18507,13 +18560,18 @@ export default function CategoryWorkspace() {
     );
   }
 
-  if (!isAuthReady) {
+  if (startupPhase !== "ready") {
+    const startupMessage =
+      startupPhase === "auth"
+        ? "Проверяю сессию аккаунта..."
+        : "Загружаю рабочее пространство...";
+
     return (
       <main className="workspace-root flex w-full items-stretch p-0">
         <div className="frame-shell relative flex h-full w-full items-center justify-center p-4">
           <div className="popup-3d w-full max-w-xl p-5">
             <h1 className="font-display text-5xl leading-none">Item Key</h1>
-            <p className="mt-3 text-sm text-[#202020]">Проверяю сессию аккаунта...</p>
+            <p className="mt-3 text-sm text-[#202020]">{startupMessage}</p>
           </div>
         </div>
       </main>
@@ -18703,6 +18761,31 @@ export default function CategoryWorkspace() {
               После входа данные привязываются к твоему аккаунту и синхронизируются
               между устройствами.
             </p>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  if (isAuthenticated && loadError && categories.length === 0 && !isLoading) {
+    return (
+      <main className="workspace-root flex w-full items-stretch p-0">
+        <div className="frame-shell relative flex h-full w-full items-center justify-center p-4">
+          <div className="popup-3d w-full max-w-xl p-5">
+            <h1 className="font-display text-5xl leading-none">Item Key</h1>
+            <p className="mt-3 text-sm text-[#202020]">
+              Не удалось загрузить рабочее пространство.
+            </p>
+            <p className="mt-3 rounded border-2 border-[#6a1313] bg-[#dca3a3] px-3 py-2 text-sm text-[#3a0e0e]">
+              {loadError}
+            </p>
+            <button
+              type="button"
+              className="mini-action mt-4"
+              onClick={() => void loadWorkspaceBootstrap()}
+            >
+              повторить загрузку
+            </button>
           </div>
         </div>
       </main>
@@ -27982,12 +28065,52 @@ function richTextToPlainText(value: string | null | undefined): string {
     .replace(/\n{3,}/g, "\n\n");
 }
 
+function isAbortError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "name" in error &&
+    error.name === "AbortError"
+  );
+}
+
+async function fetchJsonWithTimeout<T>(
+  input: RequestInfo | URL,
+  init: RequestInit,
+  timeoutMs: number,
+  timeoutMessage: string
+): Promise<{ response: Response; payload: T }> {
+  const abortController = new AbortController();
+  const timeoutId = window.setTimeout(
+    () => abortController.abort(),
+    timeoutMs
+  );
+
+  try {
+    const response = await fetch(input, {
+      ...init,
+      signal: abortController.signal,
+    });
+    const payload = (await response.json()) as T;
+    return { response, payload };
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw new Error(timeoutMessage);
+    }
+
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
 const CONTINUOUS_CONTENT_KIND = "itemkey-continuous-v1";
 const MESSAGE_CHECKLIST_KIND = "itemkey-message-checklist-v1";
 const MESSAGE_DICTIONARY_KIND = "itemkey-message-dictionary-v1";
 const DICTIONARY_EXPORT_KIND = "itemkey-dict-export";
 const DICTIONARY_EXPORT_SCHEMA_VERSION = 2;
 const AUTH_SESSION_TIMEOUT_MS = 15000;
+const WORKSPACE_BOOTSTRAP_TIMEOUT_MS = 25000;
 const DICTIONARY_LABEL_MAX_LENGTH = 42;
 const DICTIONARY_STUDY_PROGRESS_STORAGE_PREFIX =
   "itemkey:dictionary-study-progress:v1";
