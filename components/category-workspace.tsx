@@ -790,6 +790,7 @@ type DictionaryLabelField = string;
 type DictionaryEditorTab = "entries" | "transfer" | "general";
 type AccountWindowTab = "account" | "settings" | "friends" | "motivation";
 type StartupPhase = "auth" | "workspace" | "ready";
+type CategoryLoadStatus = "idle" | "loading" | "ready" | "error";
 
 type DictionaryEditorSearchMatch = {
   entryId: string;
@@ -1020,6 +1021,8 @@ export default function CategoryWorkspace() {
   const [messageTitleDraft, setMessageTitleDraft] = useState("");
   const [source, setSource] = useState<DataSource | "unknown">("unknown");
   const [isLoading, setIsLoading] = useState(true);
+  const [categoryLoadStatus, setCategoryLoadStatus] =
+    useState<CategoryLoadStatus>("idle");
   const [isMutating, setIsMutating] = useState(false);
   const [isSavingCategory, setIsSavingCategory] = useState(false);
   const [isSavingMessages, setIsSavingMessages] = useState(false);
@@ -2243,6 +2246,7 @@ export default function CategoryWorkspace() {
     setSource("unknown");
     setLoadError(null);
     setIsLoading(false);
+    setCategoryLoadStatus("idle");
     setIsSavingCategory(false);
     setIsSavingMessages(false);
     setAuthTab("login");
@@ -2544,10 +2548,12 @@ export default function CategoryWorkspace() {
 
       setIsSavingCategory(false);
       setIsSavingMessages(false);
+      setCategoryLoadStatus(rows.length > 0 ? "ready" : "loading");
       return true;
     } catch (error) {
       const message = toErrorMessage(error, "Unable to bootstrap workspace.");
       setLoadError(message);
+      setCategoryLoadStatus("error");
       setAuthError(null);
       return false;
     } finally {
@@ -2613,21 +2619,12 @@ export default function CategoryWorkspace() {
 
   const loadCategories = useCallback(async () => {
     setIsLoading(true);
+    setCategoryLoadStatus("loading");
     setLoadError(null);
 
     try {
-      const { response, payload } = await fetchJsonWithTimeout<CategoriesPayload>(
-        "/api/categories",
-        {
-          cache: "no-store",
-          credentials: "same-origin",
-        },
-        WORKSPACE_BOOTSTRAP_TIMEOUT_MS,
-        "Сервер слишком долго загружает категории. Интерфейс открыт, попробуй повторить загрузку."
-      );
-      if (response.status === 401) {
-        handleUnauthorizedState();
-      }
+      const response = await authorizedFetch("/api/categories", { cache: "no-store" });
+      const payload = (await response.json()) as CategoriesPayload;
       if (!response.ok || !payload.data) {
         throw new Error(payload.error ?? "Не удалось загрузить категории.");
       }
@@ -2689,12 +2686,14 @@ export default function CategoryWorkspace() {
 
       setIsSavingCategory(false);
       setIsSavingMessages(false);
+      setCategoryLoadStatus("ready");
     } catch (error) {
+      setCategoryLoadStatus("error");
       setLoadError(toErrorMessage(error, "Не удалось загрузить категории."));
     } finally {
       setIsLoading(false);
     }
-  }, [handleUnauthorizedState]);
+  }, [authorizedFetch]);
 
   const refreshCategoriesFromServer = useCallback(async () => {
     try {
@@ -18783,6 +18782,43 @@ export default function CategoryWorkspace() {
               После входа данные привязываются к твоему аккаунту и синхронизируются
               между устройствами.
             </p>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  if (categories.length === 0 && categoryLoadStatus !== "ready") {
+    const isCategoryLoadError = categoryLoadStatus === "error";
+
+    return (
+      <main className="workspace-root flex w-full items-stretch p-0">
+        <div className="frame-shell relative flex h-full w-full items-center justify-center p-4">
+          <div className="popup-3d w-full max-w-xl p-5">
+            <h1 className="font-display text-5xl leading-none">Item Key</h1>
+            <p className="mt-3 text-sm text-[#202020]">
+              {isCategoryLoadError
+                ? "Не удалось загрузить категории."
+                : "Загружаю категории и твои материалы..."}
+            </p>
+            {isCategoryLoadError && loadError && (
+              <p className="mt-3 rounded border-2 border-[#6a1313] bg-[#dca3a3] px-3 py-2 text-sm text-[#3a0e0e]">
+                {loadError}
+              </p>
+            )}
+            {isCategoryLoadError && (
+              <button
+                type="button"
+                className="mini-action mt-4"
+                onClick={() => {
+                  void loadAccountProfile();
+                  void loadCategories();
+                  void loadProjects();
+                }}
+              >
+                повторить загрузку
+              </button>
+            )}
           </div>
         </div>
       </main>

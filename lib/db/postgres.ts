@@ -15,6 +15,15 @@ function parsePositiveIntEnv(value: string | undefined, fallback: number): numbe
   return Math.floor(parsed);
 }
 
+function parseOptionalPositiveIntEnv(value: string | undefined): number | undefined {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return undefined;
+  }
+
+  return Math.floor(parsed);
+}
+
 export function getPostgresPool(): Pool {
   if (cachedPool) {
     return cachedPool;
@@ -26,12 +35,11 @@ export function getPostgresPool(): Pool {
       process.env.PG_CONNECTION_TIMEOUT_MS,
       5000
     ),
-    query_timeout: parsePositiveIntEnv(process.env.PG_QUERY_TIMEOUT_MS, 15000),
-    statement_timeout: parsePositiveIntEnv(
-      process.env.PG_STATEMENT_TIMEOUT_MS,
-      15000
+    query_timeout: parseOptionalPositiveIntEnv(process.env.PG_QUERY_TIMEOUT_MS),
+    statement_timeout: parseOptionalPositiveIntEnv(
+      process.env.PG_STATEMENT_TIMEOUT_MS
     ),
-    lock_timeout: parsePositiveIntEnv(process.env.PG_LOCK_TIMEOUT_MS, 5000),
+    lock_timeout: parseOptionalPositiveIntEnv(process.env.PG_LOCK_TIMEOUT_MS),
     max: 20,
   });
 
