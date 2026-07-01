@@ -2616,8 +2616,18 @@ export default function CategoryWorkspace() {
     setLoadError(null);
 
     try {
-      const response = await authorizedFetch("/api/categories", { cache: "no-store" });
-      const payload = (await response.json()) as CategoriesPayload;
+      const { response, payload } = await fetchJsonWithTimeout<CategoriesPayload>(
+        "/api/categories",
+        {
+          cache: "no-store",
+          credentials: "same-origin",
+        },
+        WORKSPACE_BOOTSTRAP_TIMEOUT_MS,
+        "Сервер слишком долго загружает категории. Интерфейс открыт, попробуй повторить загрузку."
+      );
+      if (response.status === 401) {
+        handleUnauthorizedState();
+      }
       if (!response.ok || !payload.data) {
         throw new Error(payload.error ?? "Не удалось загрузить категории.");
       }
@@ -2684,7 +2694,7 @@ export default function CategoryWorkspace() {
     } finally {
       setIsLoading(false);
     }
-  }, [authorizedFetch]);
+  }, [handleUnauthorizedState]);
 
   const refreshCategoriesFromServer = useCallback(async () => {
     try {
@@ -3331,9 +3341,21 @@ export default function CategoryWorkspace() {
     }
 
     secondaryStartupUserIdRef.current = userId;
+    void loadAccountProfile();
+    void loadCategories();
+    void loadProjects();
     void loadFriends();
     void loadDictionaryGroups();
-  }, [authUser?.id, isLoading, loadError, loadDictionaryGroups, loadFriends]);
+  }, [
+    authUser?.id,
+    isLoading,
+    loadAccountProfile,
+    loadCategories,
+    loadDictionaryGroups,
+    loadFriends,
+    loadProjects,
+    loadError,
+  ]);
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -18767,31 +18789,6 @@ export default function CategoryWorkspace() {
     );
   }
 
-  if (isAuthenticated && loadError && categories.length === 0 && !isLoading) {
-    return (
-      <main className="workspace-root flex w-full items-stretch p-0">
-        <div className="frame-shell relative flex h-full w-full items-center justify-center p-4">
-          <div className="popup-3d w-full max-w-xl p-5">
-            <h1 className="font-display text-5xl leading-none">Item Key</h1>
-            <p className="mt-3 text-sm text-[#202020]">
-              Не удалось загрузить рабочее пространство.
-            </p>
-            <p className="mt-3 rounded border-2 border-[#6a1313] bg-[#dca3a3] px-3 py-2 text-sm text-[#3a0e0e]">
-              {loadError}
-            </p>
-            <button
-              type="button"
-              className="mini-action mt-4"
-              onClick={() => void loadWorkspaceBootstrap()}
-            >
-              повторить загрузку
-            </button>
-          </div>
-        </div>
-      </main>
-    );
-  }
-
   return (
     <main className="workspace-root flex w-full items-stretch p-0">
       <div
@@ -20092,7 +20089,18 @@ export default function CategoryWorkspace() {
 
             {loadError && (
               <div className="mt-2 rounded border-2 border-[#6a1313] bg-[#dca3a3] px-3 py-2 text-sm text-[#3a0e0e]">
-                {loadError}
+                <p>{loadError}</p>
+                <button
+                  type="button"
+                  className="mini-action mt-2"
+                  onClick={() => {
+                    void loadAccountProfile();
+                    void loadCategories();
+                    void loadProjects();
+                  }}
+                >
+                  повторить загрузку
+                </button>
               </div>
             )}
           </section>

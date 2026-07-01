@@ -1,11 +1,6 @@
 import { NextRequest } from "next/server";
 
-import { getAccountStore } from "@/lib/account-store";
-import { getInitialCategoryId } from "@/lib/categories";
-import { getCategoryStore } from "@/lib/category-store";
-import { getCollaborationStore } from "@/lib/collaboration-store";
 import { toErrorMessage } from "@/lib/errors";
-import { getProjectStore } from "@/lib/project-store";
 import { getRequestUser } from "@/lib/request-user";
 
 export const dynamic = "force-dynamic";
@@ -45,29 +40,7 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const accountStore = await getAccountStore();
-    const categoryStore = await getCategoryStore(user.id);
-    const projectStore = await getProjectStore(user.id);
-    const collaborationStore = await getCollaborationStore();
-
-    const [availability, activeMigrationCode, categories, projects] =
-      await Promise.all([
-        accountStore.getUserIdChangeAvailability(user.id),
-        accountStore.getActiveMigrationCode(user.id),
-        categoryStore.list(),
-        projectStore.list(),
-      ]);
-    logPhase("main-data");
-
-    const initialCategoryId = getInitialCategoryId(categories) ?? categories[0]?.id ?? null;
-    const [initialMessages, publicPanel] = await Promise.all([
-      initialCategoryId ? categoryStore.listMessages(initialCategoryId) : Promise.resolve([]),
-      initialCategoryId
-        ? collaborationStore.getPublicPanel(user.id, initialCategoryId)
-        : Promise.resolve(null),
-    ]);
-    logPhase("initial");
-
+    logPhase("response");
     return Response.json(
       {
         data: {
@@ -85,15 +58,15 @@ export async function GET(request: NextRequest) {
             nickname: user.nickname,
             profileDescription: user.profileDescription,
             avatarUrl: user.avatarUrl,
-            canChangeUserIdNow: availability.canChangeNow,
-            nextUserIdChangeAt: availability.nextAllowedAt,
-            activeMigrationCode,
+            canChangeUserIdNow: true,
+            nextUserIdChangeAt: null,
+            activeMigrationCode: null,
           },
-          categories,
-          projects,
-          initialCategoryId,
-          initialMessages,
-          publicPanel,
+          categories: [],
+          projects: [],
+          initialCategoryId: null,
+          initialMessages: [],
+          publicPanel: null,
         },
         source: "postgres",
       },
