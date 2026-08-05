@@ -1,5 +1,7 @@
 import "server-only";
 
+import { randomUUID } from "node:crypto";
+
 import type {
   Pool,
   PoolClient,
@@ -160,7 +162,7 @@ function buildMainRootRow(workspaceId: string, position: number): CategoryRow {
   const now = new Date().toISOString();
 
   return {
-    id: crypto.randomUUID(),
+    id: randomUUID(),
     workspace_id: workspaceId,
     parent_id: null,
     title: MAIN_CATEGORY_TITLE,

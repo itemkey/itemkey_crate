@@ -1,3 +1,5 @@
+import { createRuntimeId } from "./runtime-id.ts";
+
 export const RULE_FORMAT = "rule" as const;
 export const RULE_VERSION = "1.0" as const;
 export const MESSAGE_RULE_KIND = "itemkey-message-rule-v1" as const;
@@ -189,10 +191,7 @@ function clampInteger(value: unknown, minimum: number, maximum: number): number 
 
 export function createRuleId(prefix: string): string {
   const safePrefix = prefix.trim().replace(/[^a-z0-9_-]/gi, "-") || "rule";
-  if (typeof globalThis.crypto?.randomUUID === "function") {
-    return `${safePrefix}-${globalThis.crypto.randomUUID()}`;
-  }
-  return `${safePrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return `${safePrefix}-${createRuntimeId()}`;
 }
 
 export function createRuleBlock(kind: "heading"): RuleHeadingBlock;

@@ -114,6 +114,7 @@ import {
 } from "@/lib/rule-document";
 import { normalizeUserId, validateUserId } from "@/lib/account-user-id";
 import { toErrorMessage } from "@/lib/errors";
+import { createRuntimeId } from "@/lib/runtime-id";
 import type {
   CategoryFormat,
   CategoryRow,
@@ -7657,7 +7658,7 @@ export default function CategoryWorkspace() {
       }
 
       const fileName = getRichFileLinkName(fileLink);
-      const viewerId = crypto.randomUUID();
+      const viewerId = createRuntimeId();
       const viewerHref = buildPdfViewerHref(viewerId, fileName);
       const viewerWindow = openPendingPdfViewerWindow(fileName);
       if (!viewerWindow) {
@@ -10164,7 +10165,7 @@ export default function CategoryWorkspace() {
     }
 
     const createdChecklist: ChecklistBlock = {
-      id: crypto.randomUUID(),
+      id: createRuntimeId(),
       title: nextTitle,
       tags: nextTags,
       checkedCategoryIds: [],
@@ -12199,7 +12200,7 @@ export default function CategoryWorkspace() {
         sideColumns.length + 1
       }`;
       const column: DictionaryColumn = {
-        id: `${side}-note-${crypto.randomUUID()}`,
+        id: `${side}-note-${createRuntimeId()}`,
         side,
         kind: "note",
         label,
@@ -12802,7 +12803,7 @@ export default function CategoryWorkspace() {
       }
 
       const createdDictionary: DictionaryBlock = {
-        id: crypto.randomUUID(),
+        id: createRuntimeId(),
         title: nextTitle,
         ...nextPayload,
       };
@@ -27229,7 +27230,7 @@ function normalizeRichImageId(value: string | null | undefined): string {
     return trimmed;
   }
 
-  return crypto.randomUUID();
+  return createRuntimeId();
 }
 
 function parseRichImageWidth(value: string | null | undefined): number | null {
@@ -27597,7 +27598,7 @@ function normalizeRichFileId(value: string | null | undefined): string {
     return trimmed;
   }
 
-  return crypto.randomUUID();
+  return createRuntimeId();
 }
 
 function normalizeRichFileName(value: string | null | undefined): string {
@@ -29509,7 +29510,7 @@ function createEmptyDictionaryEntry(
   columns: DictionaryColumn[] = DEFAULT_DICTIONARY_COLUMNS
 ): DictionaryEntry {
   return {
-    id: crypto.randomUUID(),
+    id: createRuntimeId(),
     values: Object.fromEntries(columns.map((column) => [column.id, ""])),
   };
 }

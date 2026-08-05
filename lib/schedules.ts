@@ -1,3 +1,5 @@
+import { createRuntimeId } from "./runtime-id.ts";
+
 export const MESSAGE_SCHEDULE_KIND = "itemkey-message-schedule-v1";
 
 export type ScheduleViewMode = "day" | "week" | "list";
@@ -418,11 +420,7 @@ export function createDefaultScheduleBlock(
 }
 
 export function createScheduleId(prefix: string): string {
-  const random =
-    typeof crypto !== "undefined" && "randomUUID" in crypto
-      ? crypto.randomUUID()
-      : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  return `${prefix}-${random}`;
+  return `${prefix}-${createRuntimeId()}`;
 }
 
 export function normalizeScheduleTitle(value: unknown): string {

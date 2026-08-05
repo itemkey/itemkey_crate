@@ -1,5 +1,7 @@
 import "server-only";
 
+import { randomUUID } from "node:crypto";
+
 import type { PoolClient } from "pg";
 
 import { getPostgresPool } from "@/lib/db/postgres";
@@ -101,7 +103,7 @@ export async function publishRealtimeEvent(
 
   const event: RealtimeEvent = {
     ...input,
-    id: crypto.randomUUID(),
+    id: randomUUID(),
     userIds,
     originClientId: input.originClientId ?? null,
     createdAt: new Date().toISOString(),
