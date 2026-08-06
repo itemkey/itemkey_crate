@@ -48,6 +48,14 @@ docker compose ps
 
 Эта команда не поднимает новый Postgres и не запускает SQL-скрипты. Она только запускает приложение, которое подключается к `DATABASE_URL`.
 
+Перед первым деплоем версии с ускоренной загрузкой `/crate` примени к существующей базе идемпотентную миграцию `postgres/performance-upgrade.sql`. Например:
+
+```bash
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f postgres/performance-upgrade.sql
+```
+
+Сначала миграция, затем новый контейнер приложения. PostgreSQL и приложение должны находиться в одном регионе/локальной сети: межрегиональная задержка напрямую ухудшает серверную загрузку рабочего дерева.
+
 Логи:
 
 ```bash
@@ -88,6 +96,8 @@ server {
   }
 }
 ```
+
+Включи HTTP/2 на HTTPS-listener и Brotli или gzip для `text/html`, `text/css`, JavaScript, JSON и RSC-ответов. Не включай публичное кэширование `/crate` и пользовательских `/api/*`: приложение отправляет для них `private, no-store`. Заголовок `X-Accel-Buffering: no` и `proxy_buffering off` нужны, чтобы Suspense-поток доходил до браузера сразу.
 
 Для публичного домена оставь `AUTH_COOKIE_SECURE=true`. Если проверяешь только по `http://IP:3000` внутри локальной сети, временно поставь `AUTH_COOKIE_SECURE=false`, иначе production cookies не будут отправляться браузером по HTTP.
 

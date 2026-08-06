@@ -212,6 +212,10 @@ create table public.categories (
 create index categories_workspace_parent_position_idx
   on public.categories(workspace_id, parent_id, position, created_at);
 
+create index categories_workspace_summary_order_idx
+  on public.categories(workspace_id, position, created_at, id)
+  include (parent_id, title, description, tag, format, category_type, updated_at);
+
 create table public.category_messages (
   id uuid primary key default gen_random_uuid(),
   workspace_id uuid not null references public.workspaces(id) on delete cascade,
@@ -380,6 +384,10 @@ create index public_category_members_user_idx
 
 create index public_category_members_mount_parent_idx
   on public.public_category_members(mount_parent_category_id);
+
+create index public_category_members_user_root_idx
+  on public.public_category_members(app_user_id, public_root_id)
+  include (role, mount_parent_category_id, updated_at);
 
 create table public.inbox_items (
   id uuid primary key default gen_random_uuid(),

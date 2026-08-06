@@ -22,7 +22,10 @@ export async function GET(request: NextRequest) {
     }
 
     const store = await getCategoryStore(user.id);
-    const categories = await store.list();
+    const categories =
+      request.nextUrl.searchParams.get("view") === "summary"
+        ? await store.listSummaries()
+        : await store.list();
     return Response.json({ data: categories, source: store.source });
   } catch (error) {
     return Response.json(
@@ -59,7 +62,7 @@ export async function POST(request: NextRequest) {
         : null;
 
     const store = await getCategoryStore(user.id);
-    const siblingCount = (await store.list()).filter(
+    const siblingCount = (await store.listSummaries()).filter(
       (node) => node.parent_id === parentId
     ).length;
     const title = requestedTitle || createDefaultTitle(siblingCount);

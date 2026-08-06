@@ -1,5 +1,7 @@
 "use client";
+/* eslint-disable react-hooks/set-state-in-effect -- The on-demand legacy tool suite synchronizes many independent editor surfaces from external workspace state. */
 
+import dynamic from "next/dynamic";
 import {
   type ChangeEvent,
   type ClipboardEvent,
@@ -7,6 +9,8 @@ import {
   type DragEvent,
   type FormEvent,
   type FocusEvent,
+  Suspense,
+  use,
   useCallback,
   useDeferredValue,
   useEffect,
@@ -100,12 +104,10 @@ import {
   type ScheduleWeekday,
 } from "@/lib/schedules";
 import RuleEditor, { RuleCard } from "@/components/rule-editor";
-import ContentAnalytics from "@/components/content-analytics";
 import {
   createDefaultRuleDocument,
   createRuleId,
   dedupeRuleTitle,
-  getRuleBlockText,
   normalizeRuleDocuments,
   parseMessageRuleContent,
   parseRuleDocumentJson,
@@ -117,7 +119,9 @@ import { toErrorMessage } from "@/lib/errors";
 import { createRuntimeId } from "@/lib/runtime-id";
 import type {
   CategoryFormat,
+  CategoryDetailPayload,
   CategoryRow,
+  CategorySummaryRow,
   CategoryType,
   FriendRow,
   InboxItemRow,
@@ -126,7 +130,12 @@ import type {
   ProjectRow,
   PublicCategoryMemberRole,
   PublicCategoryPanel,
+  WorkspaceShellData,
 } from "@/lib/types";
+
+const ContentAnalytics = dynamic(() => import("@/components/content-analytics"), {
+  ssr: false,
+});
 
 type DataSource = "postgres";
 
@@ -137,8 +146,8 @@ type Notice = {
   tone: NoticeTone;
 };
 
-type CategoriesPayload = {
-  data?: CategoryRow[];
+type CategorySummariesPayload = {
+  data?: CategorySummaryRow[];
   source?: DataSource;
   error?: string;
 };
@@ -148,6 +157,38 @@ type CategoryPayload = {
   source?: DataSource;
   error?: string;
 };
+
+type CategoryDetailApiPayload = {
+  data?: CategoryDetailPayload;
+  source?: DataSource;
+  error?: string;
+};
+
+export type InitialCategoryDetailResult = {
+  data: CategoryDetailPayload | null;
+  error: string | null;
+};
+
+type CategoryWorkspaceProps = {
+  initialShellData?: WorkspaceShellData | null;
+  initialDetailPromise?: Promise<InitialCategoryDetailResult> | null;
+};
+
+function InitialCategoryDetailSeeder({
+  resultPromise,
+  onSettled,
+}: {
+  resultPromise: Promise<InitialCategoryDetailResult>;
+  onSettled: (result: InitialCategoryDetailResult) => void;
+}) {
+  const result = use(resultPromise);
+
+  useEffect(() => {
+    onSettled(result);
+  }, [onSettled, result]);
+
+  return null;
+}
 
 type ProjectsPayload = {
   data?: ProjectRow[];
@@ -999,17 +1040,36 @@ const RICH_FILE_CLASS_NAME = "rich-file-link";
 const MAX_RICH_FILE_BYTES = 16 * 1024 * 1024;
 const EDITOR_INPUT_SYNC_DELAY_MS = 180;
 
-export default function CategoryWorkspace() {
-  const [categories, setCategories] = useState<CategoryRow[]>([]);
-  const [projects, setProjects] = useState<ProjectRow[]>([]);
+function categorySummaryToClientRow(summary: CategorySummaryRow): CategoryRow {
+  return {
+    ...summary,
+    content: "",
+  };
+}
+
+export default function CategoryWorkspace({
+  initialShellData,
+  initialDetailPromise = null,
+}: CategoryWorkspaceProps = {}) {
+  const hasServerInitialState = typeof initialShellData !== "undefined";
+  const [categories, setCategories] = useState<CategoryRow[]>(() =>
+    initialShellData?.categories.map(categorySummaryToClientRow) ?? []
+  );
+  const [projects, setProjects] = useState<ProjectRow[]>(() =>
+    initialShellData?.projects.map(normalizeProjectRow) ?? []
+  );
   const [dictionaryGroups, setDictionaryGroups] = useState<DictionaryWordGroup[]>(
     []
   );
   const [messagesByCategory, setMessagesByCategory] = useState<
     Record<string, MessageRow[]>
   >({});
-  const [currentCategoryId, setCurrentCategoryId] = useState<string | null>(null);
-  const [insertionTargetId, setInsertionTargetId] = useState<string | null>(null);
+  const [currentCategoryId, setCurrentCategoryId] = useState<string | null>(
+    initialShellData?.initialCategoryId ?? null
+  );
+  const [insertionTargetId, setInsertionTargetId] = useState<string | null>(
+    initialShellData?.initialCategoryId ?? null
+  );
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
   const [dragMessageId, setDragMessageId] = useState<string | null>(null);
@@ -1020,10 +1080,17 @@ export default function CategoryWorkspace() {
   const [categoryForm, setCategoryForm] =
     useState<CategoryFormState>(DEFAULT_CATEGORY_FORM);
   const [messageTitleDraft, setMessageTitleDraft] = useState("");
-  const [source, setSource] = useState<DataSource | "unknown">("unknown");
-  const [isLoading, setIsLoading] = useState(true);
+  const [source, setSource] = useState<DataSource | "unknown">(
+    initialShellData?.source ?? "unknown"
+  );
+  const [isLoading, setIsLoading] = useState(!hasServerInitialState);
   const [categoryLoadStatus, setCategoryLoadStatus] =
-    useState<CategoryLoadStatus>("idle");
+    useState<CategoryLoadStatus>(hasServerInitialState ? "ready" : "idle");
+  const [loadedCategoryIds, setLoadedCategoryIds] = useState<Set<string>>(
+    () => new Set()
+  );
+  const [categoryDetailError, setCategoryDetailError] = useState<string | null>(null);
+  const [categoryDetailRetryVersion, setCategoryDetailRetryVersion] = useState(0);
   const [isMutating, setIsMutating] = useState(false);
   const [isSavingCategory, setIsSavingCategory] = useState(false);
   const [isSavingMessages, setIsSavingMessages] = useState(false);
@@ -1142,7 +1209,9 @@ export default function CategoryWorkspace() {
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(
     null
   );
-  const [startupPhase, setStartupPhase] = useState<StartupPhase>("auth");
+  const [startupPhase, setStartupPhase] = useState<StartupPhase>(
+    hasServerInitialState ? "ready" : "auth"
+  );
   const [isAuthBusy, setIsAuthBusy] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [authInfo, setAuthInfo] = useState<string | null>(null);
@@ -1158,19 +1227,36 @@ export default function CategoryWorkspace() {
   const [authUser, setAuthUser] = useState<{
     id: string;
     email: string | null;
-  } | null>(null);
-  const [accountUserId, setAccountUserId] = useState<string | null>(null);
+  } | null>(() =>
+    initialShellData
+      ? {
+          id: initialShellData.authUser.id,
+          email: initialShellData.authUser.email,
+        }
+      : null
+  );
+  const [accountUserId, setAccountUserId] = useState<string | null>(
+    initialShellData?.account.userId ?? null
+  );
   const [accountNextUserIdChangeAt, setAccountNextUserIdChangeAt] = useState<
     string | null
   >(null);
   const [accountCanChangeUserIdNow, setAccountCanChangeUserIdNow] =
     useState(true);
-  const [accountUserIdDraft, setAccountUserIdDraft] = useState("");
-  const [accountNicknameDraft, setAccountNicknameDraft] = useState("");
+  const [accountUserIdDraft, setAccountUserIdDraft] = useState(
+    initialShellData?.account.userId ?? ""
+  );
+  const [accountNicknameDraft, setAccountNicknameDraft] = useState(
+    initialShellData?.account.nickname ?? ""
+  );
   const [accountProfileDescriptionDraft, setAccountProfileDescriptionDraft] =
-    useState("");
-  const [accountAvatarUrlDraft, setAccountAvatarUrlDraft] = useState("");
-  const [accountAvatarUrl, setAccountAvatarUrl] = useState<string | null>(null);
+    useState(initialShellData?.account.profileDescription ?? "");
+  const [accountAvatarUrlDraft, setAccountAvatarUrlDraft] = useState(
+    initialShellData?.account.avatarUrl ?? ""
+  );
+  const [accountAvatarUrl, setAccountAvatarUrl] = useState<string | null>(
+    initialShellData?.account.avatarUrl ?? null
+  );
   const [isSavingAccountProfile, setIsSavingAccountProfile] = useState(false);
   const [isUploadingAccountAvatar, setIsUploadingAccountAvatar] = useState(false);
   const [isDeletingAccountAvatar, setIsDeletingAccountAvatar] = useState(false);
@@ -1211,6 +1297,7 @@ export default function CategoryWorkspace() {
   const [shareFriendId, setShareFriendId] = useState("");
   const [publicInviteFriendId, setPublicInviteFriendId] = useState("");
   const [publicPanel, setPublicPanel] = useState<PublicCategoryPanel | null>(null);
+  const [publicAccessOpen, setPublicAccessOpen] = useState(false);
   const [isSavingFriendAction, setIsSavingFriendAction] = useState(false);
   const [isSavingInboxAction, setIsSavingInboxAction] = useState(false);
   const [isSavingPublicAction, setIsSavingPublicAction] = useState(false);
@@ -1245,7 +1332,17 @@ export default function CategoryWorkspace() {
     Map<string, Promise<string | null>>
   >(new Map());
   const dictionaryMotivationRequestIdRef = useRef(0);
-  const secondaryStartupUserIdRef = useRef<string | null>(null);
+  const loadedCategoryIdsRef = useRef<Set<string>>(new Set());
+  const categoryDetailCacheRef = useRef<
+    Map<string, { updatedAt: string; detail: CategoryDetailPayload }>
+  >(new Map());
+  const categoryDetailPromisesRef = useRef<
+    Map<string, Promise<CategoryDetailPayload>>
+  >(new Map());
+  const categoryDetailAbortRef = useRef<AbortController | null>(null);
+  const initialDetailPendingIdRef = useRef<string | null>(
+    initialDetailPromise ? initialShellData?.initialCategoryId ?? null : null
+  );
   const dictionaryDoomscrollClickInFlightRef = useRef(false);
   const richImageFileRef = useRef<HTMLInputElement | null>(null);
   const richFileRef = useRef<HTMLInputElement | null>(null);
@@ -1402,6 +1499,10 @@ export default function CategoryWorkspace() {
     () => visibleCategoriesById.get(currentCategoryId ?? "") ?? null,
     [visibleCategoriesById, currentCategoryId]
   );
+  const currentCategoryContentLoaded = Boolean(
+    currentCategoryId && loadedCategoryIds.has(currentCategoryId)
+  );
+  const currentCategoryUpdatedAt = currentCategory?.updated_at ?? null;
 
   const currentCategoryCanEdit = currentCategory?.access_role !== "viewer";
   const currentCategoryCanManagePublic = currentCategory?.access_role === "owner";
@@ -2383,6 +2484,99 @@ export default function CategoryWorkspace() {
     [fetchWithCsrf, handleUnauthorizedState]
   );
 
+  const applyCategoryDetail = useCallback((detail: CategoryDetailPayload) => {
+    const category = normalizeCategoryRow(detail.category);
+    const messages = detail.messages.map(normalizeMessageRow).sort(sortMessages);
+
+    setCategories((prev) => {
+      const existing = prev.find((row) => row.id === category.id);
+      const nextCategory = existing
+        ? { ...category, parent_id: existing.parent_id }
+        : category;
+      return prev.some((row) => row.id === category.id)
+        ? prev.map((row) => (row.id === category.id ? nextCategory : row))
+        : [...prev, nextCategory];
+    });
+    setMessagesByCategory((prev) => ({ ...prev, [category.id]: messages }));
+    loadedCategoryIdsRef.current.add(category.id);
+    setLoadedCategoryIds(new Set(loadedCategoryIdsRef.current));
+    savedCategoryContentRef.current[category.id] = category.content;
+    categoryDraftVersionRef.current[category.id] ??= 0;
+    categoryAckVersionRef.current[category.id] ??= 0;
+    for (const message of messages) {
+      savedMessageContentRef.current[message.id] = message.content;
+      messageDraftVersionRef.current[message.id] ??= 0;
+      messageAckVersionRef.current[message.id] ??= 0;
+    }
+    const pendingMessageId = pendingMessageSelectionRef.current;
+    if (pendingMessageId) {
+      if (messages.some((message) => message.id === pendingMessageId)) {
+        setSelectedMessageId(pendingMessageId);
+      }
+      pendingMessageSelectionRef.current = null;
+    }
+    categoryDetailCacheRef.current.set(category.id, {
+      updatedAt: category.updated_at,
+      detail: { category, messages },
+    });
+    setCategoryDetailError(null);
+  }, []);
+
+  const fetchCategoryDetail = useCallback(
+    async (categoryId: string, signal?: AbortSignal) => {
+      const response = await authorizedFetch(
+        `/api/categories/${encodeURIComponent(categoryId)}/detail`,
+        { cache: "no-store", signal }
+      );
+      const payload = (await response.json()) as CategoryDetailApiPayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(payload.error ?? "Не удалось загрузить материал.");
+      }
+      return payload.data;
+    },
+    [authorizedFetch]
+  );
+
+  const prefetchCategoryDetail = useCallback(
+    (category: CategoryRow) => {
+      const cached = categoryDetailCacheRef.current.get(category.id);
+      if (cached?.updatedAt === category.updated_at) {
+        return;
+      }
+      if (categoryDetailPromisesRef.current.has(category.id)) {
+        return;
+      }
+
+      const promise = fetchCategoryDetail(category.id)
+        .then((detail) => {
+          categoryDetailCacheRef.current.set(category.id, {
+            updatedAt: detail.category.updated_at,
+            detail,
+          });
+          return detail;
+        })
+        .finally(() => {
+          if (categoryDetailPromisesRef.current.get(category.id) === promise) {
+            categoryDetailPromisesRef.current.delete(category.id);
+          }
+        });
+      categoryDetailPromisesRef.current.set(category.id, promise);
+    },
+    [fetchCategoryDetail]
+  );
+
+  const handleInitialDetailSettled = useCallback(
+    (result: InitialCategoryDetailResult) => {
+      initialDetailPendingIdRef.current = null;
+      if (result.data) {
+        applyCategoryDetail(result.data);
+        return;
+      }
+      setCategoryDetailError(result.error ?? "Не удалось загрузить материал.");
+    },
+    [applyCategoryDetail]
+  );
+
   const loadAuthSession = useCallback(async (): Promise<AuthSessionResult> => {
     try {
       const { response, payload } = await fetchJsonWithTimeout<AuthSessionPayload>(
@@ -2624,13 +2818,15 @@ export default function CategoryWorkspace() {
     setLoadError(null);
 
     try {
-      const response = await authorizedFetch("/api/categories", { cache: "no-store" });
-      const payload = (await response.json()) as CategoriesPayload;
+      const response = await authorizedFetch("/api/categories?view=summary", {
+        cache: "no-store",
+      });
+      const payload = (await response.json()) as CategorySummariesPayload;
       if (!response.ok || !payload.data) {
         throw new Error(payload.error ?? "Не удалось загрузить категории.");
       }
 
-      const rows = payload.data.map(normalizeCategoryRow);
+      const rows = payload.data.map(categorySummaryToClientRow);
       const initialId = getInitialCategoryId(rows) ?? rows[0]?.id ?? null;
 
       for (const timer of Object.values(categorySaveTimersRef.current)) {
@@ -2673,17 +2869,18 @@ export default function CategoryWorkspace() {
       setSource(payload.source ?? "unknown");
       setMessagesByCategory({});
 
-      const savedCategoryMap: Record<string, string> = {};
       const categoryDraftMap: Record<string, number> = {};
       const categoryAckMap: Record<string, number> = {};
       for (const row of rows) {
-        savedCategoryMap[row.id] = row.content;
         categoryDraftMap[row.id] = 0;
         categoryAckMap[row.id] = 0;
       }
-      savedCategoryContentRef.current = savedCategoryMap;
+      savedCategoryContentRef.current = {};
       categoryDraftVersionRef.current = categoryDraftMap;
       categoryAckVersionRef.current = categoryAckMap;
+      loadedCategoryIdsRef.current.clear();
+      setLoadedCategoryIds(new Set());
+      categoryDetailCacheRef.current.clear();
 
       setIsSavingCategory(false);
       setIsSavingMessages(false);
@@ -2698,13 +2895,15 @@ export default function CategoryWorkspace() {
 
   const refreshCategoriesFromServer = useCallback(async () => {
     try {
-      const response = await authorizedFetch("/api/categories", { cache: "no-store" });
-      const payload = (await response.json()) as CategoriesPayload;
+      const response = await authorizedFetch("/api/categories?view=summary", {
+        cache: "no-store",
+      });
+      const payload = (await response.json()) as CategorySummariesPayload;
       if (!response.ok || !payload.data) {
         throw new Error(payload.error ?? "Не удалось обновить категории.");
       }
 
-      const rows = payload.data.map(normalizeCategoryRow);
+      const rows = payload.data.map(categorySummaryToClientRow);
       const hasPendingDraft = (categoryId: string) => {
         const draftVersion = categoryDraftVersionRef.current[categoryId] ?? 0;
         const ackVersion = categoryAckVersionRef.current[categoryId] ?? 0;
@@ -2721,23 +2920,19 @@ export default function CategoryWorkspace() {
         const localById = new Map(prev.map((category) => [category.id, category]));
         return rows.map((row) => {
           const local = localById.get(row.id);
-          if (!local || !hasPendingDraft(row.id)) {
+          if (!local) {
             return row;
           }
 
           return {
             ...row,
-            content: local.content,
-            updated_at: local.updated_at,
+            content: loadedCategoryIdsRef.current.has(row.id) ? local.content : "",
+            updated_at: hasPendingDraft(row.id) ? local.updated_at : row.updated_at,
           };
         });
       });
 
       for (const row of rows) {
-        if (!hasPendingDraft(row.id)) {
-          savedCategoryContentRef.current[row.id] = row.content;
-        }
-
         if (typeof categoryDraftVersionRef.current[row.id] !== "number") {
           categoryDraftVersionRef.current[row.id] = 0;
         }
@@ -3134,16 +3329,32 @@ export default function CategoryWorkspace() {
   );
 
   useLayoutEffect(() => {
+    if (hasServerInitialState) {
+      return;
+    }
     void loadInitialWorkspace();
-  }, [loadInitialWorkspace]);
+  }, [hasServerInitialState, loadInitialWorkspace]);
 
   useEffect(() => {
-    if (!isAuthenticated) {
+    if (!isAuthenticated || !publicAccessOpen) {
+      setPublicPanel(null);
       return;
     }
 
-    void loadCurrentPublicPanel(currentCategoryId);
-  }, [currentCategoryId, isAuthenticated, loadCurrentPublicPanel]);
+    const timer = window.setTimeout(() => {
+      void loadCurrentPublicPanel(currentCategoryId);
+    }, 1200);
+    return () => window.clearTimeout(timer);
+  }, [
+    currentCategoryId,
+    isAuthenticated,
+    loadCurrentPublicPanel,
+    publicAccessOpen,
+  ]);
+
+  useEffect(() => {
+    setPublicAccessOpen(false);
+  }, [currentCategoryId]);
 
   useEffect(() => {
     currentCategoryIdRef.current = currentCategoryId;
@@ -3251,7 +3462,10 @@ export default function CategoryWorkspace() {
         return;
       }
 
-      if (payload.kind === "friends" || payload.kind === "inbox") {
+      if (
+        accountWindowTab === "friends" &&
+        (payload.kind === "friends" || payload.kind === "inbox")
+      ) {
         void realtimeHandlersRef.current.loadFriends();
         const selectedInboxId = selectedFriendInboxIdRef.current;
         if (selectedInboxId) {
@@ -3266,11 +3480,15 @@ export default function CategoryWorkspace() {
       ) {
         void realtimeHandlersRef.current.refreshCategoriesFromServer();
         void realtimeHandlersRef.current.loadProjects();
-        void realtimeHandlersRef.current.loadDictionaryGroups();
+        if (sidebarTab === "dictionaryGroups") {
+          void realtimeHandlersRef.current.loadDictionaryGroups();
+        }
         const activeCategoryId = currentCategoryIdRef.current;
         if (activeCategoryId) {
           void realtimeHandlersRef.current.loadCategoryMessages(activeCategoryId);
-          void realtimeHandlersRef.current.loadCurrentPublicPanel(activeCategoryId);
+          if (publicAccessOpen) {
+            void realtimeHandlersRef.current.loadCurrentPublicPanel(activeCategoryId);
+          }
         }
       }
     };
@@ -3323,50 +3541,10 @@ export default function CategoryWorkspace() {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       closeEventSource();
     };
-  }, [getClientId, isAuthenticated]);
+  }, [accountWindowTab, getClientId, isAuthenticated, publicAccessOpen, sidebarTab]);
 
   useEffect(() => {
-    const userId = authUser?.id ?? null;
-    if (!userId) {
-      secondaryStartupUserIdRef.current = null;
-      return;
-    }
-
-    if (isLoading || loadError) {
-      return;
-    }
-
-    if (secondaryStartupUserIdRef.current === userId) {
-      return;
-    }
-
-    secondaryStartupUserIdRef.current = userId;
-    void loadAccountProfile();
-    void loadCategories();
-    void loadProjects();
-    void loadFriends();
-    void loadDictionaryGroups();
-  }, [
-    authUser?.id,
-    isLoading,
-    loadAccountProfile,
-    loadCategories,
-    loadDictionaryGroups,
-    loadFriends,
-    loadProjects,
-    loadError,
-  ]);
-
-  useEffect(() => {
-    if (!isAuthenticated) {
-      return;
-    }
-
-    void loadMotivationImages();
-  }, [isAuthenticated, loadMotivationImages]);
-
-  useEffect(() => {
-    if (!isAuthenticated) {
+    if (!isAuthenticated || accountWindowTab !== "friends") {
       return;
     }
 
@@ -3382,14 +3560,9 @@ export default function CategoryWorkspace() {
       }
     };
 
-    if (accountWindowTab === "friends") {
-      refreshCollaboration();
-    }
+    refreshCollaboration();
 
-    const interval = window.setInterval(
-      refreshCollaboration,
-      accountWindowTab === "friends" ? 2500 : 8000
-    );
+    const interval = window.setInterval(refreshCollaboration, 5000);
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
@@ -3410,8 +3583,76 @@ export default function CategoryWorkspace() {
       return;
     }
 
-    void loadCategoryMessages(currentCategoryId);
-  }, [currentCategoryId, isAuthenticated, loadCategoryMessages]);
+    if (!currentCategoryUpdatedAt) {
+      return;
+    }
+
+    const cached = categoryDetailCacheRef.current.get(currentCategoryId);
+    if (cached?.updatedAt === currentCategoryUpdatedAt) {
+      if (!loadedCategoryIdsRef.current.has(currentCategoryId)) {
+        applyCategoryDetail(cached.detail);
+      }
+      return;
+    }
+
+    if (initialDetailPendingIdRef.current === currentCategoryId) {
+      return;
+    }
+
+    loadedCategoryIdsRef.current.delete(currentCategoryId);
+    setLoadedCategoryIds(new Set(loadedCategoryIdsRef.current));
+    setCategoryDetailError(null);
+    let cancelled = false;
+    const pendingPrefetch = categoryDetailPromisesRef.current.get(currentCategoryId);
+    const controller = pendingPrefetch ? null : new AbortController();
+    if (controller) {
+      categoryDetailAbortRef.current?.abort();
+      categoryDetailAbortRef.current = controller;
+    }
+    let timedOut = false;
+    const timeoutId = window.setTimeout(() => {
+      timedOut = true;
+      controller?.abort();
+      categoryDetailPromisesRef.current.delete(currentCategoryId);
+      if (!cancelled) {
+        setCategoryDetailError("Материал загружается слишком долго. Попробуй ещё раз.");
+      }
+    }, 8000);
+    const detailPromise =
+      pendingPrefetch ?? fetchCategoryDetail(currentCategoryId, controller?.signal);
+
+    void detailPromise
+      .then((detail) => {
+        if (!cancelled) {
+          applyCategoryDetail(detail);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setCategoryDetailError(
+            timedOut || isAbortError(error)
+              ? "Материал загружается слишком долго. Попробуй ещё раз."
+              : toErrorMessage(error, "Не удалось загрузить материал.")
+          );
+        }
+      })
+      .finally(() => {
+        window.clearTimeout(timeoutId);
+      });
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+      controller?.abort();
+    };
+  }, [
+    applyCategoryDetail,
+    currentCategoryId,
+    currentCategoryUpdatedAt,
+    categoryDetailRetryVersion,
+    fetchCategoryDetail,
+    isAuthenticated,
+  ]);
 
   useEffect(() => {
     if (
@@ -3586,7 +3827,7 @@ export default function CategoryWorkspace() {
   ]);
 
   useEffect(() => {
-    if (!currentCategory) {
+    if (!currentCategory || !currentCategoryContentLoaded) {
       syncedContinuousCategoryIdRef.current = null;
       setContinuousDraft("");
       setContinuousChecklists([]);
@@ -3607,7 +3848,7 @@ export default function CategoryWorkspace() {
     setContinuousDictionaries(parsedContinuous.dictionaries);
     setContinuousSchedules(parsedContinuous.schedules);
     setContinuousRules(parsedContinuous.rules);
-  }, [currentCategory]);
+  }, [currentCategory, currentCategoryContentLoaded]);
 
   useEffect(() => {
     const pending = pendingDictionarySearchSourceRef.current;
@@ -15487,11 +15728,7 @@ export default function CategoryWorkspace() {
 
       setAuthLoginPassword("");
       setShowAuthLoginPassword(false);
-      const workspaceReady = await loadWorkspaceBootstrap();
-      if (!workspaceReady) {
-        return;
-      }
-      pushNotice("Вход выполнен.");
+      window.location.assign("/crate");
     } catch (error) {
       setAuthError(toErrorMessage(error, "Не удалось войти в аккаунт."));
     } finally {
@@ -15588,11 +15825,7 @@ export default function CategoryWorkspace() {
       setAuthRegisterPasswordRepeat("");
       setShowAuthRegisterPassword(false);
       setAuthInfo(null);
-      const workspaceReady = await loadWorkspaceBootstrap();
-      if (!workspaceReady) {
-        return;
-      }
-      pushNotice("Аккаунт создан и вход выполнен.");
+      window.location.assign("/crate");
     } catch (error) {
       setAuthError(toErrorMessage(error, "Не удалось создать аккаунт."));
     } finally {
@@ -15614,9 +15847,7 @@ export default function CategoryWorkspace() {
         throw new Error(payload.error ?? "Не удалось выйти из аккаунта.");
       }
 
-      setAuthUser(null);
-      resetWorkspaceState();
-      pushNotice("Вы вышли из аккаунта.");
+      window.location.assign("/crate");
     } catch (error) {
       setAuthError(toErrorMessage(error, "Не удалось выйти из аккаунта."));
     } finally {
@@ -18800,7 +19031,7 @@ export default function CategoryWorkspace() {
             <p className="mt-3 text-sm text-[#202020]">
               {isCategoryLoadError
                 ? "Не удалось загрузить категории."
-                : "Загружаю категории и твои материалы..."}
+                : "Подготавливаю дерево категорий..."}
             </p>
             {isCategoryLoadError && loadError && (
               <p className="mt-3 rounded border-2 border-[#6a1313] bg-[#dca3a3] px-3 py-2 text-sm text-[#3a0e0e]">
@@ -18828,6 +19059,14 @@ export default function CategoryWorkspace() {
 
   return (
     <main className="workspace-root flex w-full items-stretch p-0">
+      {initialDetailPromise && (
+        <Suspense fallback={null}>
+          <InitialCategoryDetailSeeder
+            resultPromise={initialDetailPromise}
+            onSettled={handleInitialDetailSettled}
+          />
+        </Suspense>
+      )}
       <div
         className={`frame-shell relative flex h-full w-full flex-col overflow-hidden ${
           mobilePanel ? `mobile-panel-${mobilePanel}-open` : ""
@@ -18936,7 +19175,12 @@ export default function CategoryWorkspace() {
                 className={`sidebar-tab ${
                   sidebarTab === "dictionaryGroups" ? "sidebar-tab-active" : ""
                 }`}
-                onClick={() => setSidebarTab("dictionaryGroups")}
+                onClick={() => {
+                  setSidebarTab("dictionaryGroups");
+                  if (dictionaryGroups.length === 0) {
+                    void loadDictionaryGroups();
+                  }
+                }}
               >
                 Группы словарей
               </button>
@@ -18963,6 +19207,8 @@ export default function CategoryWorkspace() {
                               keepMobilePanel: mobilePanel === "categories",
                             })
                           }
+                          onMouseEnter={() => prefetchCategoryDetail(node)}
+                          onFocus={() => prefetchCategoryDetail(node)}
                         >
                           <span className="sidebar-item-title">{node.title}</span>
                         </button>
@@ -19043,7 +19289,28 @@ export default function CategoryWorkspace() {
           </aside>
 
           <section className="workspace-screen">
-            {currentCategory?.format === "block" ? (
+            {!currentCategoryContentLoaded ? (
+              <div className="flex h-full min-h-64 flex-col items-center justify-center gap-3 p-6 text-center">
+                <p className="text-sm text-[#202020]" aria-live="polite">
+                  {categoryDetailError ?? "Загружаю выбранный материал..."}
+                </p>
+                {categoryDetailError && (
+                  <button
+                    type="button"
+                    className="mini-action"
+                    onClick={() => {
+                      if (currentCategoryId) {
+                        categoryDetailCacheRef.current.delete(currentCategoryId);
+                        categoryDetailPromisesRef.current.delete(currentCategoryId);
+                      }
+                      setCategoryDetailRetryVersion((version) => version + 1);
+                    }}
+                  >
+                    повторить
+                  </button>
+                )}
+              </div>
+            ) : currentCategory?.format === "block" ? (
               <>
                 <div className="message-toolbar">
                   <button
@@ -20565,8 +20832,24 @@ export default function CategoryWorkspace() {
                   Друг получит копию дерева категории в inbox и сам выберет, куда ее принять.
                 </p>
 
-                <label className="settings-label">public category</label>
-                <div className="public-category-panel">
+                <div className="flex items-center justify-between gap-2">
+                  <label className="settings-label">public category</label>
+                  <button
+                    type="button"
+                    className="mini-action"
+                    onClick={() => {
+                      setPublicAccessOpen((open) => !open);
+                      if (!publicAccessOpen) {
+                        void loadCurrentPublicPanel(currentCategoryId);
+                        void loadFriends();
+                      }
+                    }}
+                  >
+                    {publicAccessOpen ? "скрыть" : "управлять"}
+                  </button>
+                </div>
+                {publicAccessOpen && (
+                  <div className="public-category-panel">
                   <div className="public-category-state">
                     <span>{publicPanel?.enabled ? "public включен" : "local"}</span>
                     {publicPanel?.role && <span>роль: {publicPanel.role}</span>}
@@ -20689,7 +20972,8 @@ export default function CategoryWorkspace() {
                       </div>
                     </>
                   )}
-                </div>
+                  </div>
+                )}
 
                 <label className="settings-label">экспорт / импорт категории</label>
                 <div className="flex flex-wrap gap-2">
@@ -23514,9 +23798,6 @@ export default function CategoryWorkspace() {
 
         {showSearch && (
           <SiteSearchPopup
-            visibleCategories={visibleCategories}
-            visibleCategoriesById={visibleCategoriesById}
-            messagesByCategory={messagesByCategory}
             onClose={() => setShowSearch(false)}
             onOpenResult={handleSearchOpenCategory}
             onOpenDictionarySearch={openDictionaryGlobalSearch}
@@ -25132,241 +25413,64 @@ function renderSchedulePreviewChange(change: SchedulePreviewChange) {
   );
 }
 
-function schedulePayloadToPlainText(payload: SchedulePayload, title = "Расписание"): string {
-  const normalized = normalizeSchedulePayload(payload);
-  const eventText = normalized.events
-    .map((event) =>
-      [
-        event.title,
-        event.description,
-        event.date,
-        event.start,
-        event.end,
-        event.category,
-        event.type,
-        event.status,
-      ]
-        .filter(Boolean)
-        .join(" ")
-    )
-    .join("\n");
-  const goalText = normalized.goals
-    .map((goal) =>
-      [
-        goal.title,
-        goal.category,
-        goal.period,
-        goal.targetCount ? `${goal.targetCount} раз` : "",
-        goal.targetMinutes ? `${goal.targetMinutes} минут` : "",
-      ]
-        .filter(Boolean)
-        .join(" ")
-    )
-    .join("\n");
-  const taskBaseText = (normalized.taskBase ?? [])
-    .map((task) =>
-      [
-        task.title,
-        task.description,
-        task.details,
-        task.category,
-        task.type,
-        task.goalPeriod,
-        task.goalCount ? `${task.goalCount} раз` : "",
-        task.goalMinutes ? `${task.goalMinutes} минут` : "",
-        task.priority,
-      ]
-        .filter(Boolean)
-        .join(" ")
-    )
-    .join("\n");
-
-  return [title, eventText, goalText, taskBaseText].filter(Boolean).join("\n");
-}
-
-type SiteSearchPlainTextCacheEntry = {
-  signature: string;
-  value: string;
-};
-
-function ruleDocumentToPlainText(document: RuleDocument): string {
-  return [
-    document.title,
-    document.tags.join(" "),
-    ...document.blocks.map(getRuleBlockText),
-    ...document.annotations.flatMap((annotation) => [
-      annotation.targetText,
-      annotation.translation,
-      annotation.explanation,
-      annotation.example,
-    ]),
-    ...document.glossary.flatMap((entry) => [
-      entry.term,
-      entry.translation,
-      entry.explanation,
-      ...entry.examples,
-      ...entry.tags,
-    ]),
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
-
-const siteSearchCategoryPlainContentCache = new Map<
-  string,
-  SiteSearchPlainTextCacheEntry
->();
-const siteSearchMessagePlainContentCache = new Map<
-  string,
-  SiteSearchPlainTextCacheEntry
->();
-
-function getSiteSearchCategoryPlainContent(category: CategoryRow): string {
-  const signature = `${category.format}\n${category.updated_at}\n${category.content}`;
-  const cached = siteSearchCategoryPlainContentCache.get(category.id);
-  if (cached?.signature === signature) {
-    return cached.value;
-  }
-
-  const value =
-    category.format === "continuous"
-      ? (() => {
-          const document = parseContinuousContent(category.content);
-          const dictionaryText = document.dictionaries
-            .map((dictionary) =>
-              `${dictionary.title}\n${dictionaryPayloadToPlainText(dictionary)}`
-            )
-            .join("\n");
-          const scheduleText = document.schedules
-            .map((schedule) => schedulePayloadToPlainText(schedule, schedule.title))
-            .join("\n");
-          const ruleText = document.rules.map(ruleDocumentToPlainText).join("\n");
-          return `${richTextToPlainText(document.text)}\n${dictionaryText}\n${scheduleText}\n${ruleText}`.trim();
-        })()
-      : richTextToPlainText(category.content);
-
-  siteSearchCategoryPlainContentCache.set(category.id, { signature, value });
-  return value;
-}
-
-function getSiteSearchMessagePlainContent(message: MessageRow): string {
-  const signature = `${message.updated_at}\n${message.content}`;
-  const cached = siteSearchMessagePlainContentCache.get(message.id);
-  if (cached?.signature === signature) {
-    return cached.value;
-  }
-
-  const checklistPayload = parseMessageChecklistContent(message.content);
-  const dictionaryPayload = parseMessageDictionaryContent(message.content);
-  const schedulePayload = parseMessageScheduleContent(message.content);
-  const ruleDocument = parseMessageRuleContent(message.content);
-  const value = checklistPayload
-    ? ""
-    : dictionaryPayload
-      ? dictionaryPayloadToPlainText(dictionaryPayload)
-      : schedulePayload
-        ? schedulePayloadToPlainText(schedulePayload, message.title)
-        : ruleDocument
-          ? ruleDocumentToPlainText(ruleDocument)
-      : richTextToPlainText(message.content);
-
-  siteSearchMessagePlainContentCache.set(message.id, { signature, value });
-  return value;
-}
-
 function SiteSearchPopup({
-  visibleCategories,
-  visibleCategoriesById,
-  messagesByCategory,
   onClose,
   onOpenResult,
   onOpenDictionarySearch,
 }: {
-  visibleCategories: CategoryRow[];
-  visibleCategoriesById: Map<string, CategoryRow>;
-  messagesByCategory: Record<string, MessageRow[]>;
   onClose: () => void;
   onOpenResult: (result: SearchResult) => void;
   onOpenDictionarySearch: () => void;
 }) {
   const [searchQuery, setSearchQuery] = useState("");
   const deferredSearchQuery = useDeferredValue(searchQuery);
-  const normalizedSearchQuery = deferredSearchQuery.trim().toLowerCase();
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
 
-  const searchResults = useMemo(() => {
-    if (!normalizedSearchQuery) {
-      return [] as SearchResult[];
+  useEffect(() => {
+    const query = deferredSearchQuery.trim();
+    if (!query) {
+      return;
     }
 
-    const resultLimit = 45;
-    const results: SearchResult[] = [];
-
-    for (const category of visibleCategories) {
-      const plainContent = getSiteSearchCategoryPlainContent(category);
-      const text =
-        `${category.title} ${category.description} ${category.tag} ${plainContent}`.toLowerCase();
-      if (!text.includes(normalizedSearchQuery)) {
-        continue;
-      }
-
-      results.push({
-        id: `category-${category.id}`,
-        kind: "category",
-        categoryId: category.id,
-        title: category.title,
-        path: buildCategoryPath(visibleCategories, category.id)
-          .map((part) => part.title)
-          .join(" / "),
-        preview: makePreview(
-          `${category.description || plainContent || category.tag}`,
-          normalizedSearchQuery
-        ),
-      });
-
-      if (results.length >= resultLimit) {
-        return results;
-      }
-    }
-
-    messageSearch: for (const messages of Object.values(messagesByCategory)) {
-      for (const message of messages) {
-        if (!visibleCategoriesById.has(message.category_id)) {
-          continue;
-        }
-
-        const plainContent = getSiteSearchMessagePlainContent(message);
-        const messageText = `${message.title} ${plainContent}`.toLowerCase();
-        if (!messageText.includes(normalizedSearchQuery)) {
-          continue;
-        }
-
-        const titleFromMessage = message.title || "Новый блок";
-
-        results.push({
-          id: `message-${message.id}`,
-          kind: "message",
-          categoryId: message.category_id,
-          messageId: message.id,
-          title: titleFromMessage,
-          path: `${buildCategoryPath(visibleCategories, message.category_id)
-            .map((part) => part.title)
-            .join(" / ")} / сообщение`,
-          preview: makePreview(plainContent, normalizedSearchQuery),
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => {
+      setIsSearching(true);
+      setSearchError(null);
+      void fetch(`/api/workspace/search?q=${encodeURIComponent(query)}`, {
+        cache: "no-store",
+        credentials: "same-origin",
+        signal: controller.signal,
+      })
+        .then(async (response) => {
+          const payload = (await response.json()) as {
+            data?: SearchResult[];
+            error?: string;
+          };
+          if (!response.ok || !payload.data) {
+            throw new Error(payload.error ?? "Не удалось выполнить поиск.");
+          }
+          setSearchResults(payload.data);
+        })
+        .catch((error) => {
+          if (!isAbortError(error)) {
+            setSearchError(toErrorMessage(error, "Не удалось выполнить поиск."));
+            setSearchResults([]);
+          }
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) {
+            setIsSearching(false);
+          }
         });
+    }, 250);
 
-        if (results.length >= resultLimit) {
-          break messageSearch;
-        }
-      }
-    }
-
-    return results;
-  }, [
-    messagesByCategory,
-    normalizedSearchQuery,
-    visibleCategories,
-    visibleCategoriesById,
-  ]);
+    return () => {
+      window.clearTimeout(timeoutId);
+      controller.abort();
+    };
+  }, [deferredSearchQuery]);
 
   return (
     <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/35 p-3">
@@ -25405,13 +25509,30 @@ function SiteSearchPopup({
         <input
           autoFocus
           value={searchQuery}
-          onChange={(event) => setSearchQuery(event.target.value)}
+          onChange={(event) => {
+            const value = event.target.value;
+            setSearchQuery(value);
+            if (!value.trim()) {
+              setSearchResults([]);
+              setSearchError(null);
+              setIsSearching(false);
+            }
+          }}
           placeholder="Введи текст для поиска..."
           className="w-full border-2 border-[#4a4a4a] bg-[#efefef] px-3 py-2 text-base text-[#1a1a1a] outline-none focus:border-[#355faa]"
         />
 
         <div className="mt-3 max-h-[22rem] space-y-2 overflow-y-auto pr-1">
-          {searchResults.length === 0 && searchQuery.trim().length > 0 && (
+          {isSearching && (
+            <p className="px-2 text-sm text-[#2e2e2e]">Ищу...</p>
+          )}
+          {searchError && (
+            <p className="px-2 text-sm text-[#6a1313]">{searchError}</p>
+          )}
+          {!isSearching &&
+            !searchError &&
+            searchResults.length === 0 &&
+            searchQuery.trim().length > 0 && (
             <p className="px-2 text-sm text-[#2e2e2e]">Ничего не найдено.</p>
           )}
 
@@ -30000,33 +30121,6 @@ function escapeDictionaryTableCell(value: string): string {
   return `"${value.replace(/"/g, "\"\"")}"`;
 }
 
-function dictionaryPayloadToPlainText(payload: MessageDictionaryPayload): string {
-  const normalized = normalizeMessageDictionaryPayload(payload);
-  return [
-    normalized.description,
-    normalized.tags.join(" "),
-    normalized.entries
-      .map((entry) =>
-        [
-          getDictionarySideColumns(normalized.columns, "side1")
-            .map((column) => getDictionaryEntryFieldText(entry, column.id))
-            .filter(Boolean)
-            .join(" / "),
-          "-",
-          getDictionarySideColumns(normalized.columns, "side2")
-            .map((column) => getDictionaryEntryFieldText(entry, column.id))
-            .filter(Boolean)
-            .join(" / "),
-        ]
-          .filter(Boolean)
-          .join(" ")
-      )
-      .join("\n"),
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
-
 function oppositeDictionaryPromptSide(
   side: DictionaryPromptSide
 ): DictionaryPromptSide {
@@ -30940,26 +31034,6 @@ function reorderMessages(
     ...message,
     position: index,
   }));
-}
-
-function makePreview(content: string, query: string): string {
-  const plainText = richTextToPlainText(content);
-  const trimmed = plainText.trim();
-  if (!trimmed) {
-    return "(пустой текст)";
-  }
-
-  const lower = trimmed.toLowerCase();
-  const index = lower.indexOf(query);
-  if (index < 0) {
-    return trimmed.length > 90 ? `${trimmed.slice(0, 90)}...` : trimmed;
-  }
-
-  const start = Math.max(0, index - 24);
-  const end = Math.min(trimmed.length, index + query.length + 40);
-  const segment = trimmed.slice(start, end);
-
-  return `${start > 0 ? "..." : ""}${segment}${end < trimmed.length ? "..." : ""}`;
 }
 
 function makeDictionaryEditorCellKey(

@@ -14,8 +14,10 @@ import { toErrorMessage } from "@/lib/errors";
 import type { CategoryTreeDocument } from "@/lib/category-transfer";
 import type {
   CategoryAccessRole,
+  CategoryDetailPayload,
   CategoryFormat,
   CategoryRow,
+  CategorySummaryRow,
   CategoryType,
   MessageRow,
   MessageType,
@@ -24,6 +26,8 @@ import { collectDescendantIds } from "@/lib/categories";
 
 const CATEGORY_COLUMNS =
   "id,workspace_id,parent_id,title,content,description,tag,format,category_type,position,created_at,updated_at";
+const CATEGORY_SUMMARY_COLUMNS =
+  "id,workspace_id,parent_id,title,description,tag,format,category_type,position,created_at,updated_at";
 const MESSAGE_COLUMNS =
   "id,workspace_id,category_id,title,content,position,message_type,created_at,updated_at";
 
@@ -65,6 +69,8 @@ type MessagePatch = {
 export type CategoryStore = {
   source: "postgres";
   list(): Promise<CategoryRow[]>;
+  listSummaries(): Promise<CategorySummaryRow[]>;
+  getDetail(id: string): Promise<CategoryDetailPayload>;
   create(input: CategoryCreate): Promise<CategoryRow>;
   update(id: string, patch: CategoryPatch): Promise<CategoryRow>;
   remove(id: string): Promise<void>;
@@ -121,36 +127,9 @@ type MessageAccess = {
   categoryAccess: CategoryAccess;
 };
 
-let publicMembersMountParentColumnPromise: Promise<boolean> | null = null;
-
-async function hasPublicMembersMountParentColumn(executor: SqlExecutor): Promise<boolean> {
-  if (publicMembersMountParentColumnPromise) {
-    return publicMembersMountParentColumnPromise;
-  }
-
-  const hasColumn = await executor
-    .query<{ exists: boolean }>(
-      `
-        select exists (
-          select 1
-          from information_schema.columns
-          where table_schema = 'public'
-            and table_name = 'public_category_members'
-            and column_name = 'mount_parent_category_id'
-        ) as exists
-      `
-    )
-    .then(({ rows }) => Boolean(rows[0]?.exists))
-    .catch(() => false);
-
-  if (hasColumn) {
-    publicMembersMountParentColumnPromise = Promise.resolve(true);
-  }
-
-  return hasColumn;
-}
-
-function hasMainRootCategory(categories: CategoryRow[]): boolean {
+function hasMainRootCategory(
+  categories: Array<Pick<CategoryRow, "parent_id" | "title">>
+): boolean {
   return categories.some(
     (node) =>
       node.parent_id === null &&
@@ -178,6 +157,22 @@ function buildMainRootRow(workspaceId: string, position: number): CategoryRow {
 }
 
 function normalizeCategory(raw: CategoryRow): CategoryRow {
+  return {
+    ...raw,
+    created_at: normalizeTimestamp(raw.created_at),
+    updated_at: normalizeTimestamp(raw.updated_at),
+    description: raw.description ?? "",
+    tag: raw.tag ?? "",
+    format: raw.format ?? "continuous",
+    category_type: raw.category_type ?? "learning",
+    visibility: raw.visibility ?? "local",
+    access_role: raw.access_role ?? "owner",
+    public_root_id: raw.public_root_id ?? null,
+    public_owner_user_id: raw.public_owner_user_id ?? null,
+  };
+}
+
+function normalizeCategorySummary(raw: CategorySummaryRow): CategorySummaryRow {
   return {
     ...raw,
     created_at: normalizeTimestamp(raw.created_at),
@@ -356,13 +351,26 @@ async function ensureWorkspaceIdForPostgres(
   executor: SqlExecutor,
   ownerUserId: string
 ): Promise<string> {
+  const existing = await executor.query<{ id: string }>(
+    `
+      select id
+      from public.workspaces
+      where owner_user_id = $1::uuid and slug = $2::text
+      limit 1
+    `,
+    [ownerUserId, WORKSPACE_SLUG]
+  );
+  if (existing.rows[0]?.id) {
+    return existing.rows[0].id;
+  }
+
   const title = WORKSPACE_SLUG === MAIN_CATEGORY_TITLE ? "Main workspace" : WORKSPACE_SLUG;
   const { rows } = await executor.query<{ id: string }>(
     `
       insert into public.workspaces (owner_user_id, slug, title)
       values ($1::uuid, $2::text, $3::text)
       on conflict (owner_user_id, slug)
-      do update set title = excluded.title
+      do update set title = public.workspaces.title
       returning id
     `,
     [ownerUserId, WORKSPACE_SLUG, title]
@@ -391,6 +399,51 @@ async function fetchWorkspaceCategoriesForPostgres(
   );
 
   return rows.map(normalizeCategory);
+}
+
+async function fetchWorkspaceCategorySummariesForPostgres(
+  executor: SqlExecutor,
+  workspaceId: string
+): Promise<CategorySummaryRow[]> {
+  const { rows } = await executor.query<CategorySummaryRow>(
+    `
+      select ${CATEGORY_SUMMARY_COLUMNS}
+      from public.categories
+      where workspace_id = $1::uuid
+      order by position asc, created_at asc
+    `,
+    [workspaceId]
+  );
+
+  return rows.map(normalizeCategorySummary);
+}
+
+async function fetchWorkspaceCategorySummariesBatchForPostgres(
+  executor: SqlExecutor,
+  workspaceIds: string[]
+): Promise<Map<string, CategorySummaryRow[]>> {
+  const byWorkspace = new Map<string, CategorySummaryRow[]>();
+  if (workspaceIds.length === 0) {
+    return byWorkspace;
+  }
+
+  const { rows } = await executor.query<CategorySummaryRow>(
+    `
+      select ${CATEGORY_SUMMARY_COLUMNS}
+      from public.categories
+      where workspace_id = any($1::uuid[])
+      order by workspace_id asc, position asc, created_at asc
+    `,
+    [workspaceIds]
+  );
+
+  for (const row of rows.map(normalizeCategorySummary)) {
+    const existing = byWorkspace.get(row.workspace_id) ?? [];
+    existing.push(row);
+    byWorkspace.set(row.workspace_id, existing);
+  }
+
+  return byWorkspace;
 }
 
 async function fetchCategoryMessagesForPostgres(
@@ -507,8 +560,8 @@ async function ensureMainRootForPostgres(
   return fetchWorkspaceCategoriesForPostgres(executor, workspaceId);
 }
 
-function markCategoryAccess(
-  category: CategoryRow,
+function markCategoryAccess<T extends CategoryRow | CategorySummaryRow>(
+  category: T,
   access: {
     visibility: "local" | "public";
     role: CategoryAccessRole;
@@ -516,8 +569,8 @@ function markCategoryAccess(
     publicOwnerUserId: string | null;
     displayParentId?: string | null;
   }
-): CategoryRow {
-  return normalizeCategory({
+): T {
+  const marked = {
     ...category,
     parent_id:
       typeof access.displayParentId === "undefined"
@@ -527,10 +580,19 @@ function markCategoryAccess(
     access_role: access.role,
     public_root_id: access.publicRootCategoryId,
     public_owner_user_id: access.publicOwnerUserId,
-  });
+  };
+
+  return (
+    "content" in marked
+      ? normalizeCategory(marked as CategoryRow)
+      : normalizeCategorySummary(marked as CategorySummaryRow)
+  ) as T;
 }
 
-function collectSubtreeIds(categories: CategoryRow[], rootId: string): Set<string> {
+function collectSubtreeIds(
+  categories: Array<Pick<CategoryRow, "id" | "parent_id">>,
+  rootId: string
+): Set<string> {
   return new Set([
     rootId,
     ...collectDescendantIds(
@@ -566,10 +628,6 @@ async function fetchMemberPublicRootsForPostgres(
   executor: SqlExecutor,
   appUserId: string
 ): Promise<PublicRootRecord[]> {
-  const mountParentSelect = (await hasPublicMembersMountParentColumn(executor))
-    ? "pcm.mount_parent_category_id"
-    : "null::uuid as mount_parent_category_id";
-
   const { rows } = await executor.query<PublicRootRecord>(
     `
       select
@@ -578,7 +636,7 @@ async function fetchMemberPublicRootsForPostgres(
         pcr.workspace_id,
         pcr.root_category_id,
         pcm.role,
-        ${mountParentSelect}
+        pcm.mount_parent_category_id
       from public.public_category_members pcm
       join public.public_category_roots pcr
         on pcr.id = pcm.public_root_id
@@ -591,11 +649,11 @@ async function fetchMemberPublicRootsForPostgres(
   return rows;
 }
 
-function annotateOwnedCategories(
-  categories: CategoryRow[],
+function annotateOwnedCategories<T extends CategoryRow | CategorySummaryRow>(
+  categories: T[],
   publicRoots: PublicRootRecord[],
   ownerUserId: string
-): CategoryRow[] {
+): T[] {
   const annotated = categories.map((category) =>
     markCategoryAccess(category, {
       visibility: "local",
@@ -709,7 +767,100 @@ async function fetchAccessibleCategoriesForPostgres(
   return visible.sort(sortCategoriesForStore);
 }
 
-function sortCategoriesForStore(a: CategoryRow, b: CategoryRow): number {
+async function fetchAccessibleCategorySummariesForPostgres(
+  executor: SqlExecutor,
+  appUserId: string,
+  ownWorkspaceId: string
+): Promise<CategorySummaryRow[]> {
+  let ownedCategories = await fetchWorkspaceCategorySummariesForPostgres(
+    executor,
+    ownWorkspaceId
+  );
+
+  if (ownedCategories.length === 0) {
+    await seedWorkspaceIfEmptyForPostgres(executor, ownWorkspaceId);
+    ownedCategories = await fetchWorkspaceCategorySummariesForPostgres(
+      executor,
+      ownWorkspaceId
+    );
+  }
+
+  if (!hasMainRootCategory(ownedCategories)) {
+    const maxRootPosition = ownedCategories
+      .filter((node) => node.parent_id === null)
+      .reduce((max, node) => Math.max(max, node.position), -1);
+    await insertMainRootForPostgres(executor, ownWorkspaceId, maxRootPosition + 1);
+    ownedCategories = await fetchWorkspaceCategorySummariesForPostgres(
+      executor,
+      ownWorkspaceId
+    );
+  }
+
+  const [ownedPublicRoots, memberPublicRoots] = await Promise.all([
+    fetchOwnedPublicRootsForPostgres(executor, appUserId, ownWorkspaceId),
+    fetchMemberPublicRootsForPostgres(executor, appUserId),
+  ]);
+  const visible = annotateOwnedCategories(
+    ownedCategories,
+    ownedPublicRoots,
+    appUserId
+  );
+  const localMainRootId =
+    ownedCategories.find(
+      (category) =>
+        category.parent_id === null &&
+        category.title.trim().toLowerCase() === MAIN_CATEGORY_TITLE
+    )?.id ?? null;
+  const localCategoryIdSet = new Set(ownedCategories.map((category) => category.id));
+  const memberWorkspaceIds = Array.from(
+    new Set(memberPublicRoots.map((root) => root.workspace_id))
+  );
+  const workspaceCategories =
+    await fetchWorkspaceCategorySummariesBatchForPostgres(
+      executor,
+      memberWorkspaceIds
+    );
+
+  for (const publicRoot of memberPublicRoots) {
+    const sharedCategories = workspaceCategories.get(publicRoot.workspace_id) ?? [];
+    const subtreeIds = collectSubtreeIds(
+      sharedCategories,
+      publicRoot.root_category_id
+    );
+    for (const category of sharedCategories) {
+      if (!subtreeIds.has(category.id)) {
+        continue;
+      }
+
+      const displayParentId =
+        category.id === publicRoot.root_category_id
+          ? publicRoot.mount_parent_category_id &&
+            localCategoryIdSet.has(publicRoot.mount_parent_category_id)
+            ? publicRoot.mount_parent_category_id
+            : localMainRootId
+          : !category.parent_id || !subtreeIds.has(category.parent_id)
+            ? null
+            : category.parent_id;
+
+      visible.push(
+        markCategoryAccess(category, {
+          visibility: "public",
+          role: publicRoot.role === "editor" ? "editor" : "viewer",
+          publicRootCategoryId: publicRoot.root_category_id,
+          publicOwnerUserId: publicRoot.owner_user_id,
+          displayParentId,
+        })
+      );
+    }
+  }
+
+  return visible.sort(sortCategoriesForStore);
+}
+
+function sortCategoriesForStore(
+  a: Pick<CategoryRow, "position" | "created_at">,
+  b: Pick<CategoryRow, "position" | "created_at">
+): number {
   if (a.position === b.position) {
     return a.created_at.localeCompare(b.created_at);
   }
@@ -765,22 +916,29 @@ async function resolveCategoryAccessForPostgres(
   }
 
   if (category.workspace_id === ownWorkspaceId) {
-    const ownedPublicRoots = await fetchOwnedPublicRootsForPostgres(
-      executor,
-      appUserId,
-      ownWorkspaceId
+    const { rows: ownedRootRows } = await executor.query<PublicRootRecord>(
+      `
+        with recursive ancestors as (
+          select id, parent_id
+          from public.categories
+          where workspace_id = $1::uuid and id = $2::uuid
+          union all
+          select parent.id, parent.parent_id
+          from public.categories parent
+          join ancestors child on child.parent_id = parent.id
+          where parent.workspace_id = $1::uuid
+        )
+        select pcr.id, pcr.owner_user_id, pcr.workspace_id, pcr.root_category_id
+        from public.public_category_roots pcr
+        join ancestors on ancestors.id = pcr.root_category_id
+        where pcr.owner_user_id = $3::uuid
+          and pcr.workspace_id = $1::uuid
+        limit 1
+      `,
+      [ownWorkspaceId, category.id, appUserId]
     );
-    const ownCategories = await fetchWorkspaceCategoriesForPostgres(
-      executor,
-      ownWorkspaceId
-    );
-
-    for (const publicRoot of ownedPublicRoots) {
-      const subtreeIds = collectSubtreeIds(ownCategories, publicRoot.root_category_id);
-      if (!subtreeIds.has(category.id)) {
-        continue;
-      }
-
+    const publicRoot = ownedRootRows[0];
+    if (publicRoot) {
       return {
         category: markCategoryAccess(category, {
           visibility: "public",
@@ -815,40 +973,47 @@ async function resolveCategoryAccessForPostgres(
     };
   }
 
-  const publicRoots = await fetchMemberPublicRootsForPostgres(executor, appUserId);
-  const matchingRoots = publicRoots.filter(
-    (root) => root.workspace_id === category.workspace_id
+  const { rows: memberRootRows } = await executor.query<
+    PublicRootRecord & { local_main_root_id: string | null }
+  >(
+    `
+      with recursive ancestors as (
+        select id, parent_id
+        from public.categories
+        where workspace_id = $1::uuid and id = $2::uuid
+        union all
+        select parent.id, parent.parent_id
+        from public.categories parent
+        join ancestors child on child.parent_id = parent.id
+        where parent.workspace_id = $1::uuid
+      )
+      select
+        pcr.id,
+        pcr.owner_user_id,
+        pcr.workspace_id,
+        pcr.root_category_id,
+        pcm.role,
+        pcm.mount_parent_category_id,
+        (
+          select local_main.id
+          from public.categories local_main
+          where local_main.workspace_id = $4::uuid
+            and local_main.parent_id is null
+            and lower(trim(local_main.title)) = $5::text
+          order by local_main.position asc, local_main.created_at asc
+          limit 1
+        ) as local_main_root_id
+      from public.public_category_members pcm
+      join public.public_category_roots pcr on pcr.id = pcm.public_root_id
+      join ancestors on ancestors.id = pcr.root_category_id
+      where pcm.app_user_id = $3::uuid
+        and pcr.workspace_id = $1::uuid
+      limit 1
+    `,
+    [category.workspace_id, category.id, appUserId, ownWorkspaceId, MAIN_CATEGORY_TITLE]
   );
-
-  if (matchingRoots.length === 0) {
-    throw new Error("Category not found.");
-  }
-
-  const workspaceCategories = await fetchWorkspaceCategoriesForPostgres(
-    executor,
-    category.workspace_id
-  );
-  const ownCategories = await fetchWorkspaceCategoriesForPostgres(
-    executor,
-    ownWorkspaceId
-  );
-  const localMainRootId =
-    ownCategories.find(
-      (node) =>
-        node.parent_id === null &&
-        node.title.trim().toLowerCase() === MAIN_CATEGORY_TITLE
-    )?.id ?? null;
-  const localCategoryIdSet = new Set(ownCategories.map((node) => node.id));
-
-  for (const publicRoot of matchingRoots) {
-    const subtreeIds = collectSubtreeIds(
-      workspaceCategories,
-      publicRoot.root_category_id
-    );
-    if (!subtreeIds.has(category.id)) {
-      continue;
-    }
-
+  const publicRoot = memberRootRows[0];
+  if (publicRoot) {
     return {
       category: markCategoryAccess(category, {
         visibility: "public",
@@ -857,13 +1022,8 @@ async function resolveCategoryAccessForPostgres(
         publicOwnerUserId: publicRoot.owner_user_id,
         displayParentId:
           category.id === publicRoot.root_category_id
-            ? publicRoot.mount_parent_category_id &&
-              localCategoryIdSet.has(publicRoot.mount_parent_category_id)
-              ? publicRoot.mount_parent_category_id
-              : localMainRootId
-            : !category.parent_id || !subtreeIds.has(category.parent_id)
-              ? null
-              : category.parent_id,
+            ? publicRoot.mount_parent_category_id ?? publicRoot.local_main_root_id
+            : category.parent_id,
       }),
       workspaceId: category.workspace_id,
       role: publicRoot.role === "editor" ? "editor" : "viewer",
@@ -1201,6 +1361,36 @@ function createPostgresStore(userId: string): CategoryStore {
     async list() {
       const workspaceId = await workspacePromise;
       return fetchAccessibleCategoriesForPostgres(pool, userId, workspaceId);
+    },
+    async listSummaries() {
+      const workspaceId = await workspacePromise;
+      return fetchAccessibleCategorySummariesForPostgres(
+        pool,
+        userId,
+        workspaceId
+      );
+    },
+    async getDetail(id) {
+      const workspaceId = await workspacePromise;
+      const access = await resolveCategoryAccessForPostgres(
+        pool,
+        userId,
+        workspaceId,
+        id
+      );
+      const messages =
+        access.category.format === "block"
+          ? await fetchCategoryMessagesForPostgres(
+              pool,
+              access.workspaceId,
+              access.category.id
+            )
+          : [];
+
+      return {
+        category: access.category,
+        messages,
+      };
     },
     async create(input) {
       const ownWorkspaceId = await workspacePromise;

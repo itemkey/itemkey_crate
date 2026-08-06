@@ -17,6 +17,8 @@ export type CategoryRow = {
   public_owner_user_id?: string | null;
 };
 
+export type CategorySummaryRow = Omit<CategoryRow, "content">;
+
 export type CategoryFormat = "block" | "continuous";
 
 export type CategoryType = "learning";
@@ -39,6 +41,11 @@ export type MessageRow = {
   updated_at: string;
 };
 
+export type CategoryDetailPayload = {
+  category: CategoryRow;
+  messages: MessageRow[];
+};
+
 export type WorkspaceRow = {
   id: string;
   owner_user_id: string;
@@ -57,6 +64,28 @@ export type ProjectRow = {
   position: number;
   created_at: string;
   updated_at: string;
+};
+
+export type WorkspaceShellData = {
+  authUser: {
+    id: string;
+    email: string | null;
+    emailVerifiedAt: string | null;
+  };
+  account: {
+    appUserId: string;
+    email: string | null;
+    emailVerifiedAt: string | null;
+    userId: string | null;
+    userIdChangedAt: string | null;
+    nickname: string;
+    profileDescription: string;
+    avatarUrl: string | null;
+  };
+  categories: CategorySummaryRow[];
+  projects: ProjectRow[];
+  initialCategoryId: string | null;
+  source: "postgres";
 };
 
 export type AppUserRow = {

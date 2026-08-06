@@ -69,6 +69,7 @@ Optional:
 
 - `NEXT_PUBLIC_WORKSPACE_SLUG=main`
 - `PG_CONNECTION_TIMEOUT_MS`; `PG_QUERY_TIMEOUT_MS`, `PG_STATEMENT_TIMEOUT_MS`, `PG_LOCK_TIMEOUT_MS` (`0`/unset disables query limits)
+- `PG_POOL_MAX` (default `20`), `PG_POOL_MIN` (default `1`), `PG_IDLE_TIMEOUT_MS` (default `45000`), `PG_KEEPALIVE_INITIAL_DELAY_MS` (default `10000`)
 - `SESSION_TTL_DAYS` (default `30`)
 - `SESSION_HASH_PEPPER` (recommended in production)
 - `AUTH_SESSION_MAX_PER_USER` (default `5`)
@@ -89,7 +90,8 @@ See `.env.example`.
 
 1. Create PostgreSQL database.
 2. If this is a fresh setup, run `postgres/schema.sql`.
-3. If you already have production/local data, run `postgres/auth-upgrade.sql` instead.
+3. If you already have production/local data, run the relevant upgrade scripts instead.
+4. Before deploying the progressive `/crate` loader, apply `postgres/performance-upgrade.sql`. It is idempotent and does not delete user data.
 
 > `postgres/schema.sql` intentionally drops existing tables before recreate.
 > This fully resets all user data.

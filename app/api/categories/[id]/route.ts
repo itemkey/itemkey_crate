@@ -123,7 +123,7 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
     }
 
     const store = await getCategoryStore(user.id);
-    const categories = await store.list();
+    const categories = await store.listSummaries();
     const target = categories.find((node) => node.id === id);
 
     if (!target) {

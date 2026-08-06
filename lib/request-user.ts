@@ -14,8 +14,9 @@ export type RequestUser = {
   avatarUrl: string | null;
 };
 
-export async function getRequestUser(request: Request): Promise<RequestUser | null> {
-  const token = getSessionTokenFromRequest(request);
+export async function getRequestUserBySessionToken(
+  token: string | null | undefined
+): Promise<RequestUser | null> {
   if (!token) {
     return null;
   }
@@ -35,4 +36,9 @@ export async function getRequestUser(request: Request): Promise<RequestUser | nu
     profileDescription: appUser.profile_description,
     avatarUrl: appUser.avatar_url,
   };
+}
+
+export async function getRequestUser(request: Request): Promise<RequestUser | null> {
+  const token = getSessionTokenFromRequest(request);
+  return getRequestUserBySessionToken(token);
 }

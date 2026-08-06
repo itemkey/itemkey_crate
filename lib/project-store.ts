@@ -189,13 +189,26 @@ async function ensureWorkspaceIdForPostgres(
   executor: SqlExecutor,
   ownerUserId: string
 ): Promise<string> {
+  const existing = await executor.query<{ id: string }>(
+    `
+      select id
+      from public.workspaces
+      where owner_user_id = $1::uuid and slug = $2::text
+      limit 1
+    `,
+    [ownerUserId, WORKSPACE_SLUG]
+  );
+  if (existing.rows[0]?.id) {
+    return existing.rows[0].id;
+  }
+
   const title = WORKSPACE_SLUG === "main" ? "Main workspace" : WORKSPACE_SLUG;
   const { rows } = await executor.query<{ id: string }>(
     `
       insert into public.workspaces (owner_user_id, slug, title)
       values ($1::uuid, $2::text, $3::text)
       on conflict (owner_user_id, slug)
-      do update set title = excluded.title
+      do update set title = public.workspaces.title
       returning id
     `,
     [ownerUserId, WORKSPACE_SLUG, title]

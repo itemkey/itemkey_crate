@@ -2,16 +2,9 @@ import type { Metadata } from "next";
 import { Manrope } from "next/font/google";
 import "./globals.css";
 
-const modernMain = Manrope({
-  variable: "--font-main",
+const manrope = Manrope({
+  variable: "--font-manrope",
   subsets: ["latin", "cyrillic"],
-  weight: ["400", "500", "600", "700"],
-});
-
-const modernDisplay = Manrope({
-  variable: "--font-display",
-  subsets: ["latin", "cyrillic"],
-  weight: ["600", "700", "800"],
 });
 
 export const metadata: Metadata = {
@@ -27,7 +20,7 @@ export default function RootLayout({
   return (
     <html
       lang="ru"
-      className={`${modernMain.variable} ${modernDisplay.variable} h-full`}
+      className={`${manrope.variable} h-full`}
     >
       <body className="min-h-full flex flex-col">{children}</body>
     </html>

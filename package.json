@@ -10,6 +10,8 @@
     "public": "node scripts/start-public.mjs",
     "test:rule": "node --no-warnings --test lib/rule-document.test.ts",
     "test:analytics": "node --no-warnings --test lib/content-analytics.test.ts",
+    "test:workspace": "node --no-warnings --test lib/workspace-progressive.test.ts",
+    "analyze:crate": "node scripts/check-crate-bundle-budget.mjs",
     "lint": "eslint",
     "check:no-supabase": "node scripts/check-no-supabase.mjs"
   },

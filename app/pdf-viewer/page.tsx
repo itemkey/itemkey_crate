@@ -1,5 +1,7 @@
 "use client";
 
+import "./pdf-viewer.css";
+
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {

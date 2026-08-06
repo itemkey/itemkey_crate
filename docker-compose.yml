@@ -14,6 +14,10 @@ services:
       PG_QUERY_TIMEOUT_MS: ${PG_QUERY_TIMEOUT_MS:-0}
       PG_STATEMENT_TIMEOUT_MS: ${PG_STATEMENT_TIMEOUT_MS:-0}
       PG_LOCK_TIMEOUT_MS: ${PG_LOCK_TIMEOUT_MS:-0}
+      PG_POOL_MAX: ${PG_POOL_MAX:-20}
+      PG_POOL_MIN: ${PG_POOL_MIN:-1}
+      PG_IDLE_TIMEOUT_MS: ${PG_IDLE_TIMEOUT_MS:-45000}
+      PG_KEEPALIVE_INITIAL_DELAY_MS: ${PG_KEEPALIVE_INITIAL_DELAY_MS:-10000}
       APP_BASE_URL: ${APP_BASE_URL:?Set APP_BASE_URL in .env}
       NEXT_PUBLIC_WORKSPACE_SLUG: ${NEXT_PUBLIC_WORKSPACE_SLUG:-main}
       WORKSPACE_SLUG: ${WORKSPACE_SLUG:-main}
@@ -40,7 +44,7 @@ services:
     volumes:
       - media_data:/data/media
     healthcheck:
-      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/api/health/db').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
       interval: 30s
       timeout: 5s
       retries: 5

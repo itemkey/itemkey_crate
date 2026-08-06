@@ -20,8 +20,10 @@ export default function VerifyEmailScreen({ token }: VerifyEmailScreenProps) {
   const normalizedToken = token.trim();
   const hasStartedRef = useRef(false);
 
-  const [isBusy, setIsBusy] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [isBusy, setIsBusy] = useState(Boolean(normalizedToken));
+  const [error, setError] = useState<string | null>(
+    normalizedToken ? null : "В ссылке нет токена подтверждения."
+  );
   const [info, setInfo] = useState<string | null>(null);
 
   useEffect(() => {
@@ -32,8 +34,6 @@ export default function VerifyEmailScreen({ token }: VerifyEmailScreenProps) {
     hasStartedRef.current = true;
 
     if (!normalizedToken) {
-      setError("В ссылке нет токена подтверждения.");
-      setIsBusy(false);
       return;
     }
 
