@@ -1,13 +1,26 @@
+import styles from "@/components/crate-workspace.module.css";
+
 export default function CrateLoading() {
   return (
-    <main className="workspace-root flex w-full items-stretch p-0" aria-busy="true">
-      <div className="frame-shell relative flex h-full w-full flex-col overflow-hidden">
-        <header className="top-strip bevel-panel h-[4.7rem] flex-none animate-pulse" />
-        <div className="workspace-grid min-h-0 flex-1">
-          <aside className="project-panel bevel-panel animate-pulse" />
-          <aside className="category-panel bevel-panel animate-pulse" />
-          <section className="workspace-screen flex items-center justify-center p-6">
-            <p className="text-sm text-[#202020]">Подготавливаю рабочую область...</p>
+    <main className={styles.workspaceRoot} aria-busy="true">
+      <div className={styles.appShell}>
+        <header className={styles.appHeader}>
+          <div className={styles.brandLockup}>
+            <span className={styles.brandMark} aria-hidden="true">IK</span>
+            <span>ItemKey</span>
+          </div>
+        </header>
+        <div className={styles.workspaceLayout}>
+          <aside className={styles.sidebar} />
+          <section className={styles.editorPane}>
+            <div className={styles.contentHeader} />
+            <div className={styles.editorScroll}>
+              <div className={styles.stateCard} role="status">
+                <span className={styles.stateIcon} aria-hidden="true">…</span>
+                <h2>Готовим рабочее пространство</h2>
+                <p>Загружаем ваши разделы и последние материалы.</p>
+              </div>
+            </div>
           </section>
         </div>
       </div>

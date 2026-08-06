@@ -1,8 +1,8 @@
 @import "tailwindcss";
 
 :root {
-  --font-main: var(--font-manrope);
-  --font-display: var(--font-manrope);
+  --font-main: "Segoe UI Variable";
+  --font-display: "Segoe UI Variable";
   --bg-main: #8a8a8a;
   --panel: #9a9a9a;
   --panel-light: #bdbdbd;

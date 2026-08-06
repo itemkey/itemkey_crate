@@ -10,8 +10,11 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type FormEvent,
 } from "react";
+
+import styles from "@/components/crate-workspace.module.css";
 
 import type {
   CategoryDetailPayload,
@@ -180,59 +183,111 @@ function LoginScreen() {
   }
 
   return (
-    <main className="workspace-root flex w-full items-stretch p-0">
-      <div className="frame-shell relative flex h-full w-full items-center justify-center p-4">
-        <form className="popup-3d w-full max-w-xl p-5" onSubmit={submit}>
-          <h1 className="font-display text-5xl leading-none">Item Key</h1>
-          <div className="mt-4 flex gap-2">
-            <button type="button" className="mini-action" onClick={() => setMode("login")}>
-              вход
-            </button>
-            <button type="button" className="mini-action" onClick={() => setMode("register")}>
-              регистрация
-            </button>
-          </div>
-          {mode === "register" && (
-            <input
-              className="settings-input mt-4"
-              type="email"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              placeholder="Email"
-              autoComplete="email"
-            />
-          )}
-          <input
-            className="settings-input mt-3"
-            value={userId}
-            onChange={(event) => setUserId(event.target.value)}
-            placeholder="user-id"
-            autoComplete="username"
-          />
-          <input
-            className="settings-input mt-3"
-            type="password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            placeholder="Пароль"
-            autoComplete={mode === "login" ? "current-password" : "new-password"}
-          />
-          {mode === "register" && (
-            <input
-              className="settings-input mt-3"
-              type="password"
-              value={repeatPassword}
-              onChange={(event) => setRepeatPassword(event.target.value)}
-              placeholder="Повтори пароль"
-              autoComplete="new-password"
-            />
-          )}
-          <button type="submit" className="mini-action mt-4" disabled={busy}>
-            {busy ? "подожди..." : mode === "login" ? "войти" : "создать аккаунт"}
+    <main className={styles.authPage}>
+      <section className={styles.authCard} aria-labelledby="auth-title">
+        <div className={styles.brandLockup}>
+          <span className={styles.brandMark} aria-hidden="true">IK</span>
+          <span>ItemKey</span>
+        </div>
+
+        <div className={styles.authIntro}>
+          <p className={styles.eyebrow}>Личное пространство знаний</p>
+          <h1 id="auth-title">{mode === "login" ? "С возвращением" : "Создайте аккаунт"}</h1>
+          <p>
+            {mode === "login"
+              ? "Войдите, чтобы продолжить работу с проектами и заметками."
+              : "Соберите проекты, материалы и идеи в одном понятном месте."}
+          </p>
+        </div>
+
+        <div className={styles.authTabs} role="tablist" aria-label="Способ входа">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === "login"}
+            className={mode === "login" ? styles.authTabActive : styles.authTab}
+            onClick={() => setMode("login")}
+          >
+            Вход
           </button>
-          {message && <p className="mt-3 text-sm text-[#6a1313]">{message}</p>}
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === "register"}
+            className={mode === "register" ? styles.authTabActive : styles.authTab}
+            onClick={() => setMode("register")}
+          >
+            Регистрация
+          </button>
+        </div>
+
+        <form className={styles.authForm} onSubmit={submit}>
+          {mode === "register" && (
+            <label className={styles.field}>
+              <span>Email</span>
+              <input
+                className={styles.input}
+                type="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder="name@example.com"
+                autoComplete="email"
+              />
+            </label>
+          )}
+          <label className={styles.field}>
+            <span>Имя пользователя</span>
+            <input
+              className={styles.input}
+              value={userId}
+              onChange={(event) => setUserId(event.target.value)}
+              placeholder="Ваш user-id"
+              autoComplete="username"
+            />
+          </label>
+          <label className={styles.field}>
+            <span>Пароль</span>
+            <input
+              className={styles.input}
+              type="password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              placeholder="Введите пароль"
+              autoComplete={mode === "login" ? "current-password" : "new-password"}
+            />
+          </label>
+          {mode === "register" && (
+            <label className={styles.field}>
+              <span>Повторите пароль</span>
+              <input
+                className={styles.input}
+                type="password"
+                value={repeatPassword}
+                onChange={(event) => setRepeatPassword(event.target.value)}
+                placeholder="Повторите пароль"
+                autoComplete="new-password"
+              />
+            </label>
+          )}
+          <button type="submit" className={styles.primaryButton} disabled={busy}>
+            {busy ? "Подождите…" : mode === "login" ? "Войти в ItemKey" : "Создать аккаунт"}
+          </button>
+          {mode === "login" && (
+            <a className={styles.authLink} href="/forgot-password">Забыли пароль?</a>
+          )}
+          {message && <p className={styles.formMessage} role="alert">{message}</p>}
         </form>
-      </div>
+      </section>
+
+      <aside className={styles.authAside} aria-label="Возможности ItemKey">
+        <p className={styles.authAsideKicker}>Всё важное — в структуре</p>
+        <h2>От идеи до готового проекта без хаоса.</h2>
+        <ul>
+          <li><span aria-hidden="true">01</span> Собирайте материалы по разделам</li>
+          <li><span aria-hidden="true">02</span> Находите нужное через общий поиск</li>
+          <li><span aria-hidden="true">03</span> Возвращайтесь к работе с любого устройства</li>
+        </ul>
+      </aside>
     </main>
   );
 }
@@ -248,6 +303,14 @@ function SearchPopup({
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
 
   useEffect(() => {
     const normalized = query.trim();
@@ -283,43 +346,58 @@ function SearchPopup({
   }, [query]);
 
   return (
-    <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 p-3">
-      <div className="search-modal popup-3d w-full max-w-3xl p-4">
-        <div className="flex items-center justify-between gap-2">
-          <h2 className="font-display text-4xl">Search</h2>
-          <button type="button" className="menu-action" onClick={onClose}>x</button>
+    <div className={styles.modalBackdrop} onMouseDown={onClose}>
+      <div
+        className={styles.searchModal}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="search-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className={styles.modalHeader}>
+          <div>
+            <p className={styles.eyebrow}>Всё рабочее пространство</p>
+            <h2 id="search-title">Поиск по базе</h2>
+          </div>
+          <button type="button" className={styles.iconButton} onClick={onClose} aria-label="Закрыть поиск">×</button>
         </div>
-        <input
-          autoFocus
-          className="settings-input mt-3"
-          value={query}
-          onChange={(event) => {
-            const value = event.target.value;
-            setQuery(value);
-            if (!value.trim()) {
-              setResults([]);
-              setLoading(false);
-              setError(null);
-            }
-          }}
-          placeholder="Что найти?"
-        />
-        <div className="mt-3 max-h-[24rem] space-y-2 overflow-auto">
-          {loading && <p className="text-sm">Ищу...</p>}
-          {error && <p className="text-sm text-[#6a1313]">{error}</p>}
+        <label className={styles.searchField}>
+          <span className={styles.searchGlyph} aria-hidden="true">⌕</span>
+          <input
+            autoFocus
+            value={query}
+            onChange={(event) => {
+              const value = event.target.value;
+              setQuery(value);
+              if (!value.trim()) {
+                setResults([]);
+                setLoading(false);
+                setError(null);
+              }
+            }}
+            placeholder="Введите название или текст заметки"
+            aria-label="Поисковый запрос"
+          />
+        </label>
+        <div className={styles.searchResults} aria-live="polite">
+          {loading && <p className={styles.searchStatus}>Ищем совпадения…</p>}
+          {error && <p className={styles.searchError}>{error}</p>}
+          {!query.trim() && (
+            <p className={styles.searchStatus}>Начните вводить запрос — результаты появятся здесь.</p>
+          )}
           {!loading && !error && query.trim() && results.length === 0 && (
-            <p className="text-sm">Ничего не найдено.</p>
+            <p className={styles.searchStatus}>Ничего не найдено. Попробуйте изменить запрос.</p>
           )}
           {results.map((result) => (
             <button
               key={result.id}
               type="button"
-              className="search-item w-full px-3 py-2 text-left"
+              className={styles.searchResult}
               onClick={() => onOpen(result)}
             >
+              <span className={styles.searchResultPath}>{result.path}</span>
               <strong>{result.title}</strong>
-              <p className="text-xs">{result.path}</p>
-              <p className="text-sm">{result.preview}</p>
+              <span>{result.preview}</span>
             </button>
           ))}
         </div>
@@ -349,6 +427,7 @@ export default function CrateWorkspace({
   const [detailRetry, setDetailRetry] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
   const [showSearch, setShowSearch] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const detailCacheRef = useRef(new Map<string, CategoryDetailPayload>());
   const detailPromisesRef = useRef(new Map<string, Promise<CategoryDetailPayload>>());
@@ -532,14 +611,23 @@ export default function CrateWorkspace({
   if (!initialShellData) return <LoginScreen />;
   if (showAdvanced) {
     return (
-      <AdvancedWorkspace
-        initialShellData={{
-          ...initialShellData,
-          categories,
-          initialCategoryId: currentId,
-        }}
-        initialDetailPromise={null}
-      />
+      <div className={styles.advancedShell}>
+        <button
+          type="button"
+          className={styles.simpleModeButton}
+          onClick={() => setShowAdvanced(false)}
+        >
+          ← Простой режим
+        </button>
+        <AdvancedWorkspace
+          initialShellData={{
+            ...initialShellData,
+            categories,
+            initialCategoryId: currentId,
+          }}
+          initialDetailPromise={null}
+        />
+      </div>
     );
   }
 
@@ -679,36 +767,57 @@ export default function CrateWorkspace({
           const hasChildren = categories.some((row) => row.parent_id === category.id);
           const isExpanded = expandedCategoryIds.has(category.id);
           return (
-        <div key={category.id}>
-          <button
-            type="button"
-            className={`sidebar-item w-full text-left ${currentId === category.id ? "sidebar-item-active" : ""}`}
-            style={{ paddingLeft: `${10 + depth * 14}px` }}
-            onClick={() => {
-              setCurrentId(category.id);
-              if (hasChildren) {
-                setExpandedCategoryIds((previous) => {
-                  const next = new Set(previous);
-                  next.add(category.id);
-                  return next;
-                });
-              }
-            }}
-            onMouseEnter={() => prefetchDetail(category.id)}
-            onFocus={() => prefetchDetail(category.id)}
-          >
-            {hasChildren ? (isExpanded ? "▾ " : "▸ ") : ""}
-            {category.visibility === "public" ? "◈ " : ""}{category.title}
-          </button>
-          {isExpanded && renderTree(category.id, depth + 1)}
-        </div>
+            <div key={category.id}>
+              <div
+                className={`${styles.treeRow} ${currentId === category.id ? styles.treeRowActive : ""}`}
+                style={{ "--tree-depth": depth } as CSSProperties}
+              >
+                {hasChildren ? (
+                  <button
+                    type="button"
+                    className={styles.treeToggle}
+                    aria-expanded={isExpanded}
+                    aria-label={`${isExpanded ? "Свернуть" : "Развернуть"} раздел «${category.title}»`}
+                    onClick={() => {
+                      setExpandedCategoryIds((previous) => {
+                        const next = new Set(previous);
+                        if (next.has(category.id)) next.delete(category.id);
+                        else next.add(category.id);
+                        return next;
+                      });
+                    }}
+                  >
+                    <span aria-hidden="true">{isExpanded ? "⌄" : "›"}</span>
+                  </button>
+                ) : (
+                  <span className={styles.treeToggleSpacer} aria-hidden="true" />
+                )}
+                <button
+                  type="button"
+                  className={styles.treeItem}
+                  aria-current={currentId === category.id ? "page" : undefined}
+                  onClick={() => {
+                    setCurrentId(category.id);
+                    setSidebarOpen(false);
+                  }}
+                  onMouseEnter={() => prefetchDetail(category.id)}
+                  onFocus={() => prefetchDetail(category.id)}
+                >
+                  <span className={styles.categoryGlyph} aria-hidden="true" />
+                  <span className={styles.treeItemTitle}>{category.title}</span>
+                  {category.visibility === "public" && (
+                    <span className={styles.publicBadge}>общий</span>
+                  )}
+                </button>
+              </div>
+              {isExpanded && renderTree(category.id, depth + 1)}
+            </div>
           );
         })}
         {siblings.length > limit && (
           <button
             type="button"
-            className="sidebar-item w-full text-left text-sm"
-            style={{ paddingLeft: `${10 + depth * 14}px` }}
+            className={styles.showMoreButton}
             onClick={() =>
               setTreeLimits((previous) => ({ ...previous, [parentKey]: limit + 200 }))
             }
@@ -721,134 +830,293 @@ export default function CrateWorkspace({
   }
 
   return (
-    <main className="workspace-root flex w-full items-stretch p-0">
+    <main className={styles.workspaceRoot}>
       {initialDetailPromise && (
         <Suspense fallback={null}>
           <DetailSeeder promise={initialDetailPromise} onSettled={settleInitialDetail} />
         </Suspense>
       )}
-      <div className="frame-shell relative flex h-full w-full flex-col overflow-hidden">
-        <header className="top-strip bevel-panel flex h-[4.7rem] flex-none items-center gap-2 px-3 py-2">
-          <input
-            key={currentSummary?.id ?? "empty"}
-            className="title-chip min-w-0 flex-1 px-3 py-2 font-display text-[1.6rem]"
-            defaultValue={currentSummary?.title ?? "no category"}
-            onBlur={(event) => void renameCurrentCategory(event.currentTarget.value)}
-            disabled={!currentSummary || currentSummary.access_role === "viewer"}
-            aria-label="Название категории"
-          />
-          <button type="button" className="mini-action" onClick={() => setShowSearch(true)}>поиск</button>
-          <button type="button" className="mini-action" onClick={() => setShowAdvanced(true)}>
-            инструменты
-          </button>
-          <span className="hidden max-w-40 truncate text-xs sm:inline">
-            {initialShellData.account.nickname || initialShellData.account.userId || "аккаунт"}
-          </span>
-          <button
-            type="button"
-            className="mini-action"
-            onClick={() => {
-              void mutate("/api/auth/logout", { method: "POST" }).then(() => router.refresh());
-            }}
-          >
-            выйти
-          </button>
-        </header>
-        <div className="workspace-grid min-h-0 flex-1">
-          <aside className="project-panel bevel-panel overflow-auto">
-            <p className="p-3 font-display text-2xl">ПРОЕКТЫ</p>
-            <div className="px-2 pb-3 text-sm">ХАБ</div>
-            {initialShellData.projects.map((project) => (
-              <div key={project.id} className="px-2 py-1 text-sm">#{project.title}</div>
-            ))}
-          </aside>
-          <aside className="category-panel bevel-panel flex min-h-0 flex-col overflow-hidden">
-            <div className="flex gap-2 p-2">
-              <button type="button" className="mini-action" onClick={() => void createCategory()} disabled={busy}>+</button>
-              <button type="button" className="mini-action" onClick={() => void deleteCurrentCategory()} disabled={busy}>−</button>
+
+      <div className={styles.appShell}>
+        <header className={styles.appHeader}>
+          <div className={styles.headerIdentity}>
+            <button
+              type="button"
+              className={styles.mobileNavButton}
+              onClick={() => setSidebarOpen(true)}
+              aria-label="Открыть список разделов"
+              aria-expanded={sidebarOpen}
+            >
+              <span aria-hidden="true">☰</span>
+              Разделы
+            </button>
+            <div className={styles.brandLockup}>
+              <span className={styles.brandMark} aria-hidden="true">IK</span>
+              <span>ItemKey</span>
             </div>
-            <div className="sidebar-scroll flex-1 overflow-auto">{renderTree(null)}</div>
-          </aside>
-          <section className="workspace-screen overflow-auto">
-            {!currentDetail ? (
-              <div className="flex h-full min-h-64 flex-col items-center justify-center gap-3 p-6 text-center">
-                <p>{detailError ?? "Загружаю выбранный материал..."}</p>
-                {detailError && (
-                  <button type="button" className="mini-action" onClick={() => {
-                    if (currentId) detailCacheRef.current.delete(currentId);
-                    setDetailRetry((value) => value + 1);
-                  }}>повторить</button>
-                )}
+          </div>
+
+          <nav className={styles.headerActions} aria-label="Основные действия">
+            <button type="button" className={styles.secondaryButton} onClick={() => setShowSearch(true)}>
+              <span aria-hidden="true">⌕</span>
+              Поиск
+            </button>
+            <button
+              type="button"
+              className={styles.secondaryButton}
+              onClick={() => setShowAdvanced(true)}
+              title="Открыть редакторы, словари и дополнительные настройки"
+            >
+              Все инструменты
+            </button>
+          </nav>
+
+          <div className={styles.accountActions}>
+            <div className={styles.accountPill} title={initialShellData.account.userId ?? undefined}>
+              <span className={styles.avatar} aria-hidden="true">
+                {(initialShellData.account.nickname || initialShellData.account.userId || "A").slice(0, 1).toUpperCase()}
+              </span>
+              <span>{initialShellData.account.nickname || initialShellData.account.userId || "Аккаунт"}</span>
+            </div>
+            <button
+              type="button"
+              className={styles.logoutButton}
+              onClick={() => {
+                void mutate("/api/auth/logout", { method: "POST" }).then(() => router.refresh());
+              }}
+            >
+              Выйти
+            </button>
+          </div>
+        </header>
+
+        <div className={styles.workspaceLayout}>
+          {sidebarOpen && (
+            <button
+              type="button"
+              className={styles.sidebarBackdrop}
+              onClick={() => setSidebarOpen(false)}
+              aria-label="Закрыть список разделов"
+            />
+          )}
+          <aside className={`${styles.sidebar} ${sidebarOpen ? styles.sidebarOpen : ""}`}>
+            <div className={styles.sidebarHeader}>
+              <div>
+                <p className={styles.eyebrow}>Навигация</p>
+                <h2>Ваши материалы</h2>
               </div>
-            ) : currentDetail.category.format === "continuous" ? (
-              <div className="continuous-wrap p-3">
-                <div
-                  key={`${currentDetail.category.id}:${currentDetail.category.updated_at}`}
-                  className="continuous-editor continuous-editor-rich min-h-[20rem]"
-                  contentEditable={currentDetail.category.access_role !== "viewer"}
-                  suppressContentEditableWarning
-                  dangerouslySetInnerHTML={{ __html: readContinuousText(currentDetail.category.content) }}
-                  onInput={(event) => {
-                    const html = event.currentTarget.innerHTML;
-                    scheduleCategoryContentSave(
-                      currentDetail.category,
-                      replaceContinuousText(currentDetail.category.content, html)
-                    );
-                  }}
-                />
-              </div>
-            ) : (
-              <div className="p-3">
-                <button type="button" className="mini-action mb-3" onClick={() => void createMessage()}>
-                  + сообщение
-                </button>
-                <div className="space-y-3">
-                  {currentDetail.messages.map((message) => (
-                    <article key={message.id} className="popup-3d p-3">
-                      <div className="flex items-center gap-2">
-                        <input
-                          className="settings-input"
-                          defaultValue={message.title}
-                          onBlur={(event) => scheduleMessageSave(message, { title: event.currentTarget.value })}
-                        />
-                        <button type="button" className="mini-action" onClick={() => void deleteMessage(message)}>
-                          −
-                        </button>
-                      </div>
-                      {isAdvancedMessageContent(message.content) ? (
-                        <button type="button" className="mini-action mt-3" onClick={() => setShowAdvanced(true)}>
-                          открыть расширенный блок
-                        </button>
-                      ) : (
-                        <div
-                          className="continuous-editor-rich mt-3 min-h-24"
-                          contentEditable
-                          suppressContentEditableWarning
-                          dangerouslySetInnerHTML={{ __html: sanitizeBasicRichText(message.content) }}
-                          onInput={(event) =>
-                            scheduleMessageSave(message, {
-                              content: sanitizeBasicRichText(event.currentTarget.innerHTML),
-                            })
-                          }
-                        />
-                      )}
-                    </article>
+              <button
+                type="button"
+                className={`${styles.iconButton} ${styles.mobileCloseButton}`}
+                onClick={() => setSidebarOpen(false)}
+                aria-label="Закрыть список разделов"
+              >
+                ×
+              </button>
+            </div>
+
+            {initialShellData.projects.length > 0 && (
+              <section className={styles.projectSection} aria-labelledby="projects-title">
+                <h3 id="projects-title">Проекты</h3>
+                <div className={styles.projectList}>
+                  {initialShellData.projects.map((project) => (
+                    <span key={project.id} className={styles.projectChip}>#{project.title}</span>
                   ))}
                 </div>
-              </div>
+              </section>
             )}
+
+            <section className={styles.categorySection} aria-labelledby="categories-title">
+              <div className={styles.sectionHeading}>
+                <div>
+                  <h3 id="categories-title">Разделы</h3>
+                  <p>Выберите название, чтобы открыть материал.</p>
+                </div>
+              </div>
+              <div className={styles.categoryActions}>
+                <button
+                  type="button"
+                  className={styles.primaryButton}
+                  onClick={() => void createCategory()}
+                  disabled={busy || currentSummary?.access_role === "viewer"}
+                  title="Создать подраздел внутри выбранного раздела"
+                >
+                  <span aria-hidden="true">＋</span>
+                  Новый раздел
+                </button>
+                <button
+                  type="button"
+                  className={styles.dangerButton}
+                  onClick={() => void deleteCurrentCategory()}
+                  disabled={
+                    busy ||
+                    !currentSummary ||
+                    currentSummary.access_role === "viewer" ||
+                    currentSummary.title.trim().toLowerCase() === "main"
+                  }
+                >
+                  Удалить
+                </button>
+              </div>
+              <div className={styles.treeScroll}>{renderTree(null)}</div>
+            </section>
+
+            <div className={styles.sidebarHelp}>
+              <span aria-hidden="true">?</span>
+              <p><strong>Как это работает</strong> Стрелка раскрывает вложенные разделы, название открывает заметку.</p>
+            </div>
+          </aside>
+
+          <section className={styles.editorPane} aria-label="Редактор материала">
+            <div className={styles.contentHeader}>
+              <div className={styles.titleArea}>
+                <p className={styles.eyebrow}>
+                  {currentDetail?.category.format === "block" ? "Коллекция заметок" : "Текстовая заметка"}
+                </p>
+                <input
+                  key={currentSummary?.id ?? "empty"}
+                  className={styles.titleInput}
+                  defaultValue={currentSummary?.title ?? "Без названия"}
+                  onBlur={(event) => void renameCurrentCategory(event.currentTarget.value)}
+                  disabled={!currentSummary || currentSummary.access_role === "viewer"}
+                  aria-label="Название раздела"
+                />
+              </div>
+              <div className={styles.documentMeta}>
+                {currentSummary?.visibility === "public" && <span className={styles.sharedStatus}>Общий доступ</span>}
+                <span className={styles.saveStatus}>
+                  <i aria-hidden="true" />
+                  {currentSummary?.access_role === "viewer" ? "Только чтение" : "Сохраняется автоматически"}
+                </span>
+              </div>
+            </div>
+
+            <div className={styles.editorScroll}>
+              {!currentDetail ? (
+                <div className={styles.stateCard} role="status">
+                  <span className={styles.stateIcon} aria-hidden="true">{detailError ? "!" : "…"}</span>
+                  <h2>{detailError ? "Не удалось открыть материал" : "Открываем материал"}</h2>
+                  <p>{detailError ?? "Это займёт всего несколько секунд."}</p>
+                  {detailError && (
+                    <button type="button" className={styles.primaryButton} onClick={() => {
+                      if (currentId) detailCacheRef.current.delete(currentId);
+                      setDetailRetry((value) => value + 1);
+                    }}>Попробовать снова</button>
+                  )}
+                </div>
+              ) : currentDetail.category.format === "continuous" ? (
+                <article className={styles.documentCard}>
+                  <div className={styles.documentToolbar}>
+                    <strong>Содержание</strong>
+                    <span>{currentDetail.category.access_role === "viewer" ? "Просмотр заметки" : "Нажмите на текст ниже и начинайте писать"}</span>
+                  </div>
+                  <div
+                    key={`${currentDetail.category.id}:${currentDetail.category.updated_at}`}
+                    className={`${styles.richEditor} continuous-editor-rich`}
+                    contentEditable={currentDetail.category.access_role !== "viewer"}
+                    role="textbox"
+                    aria-multiline="true"
+                    aria-label="Текст заметки"
+                    data-placeholder="Начните писать здесь…"
+                    suppressContentEditableWarning
+                    dangerouslySetInnerHTML={{ __html: readContinuousText(currentDetail.category.content) }}
+                    onInput={(event) => {
+                      const html = event.currentTarget.innerHTML;
+                      scheduleCategoryContentSave(
+                        currentDetail.category,
+                        replaceContinuousText(currentDetail.category.content, html)
+                      );
+                    }}
+                  />
+                </article>
+              ) : (
+                <div className={styles.blocksArea}>
+                  <div className={styles.blocksHeader}>
+                    <div>
+                      <h2>Блоки материала</h2>
+                      <p>Разделите длинный материал на понятные самостоятельные заметки.</p>
+                    </div>
+                    <button
+                      type="button"
+                      className={styles.primaryButton}
+                      onClick={() => void createMessage()}
+                      disabled={currentDetail.category.access_role === "viewer"}
+                    >
+                      ＋ Добавить блок
+                    </button>
+                  </div>
+                  {currentDetail.messages.length === 0 ? (
+                    <div className={styles.emptyState}>
+                      <span aria-hidden="true">＋</span>
+                      <h3>Здесь пока нет блоков</h3>
+                      <p>Добавьте первый блок, чтобы начать собирать материал.</p>
+                    </div>
+                  ) : (
+                    <div className={styles.messageList}>
+                      {currentDetail.messages.map((message, index) => (
+                        <article key={message.id} className={styles.messageCard}>
+                          <div className={styles.messageCardHeader}>
+                            <span className={styles.messageNumber}>{String(index + 1).padStart(2, "0")}</span>
+                            <input
+                              className={styles.messageTitleInput}
+                              defaultValue={message.title}
+                              disabled={currentDetail.category.access_role === "viewer"}
+                              aria-label={`Название блока ${index + 1}`}
+                              onBlur={(event) => scheduleMessageSave(message, { title: event.currentTarget.value })}
+                            />
+                            <button
+                              type="button"
+                              className={styles.deleteMessageButton}
+                              onClick={() => void deleteMessage(message)}
+                              disabled={currentDetail.category.access_role === "viewer"}
+                              aria-label={`Удалить блок «${message.title}»`}
+                            >
+                              Удалить
+                            </button>
+                          </div>
+                          {isAdvancedMessageContent(message.content) ? (
+                            <button type="button" className={styles.secondaryButton} onClick={() => setShowAdvanced(true)}>
+                              Открыть в расширенном редакторе →
+                            </button>
+                          ) : (
+                            <div
+                              className={`${styles.messageEditor} continuous-editor-rich`}
+                              contentEditable={currentDetail.category.access_role !== "viewer"}
+                              role="textbox"
+                              aria-multiline="true"
+                              aria-label={`Текст блока ${index + 1}`}
+                              data-placeholder="Введите текст блока…"
+                              suppressContentEditableWarning
+                              dangerouslySetInnerHTML={{ __html: sanitizeBasicRichText(message.content) }}
+                              onInput={(event) =>
+                                scheduleMessageSave(message, {
+                                  content: sanitizeBasicRichText(event.currentTarget.innerHTML),
+                                })
+                              }
+                            />
+                          )}
+                        </article>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </section>
         </div>
+
         {notice && (
-          <button type="button" className="absolute bottom-3 right-3 popup-3d p-3 text-sm" onClick={() => setNotice(null)}>
-            {notice}
-          </button>
+          <div className={styles.toast} role="status">
+            <span>{notice}</span>
+            <button type="button" onClick={() => setNotice(null)} aria-label="Закрыть уведомление">×</button>
+          </div>
         )}
         {showSearch && (
           <SearchPopup
             onClose={() => setShowSearch(false)}
             onOpen={(result) => {
               setCurrentId(result.categoryId);
+              setSidebarOpen(false);
               setShowSearch(false);
             }}
           />
