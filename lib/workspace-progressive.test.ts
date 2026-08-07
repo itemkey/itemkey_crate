@@ -64,13 +64,24 @@ test("summary refresh preserves an unsynchronized detail draft", () => {
   assert.equal(merged.details.main.category.content, "unsynchronized draft");
 });
 
-test("starting a newer request aborts and invalidates the older request", () => {
+test("rapid category requests keep only the latest request current", () => {
   const requests = new LatestRequestController();
   const first = requests.start();
   const second = requests.start();
+  const third = requests.start();
   assert.equal(first.signal.aborted, true);
+  assert.equal(second.signal.aborted, true);
   assert.equal(requests.isCurrent(first), false);
-  assert.equal(requests.isCurrent(second), true);
+  assert.equal(requests.isCurrent(second), false);
+  assert.equal(requests.isCurrent(third), true);
+});
+
+test("cancelled category request can no longer update visible state", () => {
+  const requests = new LatestRequestController();
+  const request = requests.start();
+  requests.cancel();
+  assert.equal(request.signal.aborted, true);
+  assert.equal(requests.isCurrent(request), false);
 });
 
 test("large workspace shell size is independent from total saved content", () => {

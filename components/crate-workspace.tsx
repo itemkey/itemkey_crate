@@ -11,7 +11,7 @@ export type InitialCategoryDetailResult = {
 };
 
 type CrateWorkspaceProps = {
-  initialShellData: WorkspaceShellData | null;
+  initialShellData: WorkspaceShellData;
   initialDetailPromise: Promise<InitialCategoryDetailResult> | null;
 };
 

@@ -940,35 +940,62 @@ body {
   border-right: 1px solid #6a6a6a;
 }
 
-.category-detail-loading {
+.category-detail-body-shell {
+  position: relative;
   display: flex;
   min-height: 0;
   flex: 1 1 auto;
   flex-direction: column;
+  overflow: hidden;
+  background: var(--editor);
+}
+
+.category-detail-body-shell > .message-board,
+.category-detail-body-shell > .continuous-wrap {
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.category-detail-body-shell-pending > .message-board,
+.category-detail-body-shell-pending > .continuous-wrap {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.category-detail-body-shell-ready > .message-board,
+.category-detail-body-shell-ready > .continuous-wrap {
+  animation: category-detail-content-in 120ms ease-out both;
+}
+
+.category-detail-overlay {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  align-items: stretch;
+  background: var(--editor);
+  padding: 0.55rem;
+}
+
+.category-detail-placeholder {
+  display: grid;
+  width: 100%;
+  align-content: start;
+  gap: 0.7rem;
+  border: 1px solid #c8c8c8;
+  background: #e9e9e9;
+  padding: 1rem;
   opacity: 0;
   transition: opacity 120ms ease-out;
 }
 
-.category-detail-loading-visible {
+.category-detail-placeholder-visible {
   opacity: 1;
 }
 
-.category-detail-loading-toolbar {
-  flex: 0 0 2.65rem;
-  border-bottom: 1px solid #d0d0d0;
-  background: #e3e3e3;
-}
-
-.category-detail-loading-body {
-  display: grid;
-  gap: 0.7rem;
-  margin: 0.55rem;
-  border: 1px solid #c8c8c8;
-  background: #e9e9e9;
-  padding: 1rem;
-}
-
-.category-detail-loading-body span {
+.category-detail-placeholder span {
   display: block;
   height: 0.8rem;
   background: linear-gradient(90deg, #d4d4d4 25%, #e4e4e4 45%, #d4d4d4 65%);
@@ -976,12 +1003,39 @@ body {
   animation: workspace-loading-sweep 1.2s linear infinite;
 }
 
-.category-detail-loading-body span:nth-child(2) {
+.category-detail-placeholder span:nth-child(2) {
   width: 84%;
 }
 
-.category-detail-loading-body span:nth-child(3) {
+.category-detail-placeholder span:nth-child(3) {
   width: 62%;
+}
+
+.category-detail-error {
+  display: flex;
+  width: 100%;
+  min-height: 12rem;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  text-align: center;
+  color: #202020;
+}
+
+.category-detail-error p {
+  margin: 0;
+  font-size: 0.875rem;
+}
+
+@keyframes category-detail-content-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
 }
 
 .sidebar-item {
@@ -4165,7 +4219,10 @@ body {
   .dictionary-study-card-content,
   .dictionary-study-motivation,
   .dictionary-study-motivation-image,
-  .category-detail-loading-body span,
+  .category-detail-placeholder,
+  .category-detail-placeholder span,
+  .category-detail-body-shell-ready > .message-board,
+  .category-detail-body-shell-ready > .continuous-wrap,
   .workspace-loading-title,
   .workspace-loading-button,
   .workspace-loading-sidebar-row,

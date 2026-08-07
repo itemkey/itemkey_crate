@@ -1,5 +1,6 @@
 import { cookies } from "next/headers";
 
+import CrateAuthScreen from "@/components/crate-auth-screen";
 import CrateWorkspace, {
   type InitialCategoryDetailResult,
 } from "@/components/crate-workspace";
@@ -46,13 +47,7 @@ export default async function CratePage() {
   const { user, shell } = initialData;
 
   if (!user || !shell) {
-    return (
-      <CrateWorkspace
-        key="anonymous"
-        initialShellData={null}
-        initialDetailPromise={null}
-      />
-    );
+    return <CrateAuthScreen />;
   }
 
   const initialDetailPromise: Promise<InitialCategoryDetailResult> | null =

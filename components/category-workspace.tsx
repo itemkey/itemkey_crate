@@ -14,7 +14,6 @@ import {
   useCallback,
   useDeferredValue,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -104,6 +103,8 @@ import {
   type ScheduleWeekday,
 } from "@/lib/schedules";
 import RuleEditor, { RuleCard } from "@/components/rule-editor";
+import CrateAuthScreen from "@/components/crate-auth-screen";
+import ContentAnalyticsLoading from "@/components/content-analytics-loading";
 import {
   createDefaultRuleDocument,
   createRuleId,
@@ -117,6 +118,7 @@ import {
 import { normalizeUserId, validateUserId } from "@/lib/account-user-id";
 import { toErrorMessage } from "@/lib/errors";
 import { createRuntimeId } from "@/lib/runtime-id";
+import { LatestRequestController } from "@/lib/workspace-progressive";
 import type {
   CategoryFormat,
   CategoryDetailPayload,
@@ -133,8 +135,11 @@ import type {
   WorkspaceShellData,
 } from "@/lib/types";
 
-const ContentAnalytics = dynamic(() => import("@/components/content-analytics"), {
+const loadContentAnalytics = () => import("@/components/content-analytics");
+
+const ContentAnalytics = dynamic(loadContentAnalytics, {
   ssr: false,
+  loading: () => <ContentAnalyticsLoading />,
 });
 
 type DataSource = "postgres";
@@ -170,7 +175,7 @@ export type InitialCategoryDetailResult = {
 };
 
 type CategoryWorkspaceProps = {
-  initialShellData?: WorkspaceShellData | null;
+  initialShellData: WorkspaceShellData;
   initialDetailPromise?: Promise<InitialCategoryDetailResult> | null;
 };
 
@@ -275,15 +280,6 @@ type MigrationCodePayload = {
   error?: string;
 };
 
-type UserIdAvailabilityPayload = {
-  data?: {
-    userId: string;
-    available: boolean;
-  };
-  source?: DataSource;
-  error?: string;
-};
-
 type AccountImageMeta = {
   id: string;
   kind?: "avatar" | "motivation";
@@ -301,43 +297,6 @@ type AccountImagesPayload = {
 type AccountImagePayload = {
   data?: AccountImageMeta;
   source?: DataSource;
-  error?: string;
-};
-
-type AuthSessionPayload = {
-  data?: {
-    id: string;
-    email: string | null;
-    emailVerifiedAt?: string | null;
-  } | null;
-  error?: string;
-};
-
-type AuthSessionUser = NonNullable<AuthSessionPayload["data"]>;
-
-type AuthSessionResult =
-  | {
-      status: "authenticated";
-      user: AuthSessionUser;
-    }
-  | {
-      status: "anonymous";
-    }
-  | {
-      status: "error";
-      message: string;
-    };
-
-type AuthMutationPayload = {
-  data?: {
-    id: string;
-    email: string | null;
-    emailVerifiedAt?: string | null;
-  };
-  requiresEmailVerification?: boolean;
-  email?: string | null;
-  code?: string;
-  message?: string;
   error?: string;
 };
 
@@ -394,26 +353,6 @@ type InboxItemPayload = {
 
 type PublicPanelPayload = {
   data?: PublicCategoryPanel;
-  source?: DataSource;
-  error?: string;
-};
-
-type WorkspaceBootstrapPayload = {
-  data?: {
-    authUser: {
-      id: string;
-      email: string | null;
-      emailVerifiedAt?: string | null;
-    } | null;
-    account?: AccountPayload["data"];
-    categories?: CategoryRow[];
-    projects?: ProjectRow[];
-    friends?: FriendRow[];
-    dictionaryGroups?: DictionaryWordGroup[];
-    initialCategoryId?: string | null;
-    initialMessages?: MessageRow[];
-    publicPanel?: PublicCategoryPanel | null;
-  };
   source?: DataSource;
   error?: string;
 };
@@ -831,7 +770,6 @@ type DictionaryEntryField = string;
 type DictionaryLabelField = string;
 type DictionaryEditorTab = "entries" | "transfer" | "general";
 type AccountWindowTab = "account" | "settings" | "friends" | "motivation";
-type StartupPhase = "auth" | "workspace" | "ready";
 type CategoryLoadStatus = "idle" | "loading" | "ready" | "error";
 
 type DictionaryEditorSearchMatch = {
@@ -987,8 +925,6 @@ type MobilePanel = "categories" | "projects" | "settings" | "tools" | null;
 type OpenCategoryOptions = {
   keepMobilePanel?: boolean;
 };
-type AuthTab = "login" | "register";
-
 const DEFAULT_CATEGORY_FORM: CategoryFormState = {
   title: "",
   description: "",
@@ -1050,13 +986,12 @@ function categorySummaryToClientRow(summary: CategorySummaryRow): CategoryRow {
 export default function CategoryWorkspace({
   initialShellData,
   initialDetailPromise = null,
-}: CategoryWorkspaceProps = {}) {
-  const hasServerInitialState = typeof initialShellData !== "undefined";
+}: CategoryWorkspaceProps) {
   const [categories, setCategories] = useState<CategoryRow[]>(() =>
-    initialShellData?.categories.map(categorySummaryToClientRow) ?? []
+    initialShellData.categories.map(categorySummaryToClientRow)
   );
   const [projects, setProjects] = useState<ProjectRow[]>(() =>
-    initialShellData?.projects.map(normalizeProjectRow) ?? []
+    initialShellData.projects.map(normalizeProjectRow)
   );
   const [dictionaryGroups, setDictionaryGroups] = useState<DictionaryWordGroup[]>(
     []
@@ -1065,10 +1000,10 @@ export default function CategoryWorkspace({
     Record<string, MessageRow[]>
   >({});
   const [currentCategoryId, setCurrentCategoryId] = useState<string | null>(
-    initialShellData?.initialCategoryId ?? null
+    initialShellData.initialCategoryId ?? null
   );
   const [insertionTargetId, setInsertionTargetId] = useState<string | null>(
-    initialShellData?.initialCategoryId ?? null
+    initialShellData.initialCategoryId ?? null
   );
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
@@ -1081,16 +1016,21 @@ export default function CategoryWorkspace({
     useState<CategoryFormState>(DEFAULT_CATEGORY_FORM);
   const [messageTitleDraft, setMessageTitleDraft] = useState("");
   const [source, setSource] = useState<DataSource | "unknown">(
-    initialShellData?.source ?? "unknown"
+    initialShellData.source ?? "unknown"
   );
-  const [isLoading, setIsLoading] = useState(!hasServerInitialState);
+  const [isLoading, setIsLoading] = useState(false);
   const [categoryLoadStatus, setCategoryLoadStatus] =
-    useState<CategoryLoadStatus>(hasServerInitialState ? "ready" : "idle");
+    useState<CategoryLoadStatus>("ready");
   const [loadedCategoryIds, setLoadedCategoryIds] = useState<Set<string>>(
     () => new Set()
   );
-  const [categoryDetailError, setCategoryDetailError] = useState<string | null>(null);
-  const [showCategoryDetailLoader, setShowCategoryDetailLoader] = useState(false);
+  const [categoryDetailError, setCategoryDetailError] = useState<{
+    categoryId: string;
+    message: string;
+  } | null>(null);
+  const [visibleCategoryLoaderId, setVisibleCategoryLoaderId] = useState<
+    string | null
+  >(null);
   const [categoryDetailRetryVersion, setCategoryDetailRetryVersion] = useState(0);
   const [isMutating, setIsMutating] = useState(false);
   const [isSavingCategory, setIsSavingCategory] = useState(false);
@@ -1210,34 +1150,17 @@ export default function CategoryWorkspace({
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(
     null
   );
-  const [startupPhase, setStartupPhase] = useState<StartupPhase>(
-    hasServerInitialState ? "ready" : "auth"
-  );
   const [isAuthBusy, setIsAuthBusy] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
-  const [authInfo, setAuthInfo] = useState<string | null>(null);
-  const [authTab, setAuthTab] = useState<AuthTab>("login");
-  const [authLoginUserIdDraft, setAuthLoginUserIdDraft] = useState("");
-  const [authLoginPassword, setAuthLoginPassword] = useState("");
-  const [showAuthLoginPassword, setShowAuthLoginPassword] = useState(false);
-  const [authRegisterEmail, setAuthRegisterEmail] = useState("");
-  const [authRegisterUserIdDraft, setAuthRegisterUserIdDraft] = useState("");
-  const [authRegisterPassword, setAuthRegisterPassword] = useState("");
-  const [authRegisterPasswordRepeat, setAuthRegisterPasswordRepeat] = useState("");
-  const [showAuthRegisterPassword, setShowAuthRegisterPassword] = useState(false);
   const [authUser, setAuthUser] = useState<{
     id: string;
     email: string | null;
-  } | null>(() =>
-    initialShellData
-      ? {
-          id: initialShellData.authUser.id,
-          email: initialShellData.authUser.email,
-        }
-      : null
-  );
+  } | null>(() => ({
+    id: initialShellData.authUser.id,
+    email: initialShellData.authUser.email,
+  }));
   const [accountUserId, setAccountUserId] = useState<string | null>(
-    initialShellData?.account.userId ?? null
+    initialShellData.account.userId ?? null
   );
   const [accountNextUserIdChangeAt, setAccountNextUserIdChangeAt] = useState<
     string | null
@@ -1245,18 +1168,18 @@ export default function CategoryWorkspace({
   const [accountCanChangeUserIdNow, setAccountCanChangeUserIdNow] =
     useState(true);
   const [accountUserIdDraft, setAccountUserIdDraft] = useState(
-    initialShellData?.account.userId ?? ""
+    initialShellData.account.userId ?? ""
   );
   const [accountNicknameDraft, setAccountNicknameDraft] = useState(
-    initialShellData?.account.nickname ?? ""
+    initialShellData.account.nickname ?? ""
   );
   const [accountProfileDescriptionDraft, setAccountProfileDescriptionDraft] =
-    useState(initialShellData?.account.profileDescription ?? "");
+    useState(initialShellData.account.profileDescription ?? "");
   const [accountAvatarUrlDraft, setAccountAvatarUrlDraft] = useState(
-    initialShellData?.account.avatarUrl ?? ""
+    initialShellData.account.avatarUrl ?? ""
   );
   const [accountAvatarUrl, setAccountAvatarUrl] = useState<string | null>(
-    initialShellData?.account.avatarUrl ?? null
+    initialShellData.account.avatarUrl ?? null
   );
   const [isSavingAccountProfile, setIsSavingAccountProfile] = useState(false);
   const [isUploadingAccountAvatar, setIsUploadingAccountAvatar] = useState(false);
@@ -1340,9 +1263,9 @@ export default function CategoryWorkspace({
   const categoryDetailPromisesRef = useRef<
     Map<string, Promise<CategoryDetailPayload>>
   >(new Map());
-  const categoryDetailAbortRef = useRef<AbortController | null>(null);
+  const categoryDetailRequestRef = useRef(new LatestRequestController());
   const initialDetailPendingIdRef = useRef<string | null>(
-    initialDetailPromise ? initialShellData?.initialCategoryId ?? null : null
+    initialDetailPromise ? initialShellData.initialCategoryId ?? null : null
   );
   const dictionaryDoomscrollClickInFlightRef = useRef(false);
   const richImageFileRef = useRef<HTMLInputElement | null>(null);
@@ -1458,7 +1381,10 @@ export default function CategoryWorkspace({
   const savedMessageContentRef = useRef<Record<string, string>>({});
   const messageDraftVersionRef = useRef<Record<string, number>>({});
   const messageAckVersionRef = useRef<Record<string, number>>({});
-  const pendingMessageSelectionRef = useRef<string | null>(null);
+  const pendingMessageSelectionRef = useRef<{
+    categoryId: string;
+    messageId: string;
+  } | null>(null);
   const pendingDictionarySearchSourceRef =
     useRef<PendingDictionarySearchSource | null>(null);
   const syncedContinuousCategoryIdRef = useRef<string | null>(null);
@@ -1503,9 +1429,17 @@ export default function CategoryWorkspace({
   const currentCategoryContentLoaded = Boolean(
     currentCategoryId && loadedCategoryIds.has(currentCategoryId)
   );
+  const currentCategoryDetailError =
+    categoryDetailError?.categoryId === currentCategoryId
+      ? categoryDetailError.message
+      : null;
+  const showCategoryDetailLoader =
+    visibleCategoryLoaderId !== null &&
+    visibleCategoryLoaderId === currentCategoryId;
   const currentCategoryUpdatedAt = currentCategory?.updated_at ?? null;
 
-  const currentCategoryCanEdit = currentCategory?.access_role !== "viewer";
+  const currentCategoryCanEdit =
+    currentCategoryContentLoaded && currentCategory?.access_role !== "viewer";
   const currentCategoryCanManagePublic = currentCategory?.access_role === "owner";
   const currentCategoryVisibilityLabel =
     currentCategory?.visibility === "public" ? "public" : "local";
@@ -2352,16 +2286,6 @@ export default function CategoryWorkspace({
     setCategoryLoadStatus("idle");
     setIsSavingCategory(false);
     setIsSavingMessages(false);
-    setAuthTab("login");
-    setAuthLoginUserIdDraft("");
-    setAuthLoginPassword("");
-    setShowAuthLoginPassword(false);
-    setAuthRegisterEmail("");
-    setAuthRegisterUserIdDraft("");
-    setAuthRegisterPassword("");
-    setAuthRegisterPasswordRepeat("");
-    setShowAuthRegisterPassword(false);
-    setAuthInfo(null);
     setAccountUserId(null);
     setAccountNextUserIdChangeAt(null);
     setAccountCanChangeUserIdNow(true);
@@ -2509,10 +2433,14 @@ export default function CategoryWorkspace({
       messageDraftVersionRef.current[message.id] ??= 0;
       messageAckVersionRef.current[message.id] ??= 0;
     }
-    const pendingMessageId = pendingMessageSelectionRef.current;
-    if (pendingMessageId) {
-      if (messages.some((message) => message.id === pendingMessageId)) {
-        setSelectedMessageId(pendingMessageId);
+    const pendingMessageSelection = pendingMessageSelectionRef.current;
+    if (pendingMessageSelection?.categoryId === category.id) {
+      if (
+        messages.some(
+          (message) => message.id === pendingMessageSelection.messageId
+        )
+      ) {
+        setSelectedMessageId(pendingMessageSelection.messageId);
       }
       pendingMessageSelectionRef.current = null;
     }
@@ -2520,7 +2448,9 @@ export default function CategoryWorkspace({
       updatedAt: category.updated_at,
       detail: { category, messages },
     });
-    setCategoryDetailError(null);
+    setCategoryDetailError((current) =>
+      current?.categoryId === category.id ? null : current
+    );
   }, []);
 
   const fetchCategoryDetail = useCallback(
@@ -2568,210 +2498,21 @@ export default function CategoryWorkspace({
 
   const handleInitialDetailSettled = useCallback(
     (result: InitialCategoryDetailResult) => {
+      const initialCategoryId = initialDetailPendingIdRef.current;
       initialDetailPendingIdRef.current = null;
       if (result.data) {
         applyCategoryDetail(result.data);
         return;
       }
-      setCategoryDetailError(result.error ?? "Не удалось загрузить материал.");
+      if (initialCategoryId) {
+        setCategoryDetailError({
+          categoryId: initialCategoryId,
+          message: result.error ?? "Не удалось загрузить материал.",
+        });
+      }
     },
     [applyCategoryDetail]
   );
-
-  const loadAuthSession = useCallback(async (): Promise<AuthSessionResult> => {
-    try {
-      const { response, payload } = await fetchJsonWithTimeout<AuthSessionPayload>(
-        "/api/auth/session",
-        {
-          cache: "no-store",
-          credentials: "same-origin",
-        },
-        AUTH_SESSION_TIMEOUT_MS,
-        "Сервер слишком долго проверяет сессию аккаунта. Попробуй ещё раз."
-      );
-      if (!response.ok) {
-        throw new Error(payload.error ?? "Не удалось проверить сессию.");
-      }
-
-      if (!payload.data) {
-        setAuthUser(null);
-        setAuthError(null);
-        return { status: "anonymous" };
-      }
-
-      setAuthUser({
-        id: payload.data.id,
-        email: payload.data.email,
-      });
-      setAuthError(null);
-      return {
-        status: "authenticated",
-        user: payload.data,
-      };
-    } catch (error) {
-      const message = toErrorMessage(error, "Не удалось инициализировать аккаунт.");
-      setAuthUser(null);
-      setAuthError(message);
-      return {
-        status: "error",
-        message,
-      };
-    }
-  }, []);
-
-  const loadWorkspaceBootstrap = useCallback(async (): Promise<boolean> => {
-    setStartupPhase("workspace");
-    setIsLoading(true);
-    setLoadError(null);
-
-    try {
-      const { response, payload } =
-        await fetchJsonWithTimeout<WorkspaceBootstrapPayload>(
-          "/api/workspace/bootstrap",
-          {
-            cache: "no-store",
-            credentials: "same-origin",
-          },
-          WORKSPACE_BOOTSTRAP_TIMEOUT_MS,
-          "Сервер слишком долго загружает рабочее пространство. Попробуй ещё раз."
-        );
-      if (!response.ok || !payload.data) {
-        throw new Error(payload.error ?? "Unable to bootstrap workspace.");
-      }
-
-      if (!payload.data.authUser) {
-        setAuthUser(null);
-        resetWorkspaceState();
-        setAuthError(null);
-        return true;
-      }
-
-      const rows = (payload.data.categories ?? []).map(normalizeCategoryRow);
-      const initialId =
-        payload.data.initialCategoryId ?? getInitialCategoryId(rows) ?? rows[0]?.id ?? null;
-      const initialMessages = (payload.data.initialMessages ?? [])
-        .map(normalizeMessageRow)
-        .sort(sortMessages);
-
-      for (const timer of Object.values(categorySaveTimersRef.current)) {
-        clearTimeout(timer);
-      }
-      for (const timer of Object.values(messageSaveTimersRef.current)) {
-        clearTimeout(timer);
-      }
-
-      categorySaveTimersRef.current = {};
-      categorySaveInFlightRef.current = {};
-      pendingCategorySaveRef.current = {};
-      categoryRequestCountRef.current = 0;
-
-      messageSaveTimersRef.current = {};
-      messageSaveInFlightRef.current = {};
-      pendingMessageSaveRef.current = {};
-      messageRequestCountRef.current = 0;
-
-      savedMessageContentRef.current = {};
-      messageDraftVersionRef.current = {};
-      messageAckVersionRef.current = {};
-      pendingMessageSelectionRef.current = null;
-      pendingDictionarySearchSourceRef.current = null;
-      syncedContinuousCategoryIdRef.current = null;
-      draggedRichImageRef.current = null;
-      draggedRichFileRef.current = null;
-      richImageResizeStateRef.current = null;
-      savedRichSelectionRef.current = null;
-
-      const savedCategoryMap: Record<string, string> = {};
-      const categoryDraftMap: Record<string, number> = {};
-      const categoryAckMap: Record<string, number> = {};
-      for (const row of rows) {
-        savedCategoryMap[row.id] = row.content;
-        categoryDraftMap[row.id] = 0;
-        categoryAckMap[row.id] = 0;
-      }
-      savedCategoryContentRef.current = savedCategoryMap;
-      categoryDraftVersionRef.current = categoryDraftMap;
-      categoryAckVersionRef.current = categoryAckMap;
-
-      const savedMessageMap: Record<string, string> = {};
-      const messageDraftMap: Record<string, number> = {};
-      const messageAckMap: Record<string, number> = {};
-      for (const row of initialMessages) {
-        savedMessageMap[row.id] = row.content;
-        messageDraftMap[row.id] = 0;
-        messageAckMap[row.id] = 0;
-      }
-      savedMessageContentRef.current = savedMessageMap;
-      messageDraftVersionRef.current = messageDraftMap;
-      messageAckVersionRef.current = messageAckMap;
-
-      setAuthUser({
-        id: payload.data.authUser.id,
-        email: payload.data.authUser.email,
-      });
-      setAuthError(null);
-      setCategories(rows);
-      setProjects((payload.data.projects ?? []).map(normalizeProjectRow));
-      setCurrentCategoryId(initialId);
-      setInsertionTargetId(initialId);
-      setSelectedMessageId(null);
-      setSelectedRichImage(null);
-      setRichImageDeleteConfirm(null);
-      setRichImageDeleteConfirmRect(null);
-      setRichFileDeleteConfirm(null);
-      setRichFileDeleteConfirmRect(null);
-      setMessagesByCategory(initialId ? { [initialId]: initialMessages } : {});
-      setPublicPanel(payload.data.publicPanel ?? null);
-      setSource(payload.source ?? "unknown");
-
-      if (payload.data.account) {
-        setAccountUserId(payload.data.account.userId ?? null);
-        setAccountUserIdDraft(payload.data.account.userId ?? "");
-        setAccountNicknameDraft(payload.data.account.nickname);
-        setAccountProfileDescriptionDraft(payload.data.account.profileDescription);
-        setAccountAvatarUrlDraft(payload.data.account.avatarUrl ?? "");
-        setAccountAvatarUrl(payload.data.account.avatarUrl ?? null);
-        setAccountCanChangeUserIdNow(
-          Boolean(payload.data.account.canChangeUserIdNow)
-        );
-        setAccountNextUserIdChangeAt(
-          payload.data.account.nextUserIdChangeAt ?? null
-        );
-        setActiveMigrationCodeMeta(
-          payload.data.account.activeMigrationCode ?? null
-        );
-      }
-
-      setIsSavingCategory(false);
-      setIsSavingMessages(false);
-      setCategoryLoadStatus(rows.length > 0 ? "ready" : "loading");
-      return true;
-    } catch (error) {
-      const message = toErrorMessage(error, "Unable to bootstrap workspace.");
-      setLoadError(message);
-      setCategoryLoadStatus("error");
-      setAuthError(null);
-      return false;
-    } finally {
-      setIsLoading(false);
-      setStartupPhase("ready");
-    }
-  }, [resetWorkspaceState]);
-
-  const loadInitialWorkspace = useCallback(async () => {
-    setStartupPhase("auth");
-    setIsLoading(true);
-    setLoadError(null);
-
-    const session = await loadAuthSession();
-    if (!session || session.status !== "authenticated") {
-      setIsLoading(false);
-      setStartupPhase("ready");
-      return false;
-    }
-
-    return loadWorkspaceBootstrap();
-  }, [loadAuthSession, loadWorkspaceBootstrap]);
 
   function syncCategorySavingState() {
     const hasTimers = Object.keys(categorySaveTimersRef.current).length > 0;
@@ -3315,10 +3056,12 @@ export default function CategoryWorkspace({
 
         setSource(payload.source ?? "unknown");
 
-        const pendingId = pendingMessageSelectionRef.current;
-        if (pendingId) {
-          if (rows.some((message) => message.id === pendingId)) {
-            setSelectedMessageId(pendingId);
+        const pendingSelection = pendingMessageSelectionRef.current;
+        if (pendingSelection?.categoryId === categoryId) {
+          if (
+            rows.some((message) => message.id === pendingSelection.messageId)
+          ) {
+            setSelectedMessageId(pendingSelection.messageId);
           }
           pendingMessageSelectionRef.current = null;
         }
@@ -3328,13 +3071,6 @@ export default function CategoryWorkspace({
     },
     [authorizedFetch, pushNotice]
   );
-
-  useLayoutEffect(() => {
-    if (hasServerInitialState) {
-      return;
-    }
-    void loadInitialWorkspace();
-  }, [hasServerInitialState, loadInitialWorkspace]);
 
   useEffect(() => {
     if (!isAuthenticated || !publicAccessOpen) {
@@ -3602,39 +3338,51 @@ export default function CategoryWorkspace({
 
     loadedCategoryIdsRef.current.delete(currentCategoryId);
     setLoadedCategoryIds(new Set(loadedCategoryIdsRef.current));
-    setCategoryDetailError(null);
+    setCategoryDetailError((current) =>
+      current?.categoryId === currentCategoryId ? null : current
+    );
     let cancelled = false;
     const pendingPrefetch = categoryDetailPromisesRef.current.get(currentCategoryId);
-    const controller = pendingPrefetch ? null : new AbortController();
-    if (controller) {
-      categoryDetailAbortRef.current?.abort();
-      categoryDetailAbortRef.current = controller;
-    }
+    const request = categoryDetailRequestRef.current.start();
     let timedOut = false;
     const timeoutId = window.setTimeout(() => {
       timedOut = true;
-      controller?.abort();
       categoryDetailPromisesRef.current.delete(currentCategoryId);
-      if (!cancelled) {
-        setCategoryDetailError("Материал загружается слишком долго. Попробуй ещё раз.");
+      if (
+        !cancelled &&
+        categoryDetailRequestRef.current.isCurrent(request)
+      ) {
+        setCategoryDetailError({
+          categoryId: currentCategoryId,
+          message: "Материал загружается слишком долго. Попробуй ещё раз.",
+        });
       }
+      request.abort();
     }, 8000);
     const detailPromise =
-      pendingPrefetch ?? fetchCategoryDetail(currentCategoryId, controller?.signal);
+      pendingPrefetch ?? fetchCategoryDetail(currentCategoryId, request.signal);
 
     void detailPromise
       .then((detail) => {
-        if (!cancelled) {
+        if (
+          !cancelled &&
+          categoryDetailRequestRef.current.isCurrent(request)
+        ) {
           applyCategoryDetail(detail);
         }
       })
       .catch((error) => {
-        if (!cancelled) {
-          setCategoryDetailError(
-            timedOut || isAbortError(error)
-              ? "Материал загружается слишком долго. Попробуй ещё раз."
-              : toErrorMessage(error, "Не удалось загрузить материал.")
-          );
+        if (
+          !cancelled &&
+          categoryDetailRequestRef.current.isCurrent(request)
+        ) {
+          setCategoryDetailError({
+            categoryId: currentCategoryId,
+            message:
+              timedOut || isAbortError(error)
+                ? "Материал загружается слишком долго. Попробуй ещё раз."
+                : toErrorMessage(error, "Не удалось загрузить материал."),
+          });
         }
       })
       .finally(() => {
@@ -3644,7 +3392,7 @@ export default function CategoryWorkspace({
     return () => {
       cancelled = true;
       window.clearTimeout(timeoutId);
-      controller?.abort();
+      request.abort();
     };
   }, [
     applyCategoryDetail,
@@ -3656,17 +3404,27 @@ export default function CategoryWorkspace({
   ]);
 
   useEffect(() => {
-    if (currentCategoryContentLoaded || categoryDetailError) {
-      setShowCategoryDetailLoader(false);
+    if (
+      !currentCategoryId ||
+      currentCategoryContentLoaded ||
+      currentCategoryDetailError
+    ) {
+      setVisibleCategoryLoaderId((visibleId) =>
+        visibleId === currentCategoryId ? null : visibleId
+      );
       return;
     }
 
     const timer = window.setTimeout(() => {
-      setShowCategoryDetailLoader(true);
+      setVisibleCategoryLoaderId(currentCategoryId);
     }, 180);
 
     return () => window.clearTimeout(timer);
-  }, [categoryDetailError, currentCategoryContentLoaded, currentCategoryId]);
+  }, [
+    currentCategoryContentLoaded,
+    currentCategoryDetailError,
+    currentCategoryId,
+  ]);
 
   useEffect(() => {
     if (
@@ -8687,7 +8445,10 @@ export default function CategoryWorkspace({
     setShowLinkPlaceholderModal(false);
     setLinkSelectionPreview("");
     if (messageId) {
-      pendingMessageSelectionRef.current = messageId;
+      pendingMessageSelectionRef.current = {
+        categoryId,
+        messageId,
+      };
     } else {
       pendingMessageSelectionRef.current = null;
       setSelectedMessageId(null);
@@ -11847,6 +11608,10 @@ export default function CategoryWorkspace({
     setScheduleStatsModal(null);
     setRuleEditor(null);
     setContentAnalyticsOpen(true);
+  }
+
+  function prefetchContentAnalytics() {
+    void loadContentAnalytics();
   }
 
   function getCurrentRuleTitles(): string[] {
@@ -15711,159 +15476,9 @@ export default function CategoryWorkspace({
     }
   }
 
-  async function handleAuthSignIn() {
-    if (isAuthBusy) {
-      return;
-    }
-
-    const normalizedUserId = normalizeUserId(authLoginUserIdDraft);
-    const userIdValidationError = validateUserId(normalizedUserId);
-
-    if (!authLoginUserIdDraft.trim() || !authLoginPassword) {
-      setAuthError("Введи user-id и пароль.");
-      return;
-    }
-
-    if (userIdValidationError) {
-      setAuthError(userIdValidationError);
-      return;
-    }
-
-    setIsAuthBusy(true);
-    setAuthError(null);
-    setAuthInfo(null);
-    try {
-      const response = await fetchWithCsrf("/api/auth/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userId: normalizedUserId,
-          password: authLoginPassword,
-        }),
-      });
-      const payload = (await response.json()) as AuthMutationPayload;
-
-      if (!response.ok || !payload.data) {
-        throw new Error(payload.error ?? "Не удалось войти в аккаунт.");
-      }
-
-      setAuthUser({
-        id: payload.data.id,
-        email: payload.data.email,
-      });
-      setAuthInfo(null);
-
-      setAuthLoginPassword("");
-      setShowAuthLoginPassword(false);
-      window.location.assign("/crate");
-    } catch (error) {
-      setAuthError(toErrorMessage(error, "Не удалось войти в аккаунт."));
-    } finally {
-      setIsAuthBusy(false);
-    }
-  }
-
-  async function handleAuthSignUp() {
-    const email = authRegisterEmail.trim();
-    const normalizedUserId = normalizeUserId(authRegisterUserIdDraft);
-    const userIdValidationError = validateUserId(normalizedUserId);
-
-    if (
-      !email ||
-      !authRegisterUserIdDraft.trim() ||
-      !authRegisterPassword ||
-      !authRegisterPasswordRepeat
-    ) {
-      setAuthError("Введи email, user-id и пароль два раза.");
-      return;
-    }
-
-    if (authRegisterPassword !== authRegisterPasswordRepeat) {
-      setAuthError("Пароли не совпадают.");
-      return;
-    }
-
-    if (userIdValidationError) {
-      setAuthError(userIdValidationError);
-      return;
-    }
-
-    setIsAuthBusy(true);
-    setAuthError(null);
-    setAuthInfo(null);
-    try {
-      const availabilityResponse = await fetch(
-        `/api/account/user-id/check?value=${encodeURIComponent(normalizedUserId)}`,
-        { cache: "no-store" }
-      );
-      const availabilityPayload =
-        (await availabilityResponse.json()) as UserIdAvailabilityPayload;
-      if (!availabilityResponse.ok || !availabilityPayload.data) {
-        throw new Error(availabilityPayload.error ?? "Не удалось проверить user-id.");
-      }
-
-      if (!availabilityPayload.data.available) {
-        setAuthError("Такой user-id уже занят.");
-        return;
-      }
-
-      const response = await fetchWithCsrf("/api/auth/register", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email,
-          password: authRegisterPassword,
-          userId: normalizedUserId,
-        }),
-      });
-      const payload = (await response.json()) as AuthMutationPayload;
-
-      if (!response.ok) {
-        throw new Error(payload.error ?? "Не удалось создать аккаунт.");
-      }
-
-      if (payload.requiresEmailVerification) {
-        setAuthRegisterEmail("");
-        setAuthRegisterUserIdDraft("");
-        setAuthRegisterPassword("");
-        setAuthRegisterPasswordRepeat("");
-        setShowAuthRegisterPassword(false);
-        setAuthLoginUserIdDraft(normalizedUserId);
-        setAuthTab("login");
-        setAuthInfo(
-          "Аккаунт создан. Письмо подтверждения отправлено автоматически — подтверди email и войди."
-        );
-        pushNotice("Проверь почту и подтверди email.");
-        return;
-      }
-
-      if (!payload.data) {
-        throw new Error("Сервер не вернул данные нового аккаунта.");
-      }
-
-      setAuthUser({
-        id: payload.data.id,
-        email: payload.data.email,
-      });
-
-      setAuthRegisterEmail("");
-      setAuthRegisterUserIdDraft("");
-      setAuthRegisterPassword("");
-      setAuthRegisterPasswordRepeat("");
-      setShowAuthRegisterPassword(false);
-      setAuthInfo(null);
-      window.location.assign("/crate");
-    } catch (error) {
-      setAuthError(toErrorMessage(error, "Не удалось создать аккаунт."));
-    } finally {
-      setIsAuthBusy(false);
-    }
-  }
-
   async function handleAuthSignOut() {
     setIsAuthBusy(true);
     setAuthError(null);
-    setAuthInfo(null);
     try {
       const response = await authorizedFetch("/api/auth/logout", {
         method: "POST",
@@ -16839,7 +16454,7 @@ export default function CategoryWorkspace({
     void performWorkspaceUndo();
   }
 
-  function renderEditorTextScaleControls() {
+  function renderEditorTextScaleControls(disabled = false) {
     return (
       <div
         className="toolbar-zoom-controls"
@@ -16851,7 +16466,7 @@ export default function CategoryWorkspace({
           className="mini-action toolbar-zoom-button toolbar-undo-button"
           onMouseDown={handleWorkspaceUndoButtonMouseDown}
           onClick={handleWorkspaceUndoButtonClick}
-          disabled={!canUndoWorkspace}
+          disabled={disabled || !canUndoWorkspace}
           aria-label="Отменить последнее действие"
           title="Отменить последнее действие"
         >
@@ -16863,7 +16478,7 @@ export default function CategoryWorkspace({
           className="mini-action toolbar-zoom-button"
           onMouseDown={handleToolbarControlMouseDown}
           onClick={handleDecreaseEditorTextScale}
-          disabled={!canDecreaseEditorTextScale}
+          disabled={disabled || !canDecreaseEditorTextScale}
           aria-label="Уменьшить масштаб текста"
         >
           -
@@ -16879,7 +16494,7 @@ export default function CategoryWorkspace({
           onChange={handleEditorTextScaleInputChange}
           onBlur={handleEditorTextScaleInputBlur}
           onKeyDown={handleEditorTextScaleInputKeyDown}
-          disabled={!canAdjustEditorTextScale}
+          disabled={disabled || !canAdjustEditorTextScale}
           aria-label="Editor zoom percent"
         />
 
@@ -16888,7 +16503,7 @@ export default function CategoryWorkspace({
           className="mini-action toolbar-zoom-button"
           onMouseDown={handleToolbarControlMouseDown}
           onClick={handleIncreaseEditorTextScale}
-          disabled={!canIncreaseEditorTextScale}
+          disabled={disabled || !canIncreaseEditorTextScale}
           aria-label="Увеличить масштаб текста"
         >
           +
@@ -16897,7 +16512,68 @@ export default function CategoryWorkspace({
     );
   }
 
-  function renderRichTextTools(scopePrefix: "block" | "continuous") {
+  function retryCurrentCategoryDetail() {
+    if (!currentCategoryId) {
+      return;
+    }
+
+    categoryDetailCacheRef.current.delete(currentCategoryId);
+    categoryDetailPromisesRef.current.delete(currentCategoryId);
+    setCategoryDetailError((current) =>
+      current?.categoryId === currentCategoryId ? null : current
+    );
+    setVisibleCategoryLoaderId((visibleId) =>
+      visibleId === currentCategoryId ? null : visibleId
+    );
+    setCategoryDetailRetryVersion((version) => version + 1);
+  }
+
+  function renderCategoryDetailOverlay() {
+    if (currentCategoryContentLoaded) {
+      return null;
+    }
+
+    return (
+      <div
+        className="category-detail-overlay"
+        aria-busy={!currentCategoryDetailError}
+        aria-label={
+          currentCategoryDetailError ? undefined : "Материал загружается"
+        }
+      >
+        {currentCategoryDetailError ? (
+          <div className="category-detail-error" role="alert">
+            <p>{currentCategoryDetailError}</p>
+            <button
+              type="button"
+              className="mini-action"
+              onClick={retryCurrentCategoryDetail}
+            >
+              повторить
+            </button>
+          </div>
+        ) : (
+          <div
+            className={`category-detail-placeholder ${
+              showCategoryDetailLoader
+                ? "category-detail-placeholder-visible"
+                : ""
+            }`}
+            aria-hidden="true"
+          >
+            <span />
+            <span />
+            <span />
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function renderRichTextTools(
+    scopePrefix: "block" | "continuous",
+    disabled = false
+  ) {
     return (
       <>
         <div className="text-tools-inline">
@@ -16906,7 +16582,7 @@ export default function CategoryWorkspace({
             className={`mini-action text-tool-button ${richToolbarState.bold ? "text-tool-button-active" : ""}`}
             onMouseDown={handleToolbarControlMouseDown}
             onClick={handleToolbarBold}
-            disabled={!canUseRichToolbar}
+            disabled={disabled || !canUseRichToolbar}
             aria-label="Жирный"
           >
             B
@@ -16917,7 +16593,7 @@ export default function CategoryWorkspace({
             className={`mini-action text-tool-button ${richToolbarState.italic ? "text-tool-button-active" : ""}`}
             onMouseDown={handleToolbarControlMouseDown}
             onClick={handleToolbarItalic}
-            disabled={!canUseRichToolbar}
+            disabled={disabled || !canUseRichToolbar}
             aria-label="Курсив"
           >
             I
@@ -16928,7 +16604,7 @@ export default function CategoryWorkspace({
             className="mini-action text-tool-button"
             onMouseDown={handleToolbarControlMouseDown}
             onClick={handleToolbarLink}
-            disabled={!canUseRichToolbar}
+            disabled={disabled || !canUseRichToolbar}
           >
             link
           </button>
@@ -16938,7 +16614,7 @@ export default function CategoryWorkspace({
             className="mini-action text-tool-button"
             onMouseDown={handleToolbarControlMouseDown}
             onClick={handleToolbarImage}
-            disabled={!canUseRichToolbar}
+            disabled={disabled || !canUseRichToolbar}
           >
             image
           </button>
@@ -16948,7 +16624,7 @@ export default function CategoryWorkspace({
             className="mini-action text-tool-button"
             onMouseDown={handleToolbarControlMouseDown}
             onClick={handleToolbarFile}
-            disabled={!canUseRichToolbar}
+            disabled={disabled || !canUseRichToolbar}
           >
             file
           </button>
@@ -16960,7 +16636,7 @@ export default function CategoryWorkspace({
               className={`mini-action text-tool-button text-color-trigger ${showTextColorPalette ? "text-tool-button-active" : ""}`}
               onMouseDown={handleToolbarControlMouseDown}
               onClick={toggleToolbarColorPalette}
-              disabled={!canUseRichToolbar}
+              disabled={disabled || !canUseRichToolbar}
               aria-label="Открыть палитру цвета"
             >
               color
@@ -16989,7 +16665,7 @@ export default function CategoryWorkspace({
                       style={{ backgroundColor: color }}
                       onMouseDown={handleToolbarControlMouseDown}
                       onClick={() => handleToolbarColorChange(color)}
-                      disabled={!canUseRichToolbar}
+                      disabled={disabled || !canUseRichToolbar}
                       aria-label={`Цвет текста ${color}`}
                     />
                   ))}
@@ -17001,7 +16677,7 @@ export default function CategoryWorkspace({
                   className="text-color-picker"
                   onMouseDown={handleToolbarColorInputMouseDown}
                   onChange={(event) => handleToolbarColorChange(event.target.value)}
-                  disabled={!canUseRichToolbar}
+                  disabled={disabled || !canUseRichToolbar}
                   aria-label="Выбрать свой цвет текста"
                 />
               </div>
@@ -18840,211 +18516,8 @@ export default function CategoryWorkspace({
     );
   }
 
-  if (startupPhase !== "ready") {
-    const startupMessage =
-      startupPhase === "auth"
-        ? "Проверяю сессию аккаунта..."
-        : "Загружаю рабочее пространство...";
-
-    return (
-      <main className="workspace-root flex w-full items-stretch p-0">
-        <div className="frame-shell relative flex h-full w-full items-center justify-center p-4">
-          <div className="popup-3d w-full max-w-xl p-5">
-            <h1 className="font-display text-5xl leading-none">Item Key</h1>
-            <p className="mt-3 text-sm text-[#202020]">{startupMessage}</p>
-          </div>
-        </div>
-      </main>
-    );
-  }
-
   if (!isAuthenticated) {
-    return (
-      <main className="workspace-root flex w-full items-stretch p-0">
-        <div className="frame-shell relative flex h-full w-full items-center justify-center p-4">
-          <div className="popup-3d w-full max-w-xl p-5">
-            <h1 className="font-display text-5xl leading-none">Item Key</h1>
-            <p className="mt-3 text-sm text-[#202020]">
-              {authTab === "login"
-                ? "Введи данные для входа: user-id и пароль."
-                : "Введи данные для регистрации аккаунта."}
-            </p>
-
-            <div className="mt-4 flex flex-wrap gap-2">
-              <button
-                type="button"
-                className={`mini-action ${authTab === "login" ? "border-[#4a4a4a] bg-[#bdbdbd]" : "opacity-70"}`}
-                onClick={() => {
-                  setAuthTab("login");
-                  setAuthError(null);
-                  setAuthInfo(null);
-                }}
-                disabled={isAuthBusy}
-              >
-                вход
-              </button>
-              <button
-                type="button"
-                className={`mini-action ${authTab === "register" ? "border-[#4a4a4a] bg-[#bdbdbd]" : "opacity-70"}`}
-                onClick={() => {
-                  setAuthTab("register");
-                  setAuthError(null);
-                  setAuthInfo(null);
-                }}
-                disabled={isAuthBusy}
-              >
-                регистрация
-              </button>
-            </div>
-
-            {authTab === "login" ? (
-              <form
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  void handleAuthSignIn();
-                }}
-              >
-                <label className="settings-label mt-4">user-id</label>
-                <input
-                  type="text"
-                  value={authLoginUserIdDraft}
-                  onChange={(event) => setAuthLoginUserIdDraft(event.target.value)}
-                  className="settings-input"
-                  placeholder="my.user-id"
-                  autoComplete="username"
-                  spellCheck={false}
-                />
-
-                <label className="settings-label mt-3">Пароль</label>
-                <div className="settings-input-wrap">
-                  <input
-                    type={showAuthLoginPassword ? "text" : "password"}
-                    value={authLoginPassword}
-                    onChange={(event) => setAuthLoginPassword(event.target.value)}
-                    className="settings-input pr-14"
-                    placeholder="Твой пароль"
-                    autoComplete="current-password"
-                  />
-                  <button
-                    type="button"
-                    className="input-inline-action"
-                    onClick={() => setShowAuthLoginPassword((prev) => !prev)}
-                    aria-label={
-                      showAuthLoginPassword ? "Скрыть пароль" : "Показать пароль"
-                    }
-                  >
-                    {showAuthLoginPassword ? "hide" : "show"}
-                  </button>
-                </div>
-
-                <div className="mt-4 flex flex-wrap gap-2">
-                  <button
-                    type="submit"
-                    className="mini-action"
-                    disabled={isAuthBusy}
-                  >
-                    войти
-                  </button>
-                  <a
-                    href="/forgot-password"
-                    className="mini-action inline-flex items-center justify-center"
-                  >
-                    забыли пароль
-                  </a>
-                </div>
-              </form>
-            ) : (
-              <>
-                <label className="settings-label mt-4">Email</label>
-                <input
-                  type="email"
-                  value={authRegisterEmail}
-                  onChange={(event) => setAuthRegisterEmail(event.target.value)}
-                  className="settings-input"
-                  placeholder="you@example.com"
-                  autoComplete="email"
-                />
-
-                <label className="settings-label mt-3">user-id</label>
-                <input
-                  type="text"
-                  value={authRegisterUserIdDraft}
-                  onChange={(event) => setAuthRegisterUserIdDraft(event.target.value)}
-                  className="settings-input"
-                  placeholder="my.user-id"
-                  autoComplete="username"
-                  spellCheck={false}
-                />
-
-                <label className="settings-label mt-3">Пароль</label>
-                <div className="settings-input-wrap">
-                  <input
-                    type={showAuthRegisterPassword ? "text" : "password"}
-                    value={authRegisterPassword}
-                    onChange={(event) => setAuthRegisterPassword(event.target.value)}
-                    className="settings-input pr-14"
-                    placeholder="Минимум 6 символов"
-                    autoComplete="new-password"
-                  />
-                  <button
-                    type="button"
-                    className="input-inline-action"
-                    onClick={() => setShowAuthRegisterPassword((prev) => !prev)}
-                    aria-label={
-                      showAuthRegisterPassword ? "Скрыть пароль" : "Показать пароль"
-                    }
-                  >
-                    {showAuthRegisterPassword ? "hide" : "show"}
-                  </button>
-                </div>
-
-                <label className="settings-label mt-3">Повтори пароль</label>
-                <input
-                  type={showAuthRegisterPassword ? "text" : "password"}
-                  value={authRegisterPasswordRepeat}
-                  onChange={(event) => setAuthRegisterPasswordRepeat(event.target.value)}
-                  className="settings-input"
-                  placeholder="Повтори пароль"
-                  autoComplete="new-password"
-                />
-
-                <div className="mt-4 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    className="mini-action"
-                    onClick={() => void handleAuthSignUp()}
-                    disabled={isAuthBusy}
-                  >
-                    зарегистрироваться
-                  </button>
-                </div>
-
-                <p className="settings-hint mt-3">
-                  Письмо подтверждения отправляем автоматически после регистрации.
-                </p>
-              </>
-            )}
-
-            {authError && (
-              <p className="mt-3 rounded border-2 border-[#6a1313] bg-[#dca3a3] px-3 py-2 text-sm text-[#3a0e0e]">
-                {authError}
-              </p>
-            )}
-
-            {authInfo && (
-              <p className="mt-3 rounded border-2 border-[#476018] bg-[#bdd39f] px-3 py-2 text-sm text-[#1f2d0d]">
-                {authInfo}
-              </p>
-            )}
-
-            <p className="settings-hint mt-3">
-              После входа данные привязываются к твоему аккаунту и синхронизируются
-              между устройствами.
-            </p>
-          </div>
-        </div>
-      </main>
-    );
+    return <CrateAuthScreen initialError={authError} />;
   }
 
   if (categories.length === 0 && categoryLoadStatus !== "ready") {
@@ -19236,6 +18709,7 @@ export default function CategoryWorkspace({
                           }
                           onMouseEnter={() => prefetchCategoryDetail(node)}
                           onFocus={() => prefetchCategoryDetail(node)}
+                          onPointerDown={() => prefetchCategoryDetail(node)}
                         >
                           <span className="sidebar-item-title">{node.title}</span>
                         </button>
@@ -19316,43 +18790,7 @@ export default function CategoryWorkspace({
           </aside>
 
           <section className="workspace-screen">
-            {!currentCategoryContentLoaded ? (
-              categoryDetailError ? (
-                <div className="flex h-full min-h-64 flex-col items-center justify-center gap-3 p-6 text-center">
-                  <p className="text-sm text-[#202020]" role="alert">
-                    {categoryDetailError}
-                  </p>
-                  <button
-                    type="button"
-                    className="mini-action"
-                    onClick={() => {
-                      if (currentCategoryId) {
-                        categoryDetailCacheRef.current.delete(currentCategoryId);
-                        categoryDetailPromisesRef.current.delete(currentCategoryId);
-                      }
-                      setCategoryDetailRetryVersion((version) => version + 1);
-                    }}
-                  >
-                    повторить
-                  </button>
-                </div>
-              ) : (
-                <div
-                  className={`category-detail-loading ${
-                    showCategoryDetailLoader ? "category-detail-loading-visible" : ""
-                  }`}
-                  aria-busy="true"
-                  aria-label="Материал загружается"
-                >
-                  <div className="category-detail-loading-toolbar" aria-hidden="true" />
-                  <div className="category-detail-loading-body" aria-hidden="true">
-                    <span />
-                    <span />
-                    <span />
-                  </div>
-                </div>
-              )
-            ) : currentCategory?.format === "block" ? (
+            {currentCategory?.format === "block" ? (
               <>
                 <div className="message-toolbar">
                   <button
@@ -19365,7 +18803,7 @@ export default function CategoryWorkspace({
                   </button>
                   <div className="toolbar-right">
                     <span className="toolbar-meta">формат: блочный</span>
-                    {renderEditorTextScaleControls()}
+                    {renderEditorTextScaleControls(!currentCategoryContentLoaded)}
                   </div>
                 </div>
 
@@ -19398,7 +18836,10 @@ export default function CategoryWorkspace({
                     type="button"
                     className="mini-action analytics-tool-button"
                     onClick={handleOpenContentAnalytics}
-                    disabled={!currentCategoryId || isLoading}
+                    onMouseEnter={prefetchContentAnalytics}
+                    onFocus={prefetchContentAnalytics}
+                    onPointerDown={prefetchContentAnalytics}
+                    disabled={!currentCategoryId || isLoading || !currentCategoryContentLoaded}
                   >
                     Аналитика
                   </button>
@@ -19418,26 +18859,35 @@ export default function CategoryWorkspace({
                   >
                     Rule import
                   </button>
-                  {renderRichTextTools("block")}
+                  {renderRichTextTools("block", !currentCategoryContentLoaded)}
                 </div>
 
                 <div
-                  className="message-board message-board-block"
-                  onClick={() => {
-                    if (selectedMessageId || activeRichEditor) {
-                      pushUiUndoSnapshot();
-                    }
-                    setSelectedMessageId(null);
-                    setActiveRichEditor(null);
-                    setSelectedRichImage(null);
-                    savedRichSelectionRef.current = null;
-                    setShowTextColorPalette(false);
-                  }}
+                  className={`category-detail-body-shell ${
+                    currentCategoryContentLoaded
+                      ? "category-detail-body-shell-ready"
+                      : "category-detail-body-shell-pending"
+                  }`}
+                  aria-busy={!currentCategoryContentLoaded}
                 >
-                  {currentMessages.length === 0 ? (
-                    <p className="empty-note">В этой категории пока нет сообщений. Нажми + сообщение.</p>
-                  ) : (
-                    currentMessages.map((message) => {
+                  <div
+                    className="message-board message-board-block"
+                    inert={!currentCategoryContentLoaded}
+                    onClick={() => {
+                      if (selectedMessageId || activeRichEditor) {
+                        pushUiUndoSnapshot();
+                      }
+                      setSelectedMessageId(null);
+                      setActiveRichEditor(null);
+                      setSelectedRichImage(null);
+                      savedRichSelectionRef.current = null;
+                      setShowTextColorPalette(false);
+                    }}
+                  >
+                    {currentMessages.length === 0 ? (
+                      <p className="empty-note">В этой категории пока нет сообщений. Нажми + сообщение.</p>
+                    ) : (
+                      currentMessages.map((message) => {
                       const checklistCard = blockChecklistCardsByMessageId.get(message.id);
                       const dictionaryCard = blockDictionaryCardsByMessageId.get(message.id);
                       const scheduleCard = blockScheduleCardsByMessageId.get(message.id);
@@ -19909,15 +19359,17 @@ export default function CategoryWorkspace({
                           )}
                         </article>
                       );
-                    })
-                  )}
+                      })
+                    )}
+                  </div>
+                  {renderCategoryDetailOverlay()}
                 </div>
               </>
             ) : (
               <>
                 <div className="message-toolbar">
                   <span className="toolbar-meta">формат: сплошной</span>
-                  {renderEditorTextScaleControls()}
+                  {renderEditorTextScaleControls(!currentCategoryContentLoaded)}
                 </div>
                 <div className="message-toolbar message-toolbar-tools">
                   <button
@@ -19948,7 +19400,10 @@ export default function CategoryWorkspace({
                     type="button"
                     className="mini-action analytics-tool-button"
                     onClick={handleOpenContentAnalytics}
-                    disabled={!currentCategoryId || isLoading}
+                    onMouseEnter={prefetchContentAnalytics}
+                    onFocus={prefetchContentAnalytics}
+                    onPointerDown={prefetchContentAnalytics}
+                    disabled={!currentCategoryId || isLoading || !currentCategoryContentLoaded}
                   >
                     Аналитика
                   </button>
@@ -19968,9 +19423,20 @@ export default function CategoryWorkspace({
                   >
                     Rule import
                   </button>
-                  {renderRichTextTools("continuous")}
+                  {renderRichTextTools("continuous", !currentCategoryContentLoaded)}
                 </div>
-                <div className="continuous-wrap">
+                <div
+                  className={`category-detail-body-shell ${
+                    currentCategoryContentLoaded
+                      ? "category-detail-body-shell-ready"
+                      : "category-detail-body-shell-pending"
+                  }`}
+                  aria-busy={!currentCategoryContentLoaded}
+                >
+                  <div
+                    className="continuous-wrap"
+                    inert={!currentCategoryContentLoaded}
+                  >
                   {continuousRules.length > 0 && (
                     <div className="continuous-rule-board" style={editorTextScaleStyle}>
                       {continuousRules.map((document) => (
@@ -20429,6 +19895,8 @@ export default function CategoryWorkspace({
                     role="textbox"
                     aria-multiline="true"
                   />
+                  </div>
+                  {renderCategoryDetailOverlay()}
                 </div>
               </>
             )}
@@ -21189,7 +20657,9 @@ export default function CategoryWorkspace({
                   closeMobilePanel();
                   handleOpenContentAnalytics();
                 }}
-                disabled={!currentCategoryId || isLoading}
+                onFocus={prefetchContentAnalytics}
+                onPointerDown={prefetchContentAnalytics}
+                disabled={!currentCategoryId || isLoading || !currentCategoryContentLoaded}
               >
                 Аналитика
               </button>
@@ -21215,12 +20685,13 @@ export default function CategoryWorkspace({
               >
                 Rule import
               </button>
-              {renderEditorTextScaleControls()}
+              {renderEditorTextScaleControls(!currentCategoryContentLoaded)}
             </div>
 
             <div className="mobile-rich-tools">
               {renderRichTextTools(
-                currentCategory?.format === "block" ? "block" : "continuous"
+                currentCategory?.format === "block" ? "block" : "continuous",
+                !currentCategoryContentLoaded
               )}
             </div>
           </aside>
@@ -28282,43 +27753,11 @@ function isAbortError(error: unknown): boolean {
   );
 }
 
-async function fetchJsonWithTimeout<T>(
-  input: RequestInfo | URL,
-  init: RequestInit,
-  timeoutMs: number,
-  timeoutMessage: string
-): Promise<{ response: Response; payload: T }> {
-  const abortController = new AbortController();
-  const timeoutId = window.setTimeout(
-    () => abortController.abort(),
-    timeoutMs
-  );
-
-  try {
-    const response = await fetch(input, {
-      ...init,
-      signal: abortController.signal,
-    });
-    const payload = (await response.json()) as T;
-    return { response, payload };
-  } catch (error) {
-    if (isAbortError(error)) {
-      throw new Error(timeoutMessage);
-    }
-
-    throw error;
-  } finally {
-    window.clearTimeout(timeoutId);
-  }
-}
-
 const CONTINUOUS_CONTENT_KIND = "itemkey-continuous-v1";
 const MESSAGE_CHECKLIST_KIND = "itemkey-message-checklist-v1";
 const MESSAGE_DICTIONARY_KIND = "itemkey-message-dictionary-v1";
 const DICTIONARY_EXPORT_KIND = "itemkey-dict-export";
 const DICTIONARY_EXPORT_SCHEMA_VERSION = 2;
-const AUTH_SESSION_TIMEOUT_MS = 15000;
-const WORKSPACE_BOOTSTRAP_TIMEOUT_MS = 25000;
 const DICTIONARY_LABEL_MAX_LENGTH = 42;
 const DICTIONARY_STUDY_PROGRESS_STORAGE_PREFIX =
   "itemkey:dictionary-study-progress:v1";

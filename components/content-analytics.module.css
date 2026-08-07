@@ -19,6 +19,118 @@
   font-family: var(--font-main), "Segoe UI", sans-serif;
 }
 
+.loadingHeading,
+.loadingFilters span,
+.loadingHero span,
+.loadingHero i,
+.loadingMetrics span {
+  background: linear-gradient(90deg, #d9ddd4 25%, #edf0e8 45%, #d9ddd4 65%);
+  background-size: 220% 100%;
+  animation: analytics-loading-sweep 1.2s linear infinite;
+}
+
+.loadingHeading {
+  width: min(16rem, 42vw);
+  height: 2.1rem;
+}
+
+.loadingFilters {
+  display: flex;
+  gap: 0.65rem;
+}
+
+.loadingFilters span {
+  width: 8.5rem;
+  height: 2.6rem;
+}
+
+.loadingView {
+  display: grid;
+  gap: 1rem;
+}
+
+.loadingHero {
+  display: grid;
+  min-height: 15rem;
+  grid-template-columns: minmax(0, 1fr) minmax(12rem, 28%);
+  gap: 1rem;
+  border: 1px solid var(--analytics-line);
+  padding: 1.2rem;
+}
+
+.loadingHero div {
+  display: grid;
+  align-content: start;
+  gap: 0.8rem;
+}
+
+.loadingHero span {
+  display: block;
+  width: 78%;
+  height: 1rem;
+}
+
+.loadingHero span:first-child {
+  width: 32%;
+  height: 0.7rem;
+}
+
+.loadingHero span:nth-child(2) {
+  width: 92%;
+  height: 3.6rem;
+}
+
+.loadingHero i {
+  display: block;
+  min-height: 11rem;
+}
+
+.loadingMetrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.loadingMetrics span {
+  display: block;
+  min-height: 7rem;
+  border: 1px solid var(--analytics-line);
+}
+
+@keyframes analytics-loading-sweep {
+  from {
+    background-position: 220% 0;
+  }
+
+  to {
+    background-position: -220% 0;
+  }
+}
+
+@media (max-width: 760px) {
+  .loadingHero {
+    grid-template-columns: 1fr;
+  }
+
+  .loadingHero i {
+    min-height: 7rem;
+  }
+
+  .loadingMetrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loadingHeading,
+  .loadingFilters span,
+  .loadingHero span,
+  .loadingHero i,
+  .loadingMetrics span {
+    animation: none;
+  }
+}
+
 .header {
   display: grid;
   min-height: 4.75rem;
