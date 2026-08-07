@@ -1090,6 +1090,7 @@ export default function CategoryWorkspace({
     () => new Set()
   );
   const [categoryDetailError, setCategoryDetailError] = useState<string | null>(null);
+  const [showCategoryDetailLoader, setShowCategoryDetailLoader] = useState(false);
   const [categoryDetailRetryVersion, setCategoryDetailRetryVersion] = useState(0);
   const [isMutating, setIsMutating] = useState(false);
   const [isSavingCategory, setIsSavingCategory] = useState(false);
@@ -3653,6 +3654,19 @@ export default function CategoryWorkspace({
     fetchCategoryDetail,
     isAuthenticated,
   ]);
+
+  useEffect(() => {
+    if (currentCategoryContentLoaded || categoryDetailError) {
+      setShowCategoryDetailLoader(false);
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setShowCategoryDetailLoader(true);
+    }, 180);
+
+    return () => window.clearTimeout(timer);
+  }, [categoryDetailError, currentCategoryContentLoaded, currentCategoryId]);
 
   useEffect(() => {
     if (
@@ -14044,11 +14058,24 @@ export default function CategoryWorkspace({
     );
   }
 
-  function setDictionaryStudyShuffle(shuffle: boolean) {
+  async function setDictionaryStudyShuffle(shuffle: boolean) {
     if (!dictionaryStudy) {
       return;
     }
     if (dictionaryStudy.shuffle === shuffle) {
+      return;
+    }
+
+    const confirmed = await requestConfirmation({
+      title: shuffle ? "Включить перемешивание" : "Выключить перемешивание",
+      message: shuffle
+        ? "Карточки будут перемешаны, а текущая позиция и прогресс заучивания будут сброшены. Включить перемешивание?"
+        : "Карточки вернутся к исходному порядку, а текущая позиция и прогресс заучивания будут сброшены. Выключить перемешивание?",
+      confirmLabel: shuffle ? "включить" : "выключить",
+      cancelLabel: "отмена",
+      tone: "danger",
+    });
+    if (!confirmed) {
       return;
     }
 
@@ -19290,11 +19317,11 @@ export default function CategoryWorkspace({
 
           <section className="workspace-screen">
             {!currentCategoryContentLoaded ? (
-              <div className="flex h-full min-h-64 flex-col items-center justify-center gap-3 p-6 text-center">
-                <p className="text-sm text-[#202020]" aria-live="polite">
-                  {categoryDetailError ?? "Загружаю выбранный материал..."}
-                </p>
-                {categoryDetailError && (
+              categoryDetailError ? (
+                <div className="flex h-full min-h-64 flex-col items-center justify-center gap-3 p-6 text-center">
+                  <p className="text-sm text-[#202020]" role="alert">
+                    {categoryDetailError}
+                  </p>
                   <button
                     type="button"
                     className="mini-action"
@@ -19308,8 +19335,23 @@ export default function CategoryWorkspace({
                   >
                     повторить
                   </button>
-                )}
-              </div>
+                </div>
+              ) : (
+                <div
+                  className={`category-detail-loading ${
+                    showCategoryDetailLoader ? "category-detail-loading-visible" : ""
+                  }`}
+                  aria-busy="true"
+                  aria-label="Материал загружается"
+                >
+                  <div className="category-detail-loading-toolbar" aria-hidden="true" />
+                  <div className="category-detail-loading-body" aria-hidden="true">
+                    <span />
+                    <span />
+                    <span />
+                  </div>
+                </div>
+              )
             ) : currentCategory?.format === "block" ? (
               <>
                 <div className="message-toolbar">
@@ -23297,7 +23339,7 @@ export default function CategoryWorkspace({
                         type="checkbox"
                         checked={dictionaryStudy.shuffle}
                         onChange={(event) =>
-                          setDictionaryStudyShuffle(event.target.checked)
+                          void setDictionaryStudyShuffle(event.target.checked)
                         }
                       />
                       <span>перемешивание</span>

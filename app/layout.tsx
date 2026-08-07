@@ -1,9 +1,15 @@
 import type { Metadata } from "next";
+import { Manrope } from "next/font/google";
 import "./globals.css";
+
+const manrope = Manrope({
+  variable: "--font-manrope",
+  subsets: ["latin", "cyrillic"],
+});
 
 export const metadata: Metadata = {
   title: "Item Key",
-  description: "Понятное пространство для проектов, материалов и заметок",
+  description: "3D workspace for nested categories and notes",
 };
 
 export default function RootLayout({
@@ -12,7 +18,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="ru" className="h-full">
+    <html
+      lang="ru"
+      className={`${manrope.variable} h-full`}
+    >
       <body className="min-h-full flex flex-col">{children}</body>
     </html>
   );
