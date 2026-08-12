@@ -16,6 +16,7 @@
   --blue: #4f79c5;
   --control-min: 2.75rem;
   --workspace-rail-size: clamp(16.5rem, 18vw, 21rem);
+  --sidebar-rail-width: 18rem;
   --panel-gap: 0.55rem;
 }
 
@@ -187,6 +188,7 @@ body {
 }
 
 .content-bay {
+  position: relative;
   min-height: 0;
   background: #868686;
   overflow: hidden;
@@ -194,13 +196,16 @@ body {
 
 .sidebar-rail {
   position: relative;
-  flex: 0 0 8.8rem;
-  min-width: 8.8rem;
-  max-width: 8.8rem;
+  flex: 0 0 var(--sidebar-rail-width);
+  width: var(--sidebar-rail-width);
+  min-width: var(--sidebar-rail-width);
+  max-width: var(--sidebar-rail-width);
   min-height: 0;
   padding-right: 1.15rem;
   border: 0;
   background: #989898;
+  transition: width 140ms ease, min-width 140ms ease, max-width 140ms ease,
+    flex-basis 140ms ease;
 }
 
 .sidebar-rail::after {
@@ -212,6 +217,120 @@ body {
   height: 100%;
   background: #585858;
   box-shadow: inset 1px 0 0 #6f6f6f;
+  cursor: col-resize;
+}
+
+.sidebar-resize-handle {
+  position: absolute;
+  z-index: 4;
+  top: 0;
+  right: 0;
+  width: 1.15rem;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+  outline: 0;
+}
+
+.sidebar-resize-handle::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 0.24rem;
+  height: 3.2rem;
+  border: 1px solid #333333;
+  background: #8a8a8a;
+  transform: translate(-50%, -50%);
+}
+
+.sidebar-resize-handle:hover::before,
+.sidebar-resize-handle:focus-visible::before,
+.sidebar-panel-resizing .sidebar-resize-handle::before {
+  background: #d2d2d2;
+  box-shadow: 0 0 0 2px #2f6fd1;
+}
+
+.sidebar-panel-resizing .sidebar-rail {
+  transition: none;
+}
+
+.desktop-panel-head {
+  display: flex;
+  min-height: 2.75rem;
+  flex: 0 0 2.75rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  border-bottom: 1px solid #6a6a6a;
+  background: #a8a8a8;
+  padding: 0 0 0 0.55rem;
+  color: #202020;
+  font-size: 0.72rem;
+  font-weight: 900;
+  line-height: 1.1;
+  text-transform: uppercase;
+}
+
+.desktop-panel-head > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.panel-collapse-button {
+  display: inline-flex;
+  width: 2.75rem;
+  min-width: 2.75rem;
+  height: 2.75rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #616161;
+  background: #c7c7c7;
+  color: #171717;
+  font-size: 1rem;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.panel-collapse-button:hover,
+.panel-collapse-button:focus-visible {
+  background: #dedede;
+}
+
+.panel-restore-button {
+  position: absolute;
+  z-index: 20;
+  top: 0.5rem;
+  display: none;
+  min-height: 2.75rem;
+  max-width: min(14rem, 42vw);
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  border: 2px solid #5f5f5f;
+  background: #c7c7c7;
+  padding: 0.38rem 0.65rem;
+  color: #171717;
+  font-size: 0.72rem;
+  font-weight: 900;
+  line-height: 1;
+  text-transform: uppercase;
+  box-shadow: 3px 3px 0 rgba(45, 45, 45, 0.32);
+}
+
+.panel-restore-button:hover,
+.panel-restore-button:focus-visible {
+  background: #dedede;
+}
+
+.sidebar-panel-restore {
+  left: 0.5rem;
+}
+
+.settings-panel-restore {
+  right: 0.5rem;
 }
 
 .sidebar-scroll {
@@ -2688,10 +2807,11 @@ button:disabled,
   overflow-y: auto;
 }
 
-.settings-title {
-  margin: 0 0 0.45rem;
-  font-size: 1.35rem;
-  line-height: 1;
+.settings-desktop-head {
+  position: sticky;
+  z-index: 3;
+  top: -0.5rem;
+  margin: -0.5rem -0.5rem 0.5rem;
 }
 
 .settings-group {
@@ -3633,7 +3753,7 @@ button:disabled,
 }
 
 .dictionary-study-panel {
-  --dictionary-study-panel-padding: clamp(0.8rem, 2.5vw, 1.4rem);
+  --dictionary-study-panel-padding: clamp(0.65rem, 1.8vw, 1rem);
   position: relative;
   z-index: 1;
   width: min(58rem, 100%);
@@ -3644,10 +3764,9 @@ button:disabled,
   padding: var(--dictionary-study-panel-padding);
   display: flex;
   flex-direction: column;
-  gap: 0.85rem;
+  gap: 0.55rem;
   min-height: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
+  overflow: hidden;
   overscroll-behavior: contain;
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
 }
@@ -3657,37 +3776,106 @@ button:disabled,
   flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
-  gap: 1rem;
+  gap: 0.55rem;
+  min-height: 2.75rem;
 }
 
 .dictionary-study-head-actions {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.3rem;
+}
+
+.dictionary-study-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.5rem;
 }
 
 .dictionary-study-kicker {
   margin: 0;
-  font-size: 0.78rem;
+  flex: 0 0 auto;
+  border: 1px solid #666666;
+  background: #cecece;
+  padding: 0.22rem 0.38rem;
+  font-size: 0.68rem;
   font-weight: 900;
+  line-height: 1;
   color: #2c2c2c;
 }
 
 .dictionary-study-title {
+  min-width: 0;
   margin: 0;
+  overflow: hidden;
   color: #151515;
-  font-size: clamp(2rem, 6vw, 4rem);
-  line-height: 0.92;
-  word-break: break-word;
+  font-size: clamp(1.15rem, 2.5vw, 1.65rem);
+  line-height: 1.05;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dictionary-study-counter {
+  min-height: 2rem;
+  display: inline-flex;
+  align-items: center;
   border: 1px solid #646464;
   background: #d6d6d6;
   padding: 0.22rem 0.58rem;
   color: #222222;
   font-size: 0.82rem;
   font-weight: 800;
+}
+
+.dictionary-study-quickbar {
+  position: relative;
+  z-index: 7;
+  display: flex;
+  min-width: 0;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.dictionary-study-settings {
+  position: relative;
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.dictionary-study-settings > summary {
+  min-height: 2.75rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  cursor: pointer;
+  list-style: none;
+  white-space: nowrap;
+}
+
+.dictionary-study-settings > summary::-webkit-details-marker {
+  display: none;
+}
+
+.dictionary-study-settings[open] > summary {
+  background: #e2e2e2;
+}
+
+.dictionary-study-settings-popover {
+  position: absolute;
+  z-index: 9;
+  top: calc(100% + 0.35rem);
+  right: 0;
+  width: min(32rem, calc(100vw - 3rem));
+  max-height: min(48dvh, 24rem);
+  overflow-y: auto;
+  border: 2px solid #606060;
+  background: #bdbdbd;
+  padding: 0.5rem;
+  box-shadow: 7px 8px 18px rgba(0, 0, 0, 0.3);
 }
 
 .dictionary-study-meta-row {
@@ -3731,6 +3919,10 @@ button:disabled,
 }
 
 .dictionary-study-progress-badge {
+  min-height: 2rem;
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
   border: 1px solid #575f78;
   background: #d7ddee;
   padding: 0.22rem 0.5rem;
@@ -4344,29 +4536,12 @@ button:disabled,
   }
 }
 
-.settings-drawer-trigger {
-  display: none;
-}
-
 .workspace-status {
   display: flex;
   min-width: 0;
   flex-direction: column;
   align-items: center;
-  gap: 0.2rem;
   text-align: center;
-}
-
-.insertion-target-label {
-  display: block;
-  max-width: min(36vw, 28rem);
-  overflow: hidden;
-  color: #2b2b2b;
-  font-size: 0.7rem;
-  font-weight: 800;
-  line-height: 1.1;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .category-tag-library {
@@ -5510,6 +5685,9 @@ button:disabled,
   color: #222222;
   font-size: 0.76rem;
   font-weight: 900;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .locale-switcher button[aria-pressed="true"] {
@@ -5644,16 +5822,11 @@ button:disabled,
 }
 
 @media (min-width: 1280px) {
-  .sidebar-rail,
   .settings-panel {
     flex-basis: var(--workspace-rail-size);
     width: var(--workspace-rail-size);
     min-width: var(--workspace-rail-size);
     max-width: var(--workspace-rail-size);
-  }
-
-  .sidebar-rail {
-    padding-right: 1.15rem;
   }
 
   .sidebar-item {
@@ -5662,6 +5835,24 @@ button:disabled,
 
   .sidebar-item::after {
     display: none;
+  }
+
+  .settings-panel-collapsed .settings-panel {
+    display: none;
+  }
+
+  .settings-panel-collapsed .settings-panel-restore {
+    display: inline-flex;
+  }
+}
+
+@media (min-width: 1024px) {
+  .sidebar-panel-collapsed .sidebar-rail {
+    display: none;
+  }
+
+  .sidebar-panel-collapsed .sidebar-panel-restore {
+    display: inline-flex;
   }
 }
 
@@ -5674,7 +5865,7 @@ button:disabled,
     display: none;
   }
 
-  .settings-drawer-trigger {
+  .settings-panel-restore {
     display: inline-flex;
   }
 
@@ -6563,10 +6754,6 @@ button:disabled,
     width: 100%;
   }
 
-  .settings-title {
-    display: none;
-  }
-
   .settings-group {
     gap: 0.55rem;
   }
@@ -6765,24 +6952,84 @@ button:disabled,
   }
 
   .dictionary-study-panel {
-    --dictionary-study-panel-padding: 0.7rem;
+    --dictionary-study-panel-padding: 0.55rem;
     width: 100%;
     height: calc(100dvh - 1rem - env(safe-area-inset-top) - env(safe-area-inset-bottom));
     max-height: calc(100dvh - 1rem - env(safe-area-inset-top) - env(safe-area-inset-bottom));
     padding: var(--dictionary-study-panel-padding);
-    gap: 0.55rem;
+    gap: 0.4rem;
   }
 
   .dictionary-study-head {
-    align-items: flex-start;
+    align-items: center;
+    min-height: 2.75rem;
   }
 
   .dictionary-study-title {
-    font-size: clamp(1.35rem, 8vw, 2.4rem);
+    font-size: clamp(1rem, 5vw, 1.3rem);
+  }
+
+  .dictionary-study-head-actions .menu-action {
+    width: 2.75rem !important;
+    min-width: 2.75rem;
+    height: 2.75rem !important;
+  }
+
+  .dictionary-study-quickbar {
+    gap: 0.3rem;
+  }
+
+  .dictionary-study-progress-badge {
+    flex: 1 1 auto;
+    justify-content: center;
+    padding-inline: 0.38rem;
+    font-size: 0.7rem;
+  }
+
+  .dictionary-study-settings > summary {
+    width: 2.75rem;
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+    padding: 0;
+  }
+
+  .dictionary-study-settings > summary span:last-child {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .dictionary-study-settings-popover {
+    width: min(24rem, calc(100vw - 1.6rem));
+    max-height: min(55dvh, 22rem);
+    padding: 0.45rem;
   }
 
   .dictionary-study-meta-row {
     gap: 0.35rem;
+  }
+
+  .dictionary-study-toggle,
+  .dictionary-study-shuffle-toggle {
+    min-height: 2.75rem;
+    flex: 1 1 9rem;
+    justify-content: center;
+  }
+
+  .dictionary-study-reset-button,
+  .dictionary-study-autospeak-badge {
+    width: 100%;
+    min-height: 2.75rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
   }
 
   .dictionary-study-card-shell {

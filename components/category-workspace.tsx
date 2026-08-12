@@ -989,6 +989,17 @@ const WORKSPACE_UNDO_LIMIT = 40;
 const RICH_FILE_CLASS_NAME = "rich-file-link";
 const MAX_RICH_FILE_BYTES = 16 * 1024 * 1024;
 const EDITOR_INPUT_SYNC_DELAY_MS = 180;
+const DEFAULT_SIDEBAR_WIDTH = 288;
+const MIN_SIDEBAR_WIDTH = 184;
+const MAX_SIDEBAR_WIDTH = 480;
+const SIDEBAR_COLLAPSE_THRESHOLD = 136;
+const SIDEBAR_WIDTH_STORAGE_KEY = "itemkey.workspace.sidebar-width";
+const SIDEBAR_COLLAPSED_STORAGE_KEY = "itemkey.workspace.sidebar-collapsed";
+const SETTINGS_COLLAPSED_STORAGE_KEY = "itemkey.workspace.settings-collapsed";
+
+function clampSidebarWidth(width: number): number {
+  return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, width));
+}
 
 function categorySummaryToClientRow(summary: CategorySummaryRow): CategoryRow {
   return {
@@ -1091,6 +1102,10 @@ export default function CategoryWorkspace({
   const [showDictionaryGlobalSearch, setShowDictionaryGlobalSearch] =
     useState(false);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("categories");
+  const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isSidebarResizing, setIsSidebarResizing] = useState(false);
+  const [isSettingsCollapsed, setIsSettingsCollapsed] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [menuPanel, setMenuPanel] = useState<MenuPanel>("main");
   const [accountWindowTab, setAccountWindowTab] =
@@ -1262,6 +1277,7 @@ export default function CategoryWorkspace({
   const [isSavingPublicAction, setIsSavingPublicAction] = useState(false);
 
   const importFileRef = useRef<HTMLInputElement | null>(null);
+  const sidebarRailRef = useRef<HTMLElement | null>(null);
   const ruleImportFileRef = useRef<HTMLInputElement | null>(null);
   const dictionaryImportFileRef = useRef<HTMLInputElement | null>(null);
   const accountAvatarFileRef = useRef<HTMLInputElement | null>(null);
@@ -2976,6 +2992,26 @@ export default function CategoryWorkspace({
   useEffect(() => {
     setLocale(initialShellData.account.locale);
   }, [initialShellData.account.locale, setLocale]);
+
+  useEffect(() => {
+    try {
+      const storedSidebarWidth = Number.parseInt(
+        window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY) ?? "",
+        10
+      );
+      if (Number.isFinite(storedSidebarWidth)) {
+        setSidebarWidth(clampSidebarWidth(storedSidebarWidth));
+      }
+      setIsSidebarCollapsed(
+        window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === "true"
+      );
+      setIsSettingsCollapsed(
+        window.localStorage.getItem(SETTINGS_COLLAPSED_STORAGE_KEY) === "true"
+      );
+    } catch {
+      // Storage can be unavailable in hardened browser modes. The panels still work.
+    }
+  }, []);
 
   useEffect(() => {
     if (!dictionaryStudy?.motivateOnCorrect && !dictionaryStudy?.adhdMode) {
@@ -8551,6 +8587,107 @@ export default function CategoryWorkspace({
 
   function closeMobilePanel() {
     setMobilePanel(null);
+  }
+
+  function setSidebarCollapsedWithPersistence(collapsed: boolean) {
+    setIsSidebarCollapsed(collapsed);
+    try {
+      window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, String(collapsed));
+    } catch {
+      // Keep the current-session preference when storage is unavailable.
+    }
+  }
+
+  function setSettingsCollapsedWithPersistence(collapsed: boolean) {
+    setIsSettingsCollapsed(collapsed);
+    try {
+      window.localStorage.setItem(SETTINGS_COLLAPSED_STORAGE_KEY, String(collapsed));
+    } catch {
+      // Keep the current-session preference when storage is unavailable.
+    }
+  }
+
+  function persistSidebarWidth(width: number) {
+    try {
+      window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(width));
+    } catch {
+      // Keep the current-session width when storage is unavailable.
+    }
+  }
+
+  function handleSidebarResizeStart(event: React.PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 || !sidebarRailRef.current) {
+      return;
+    }
+
+    event.preventDefault();
+    const pointerId = event.pointerId;
+    const handle = event.currentTarget;
+    const sidebarLeft = sidebarRailRef.current.getBoundingClientRect().left;
+    let latestRawWidth = sidebarWidth;
+    const previousUserSelect = document.body.style.userSelect;
+    const previousCursor = document.body.style.cursor;
+
+    setIsSidebarResizing(true);
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+    handle.setPointerCapture(pointerId);
+
+    const handlePointerMove = (pointerEvent: PointerEvent) => {
+      if (pointerEvent.pointerId !== pointerId) {
+        return;
+      }
+      latestRawWidth = pointerEvent.clientX - sidebarLeft;
+      setSidebarWidth(clampSidebarWidth(latestRawWidth));
+    };
+
+    const finishResize = (pointerEvent: PointerEvent) => {
+      if (pointerEvent.pointerId !== pointerId) {
+        return;
+      }
+
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", finishResize);
+      window.removeEventListener("pointercancel", finishResize);
+      if (handle.hasPointerCapture(pointerId)) {
+        handle.releasePointerCapture(pointerId);
+      }
+      document.body.style.userSelect = previousUserSelect;
+      document.body.style.cursor = previousCursor;
+      setIsSidebarResizing(false);
+
+      if (latestRawWidth < SIDEBAR_COLLAPSE_THRESHOLD) {
+        setSidebarCollapsedWithPersistence(true);
+        return;
+      }
+
+      const nextWidth = clampSidebarWidth(latestRawWidth);
+      setSidebarWidth(nextWidth);
+      persistSidebarWidth(nextWidth);
+      setSidebarCollapsedWithPersistence(false);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", finishResize);
+    window.addEventListener("pointercancel", finishResize);
+  }
+
+  function handleSidebarResizeKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Home") {
+      event.preventDefault();
+      setSidebarCollapsedWithPersistence(true);
+      return;
+    }
+
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+      return;
+    }
+
+    event.preventDefault();
+    const delta = (event.shiftKey ? 40 : 16) * (event.key === "ArrowLeft" ? -1 : 1);
+    const nextWidth = clampSidebarWidth(sidebarWidth + delta);
+    setSidebarWidth(nextWidth);
+    persistSidebarWidth(nextWidth);
   }
 
   function closeMenu() {
@@ -18662,7 +18799,14 @@ export default function CategoryWorkspace({
       <div
         className={`frame-shell relative flex h-full w-full flex-col overflow-hidden ${
           mobilePanel ? `mobile-panel-${mobilePanel}-open` : ""
-        }`}
+        } ${isSidebarCollapsed ? "sidebar-panel-collapsed" : ""} ${
+          isSettingsCollapsed ? "settings-panel-collapsed" : ""
+        } ${isSidebarResizing ? "sidebar-panel-resizing" : ""}`}
+        style={
+          {
+            "--sidebar-rail-width": `${sidebarWidth}px`,
+          } as CSSProperties
+        }
       >
         <header className="top-strip bevel-panel flex h-[4.7rem] flex-none items-center gap-2 px-2 py-2 sm:gap-3 sm:px-3">
           <div className="title-chip flex min-w-0 flex-1 items-center px-3 py-2">
@@ -18735,7 +18879,7 @@ export default function CategoryWorkspace({
         </header>
 
         <div className="content-bay flex min-h-0 flex-1">
-          <aside className="sidebar-rail flex flex-col p-0">
+          <aside ref={sidebarRailRef} className="sidebar-rail flex flex-col p-0">
             <div className="mobile-panel-head mobile-only">
               <button
                 type="button"
@@ -18759,6 +18903,22 @@ export default function CategoryWorkspace({
                 aria-label={t("common.close")}
               >
                 x
+              </button>
+            </div>
+            <div className="desktop-panel-head sidebar-desktop-head mobile-hide">
+              <span title={currentCategoryPath}>
+                {sidebarTab === "categories"
+                  ? currentCategoryPath
+                  : t("workspace.dictionaryGroups")}
+              </span>
+              <button
+                type="button"
+                className="panel-collapse-button"
+                onClick={() => setSidebarCollapsedWithPersistence(true)}
+                aria-label={t("workspace.hideCategoriesPanel")}
+                title={t("workspace.hideCategoriesPanel")}
+              >
+                ←
               </button>
             </div>
             <div className="sidebar-tab-strip" role="tablist" aria-label="Левая панель">
@@ -18914,7 +19074,31 @@ export default function CategoryWorkspace({
                 </>
               )}
             </div>
+            <div
+              className="sidebar-resize-handle mobile-hide"
+              role="separator"
+              tabIndex={0}
+              aria-orientation="vertical"
+              aria-label={t("workspace.resizeCategoriesPanel")}
+              aria-valuemin={MIN_SIDEBAR_WIDTH}
+              aria-valuemax={MAX_SIDEBAR_WIDTH}
+              aria-valuenow={Math.round(sidebarWidth)}
+              onPointerDown={handleSidebarResizeStart}
+              onKeyDown={handleSidebarResizeKeyDown}
+              onDoubleClick={() => setSidebarCollapsedWithPersistence(true)}
+            />
           </aside>
+
+          <button
+            type="button"
+            className="panel-restore-button sidebar-panel-restore mobile-hide"
+            onClick={() => setSidebarCollapsedWithPersistence(false)}
+            aria-label={t("workspace.showCategoriesPanel")}
+            title={t("workspace.showCategoriesPanel")}
+          >
+            <span aria-hidden="true">→</span>
+            <span>{t("workspace.categories")}</span>
+          </button>
 
           <section className="workspace-screen">
             {currentCategory?.format === "block" ? (
@@ -20046,6 +20230,23 @@ export default function CategoryWorkspace({
             )}
           </section>
 
+          <button
+            type="button"
+            className="panel-restore-button settings-panel-restore mobile-hide"
+            onClick={() => {
+              setSettingsCollapsedWithPersistence(false);
+              if (window.matchMedia("(min-width: 1024px) and (max-width: 1279px)").matches) {
+                openMobilePanel("settings");
+              }
+            }}
+            disabled={!currentCategory || isLoading}
+            aria-label={t("workspace.showSettingsPanel")}
+            title={t("workspace.showSettingsPanel")}
+          >
+            <span>{t("common.settings")}</span>
+            <span aria-hidden="true">←</span>
+          </button>
+
           <aside className="settings-panel">
             <div className="mobile-panel-head mobile-only">
               <span className="font-display">
@@ -20060,9 +20261,25 @@ export default function CategoryWorkspace({
                 x
               </button>
             </div>
-            <h2 className="settings-title font-display">
-              {selectedMessage ? t("workspace.blockSettings") : t("workspace.categorySettings")}
-            </h2>
+            <div className="desktop-panel-head settings-desktop-head mobile-hide">
+              <span>
+                {selectedMessage
+                  ? t("workspace.blockSettings")
+                  : t("workspace.categorySettings")}
+              </span>
+              <button
+                type="button"
+                className="panel-collapse-button"
+                onClick={() => {
+                  setSettingsCollapsedWithPersistence(true);
+                  closeMobilePanel();
+                }}
+                aria-label={t("workspace.hideSettingsPanel")}
+                title={t("workspace.hideSettingsPanel")}
+              >
+                →
+              </button>
+            </div>
 
             {selectedMessage && currentCategory?.format === "block" ? (
               <div className="settings-group">
@@ -20948,9 +21165,6 @@ export default function CategoryWorkspace({
 
           <div className="workspace-status mobile-hide">
             <span className={`text-sm font-semibold ${statusColor}`}>{statusText}</span>
-            <span className="insertion-target-label" title={insertionTarget?.title ?? ""}>
-              + {insertionTarget?.title ?? t("workspace.noCategory")}
-            </span>
           </div>
 
           <div className="desktop-dock mobile-hide flex items-end gap-2 sm:gap-3">
@@ -20966,15 +21180,6 @@ export default function CategoryWorkspace({
               aria-label={t("common.search")}
             >
               <SearchIcon />
-            </button>
-            <button
-              type="button"
-              className="tool-button tool-yellow settings-drawer-trigger"
-              onClick={() => openMobilePanel("settings")}
-              disabled={!currentCategory || isLoading}
-              aria-label={t("common.settings")}
-            >
-              ⚙
             </button>
           </div>
 
@@ -22953,9 +23158,9 @@ export default function CategoryWorkspace({
                 <div className="dictionary-study-backdrop" />
                 <div className="dictionary-study-panel">
                   <header className="dictionary-study-head">
-                    <div className="min-w-0">
+                    <div className="dictionary-study-heading min-w-0">
                       <p className="dictionary-study-kicker">#DICT</p>
-                      <h2 className="dictionary-study-title">
+                      <h2 className="dictionary-study-title" title={dictionaryStudy.title}>
                         {dictionaryStudy.title}
                       </h2>
                     </div>
@@ -22967,7 +23172,7 @@ export default function CategoryWorkspace({
                         aria-label="Открыть настройки словаря"
                         title="Открыть настройки словаря"
                       >
-                        gear
+                        ⚙
                       </button>
                       <button
                         type="button"
@@ -22980,54 +23185,66 @@ export default function CategoryWorkspace({
                     </div>
                   </header>
 
-                  <div className="dictionary-study-meta-row">
+                  <div className="dictionary-study-quickbar">
                     <div className="dictionary-study-counter">
                       {dictionaryStudy.isProgressComplete
                         ? "готово"
                         : `${dictionaryStudy.currentIndex + 1} / ${dictionaryStudy.cards.length}`}
                     </div>
-                    <label className="dictionary-study-toggle dictionary-study-adhd-toggle">
-                      <input
-                        type="checkbox"
-                        checked={dictionaryStudy.adhdMode}
-                        onChange={(event) =>
-                          setDictionaryStudyAdhdMode(event.target.checked)
-                        }
-                      />
-                      <span>режим сдвг</span>
-                    </label>
-                    <label className="dictionary-study-toggle dictionary-study-shuffle-toggle">
-                      <input
-                        type="checkbox"
-                        checked={dictionaryStudy.shuffle}
-                        onChange={(event) =>
-                          void setDictionaryStudyShuffle(event.target.checked)
-                        }
-                      />
-                      <span>перемешивание</span>
-                    </label>
-                    <button
-                      type="button"
-                      className="mini-action dictionary-study-reset-button"
-                      onClick={() => void handleDictionaryStudyReset()}
-                      disabled={dictionaryStudy.cards.length === 0}
-                    >
-                      {dictionaryStudy.shuffle ? "перемешать" : "сбросить прогресс"}
-                    </button>
                     {dictionaryStudy.progressMode && (
                       <span className="dictionary-study-progress-badge">
                         верно {dictionaryStudy.correctCount} / неверно{" "}
                         {dictionaryStudy.wrongCount}
                       </span>
                     )}
-                    {dictionaryStudy.autoSpeak && (
-                      <span className="dictionary-study-autospeak-badge">
-                        автоозвучка: {autoSpeakFieldLabels}
-                      </span>
-                    )}
-                    <span className="dictionary-study-autospeak-badge">
-                      озвучка: {speechLanguageLabel}
-                    </span>
+                    <details className="dictionary-study-settings">
+                      <summary className="mini-action">
+                        <span aria-hidden="true">⚙</span>
+                        <span>{t("common.settings")}</span>
+                      </summary>
+                      <div className="dictionary-study-settings-popover">
+                        <div className="dictionary-study-meta-row">
+                          <label className="dictionary-study-toggle dictionary-study-adhd-toggle">
+                            <input
+                              type="checkbox"
+                              checked={dictionaryStudy.adhdMode}
+                              onChange={(event) =>
+                                setDictionaryStudyAdhdMode(event.target.checked)
+                              }
+                            />
+                            <span>режим сдвг</span>
+                          </label>
+                          <label className="dictionary-study-toggle dictionary-study-shuffle-toggle">
+                            <input
+                              type="checkbox"
+                              checked={dictionaryStudy.shuffle}
+                              onChange={(event) =>
+                                void setDictionaryStudyShuffle(event.target.checked)
+                              }
+                            />
+                            <span>перемешивание</span>
+                          </label>
+                          <button
+                            type="button"
+                            className="mini-action dictionary-study-reset-button"
+                            onClick={() => void handleDictionaryStudyReset()}
+                            disabled={dictionaryStudy.cards.length === 0}
+                          >
+                            {dictionaryStudy.shuffle
+                              ? "перемешать"
+                              : "сбросить прогресс"}
+                          </button>
+                          {dictionaryStudy.autoSpeak && (
+                            <span className="dictionary-study-autospeak-badge">
+                              автоозвучка: {autoSpeakFieldLabels}
+                            </span>
+                          )}
+                          <span className="dictionary-study-autospeak-badge">
+                            озвучка: {speechLanguageLabel}
+                          </span>
+                        </div>
+                      </div>
+                    </details>
                   </div>
 
                   <div
