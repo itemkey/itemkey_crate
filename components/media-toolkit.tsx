@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { type FormEvent, useMemo, useRef, useState } from "react";
 
+import { useI18n } from "@/components/i18n-provider";
 import {
   getTargetOptionsForFile,
   type ConverterTargetOption,
@@ -71,9 +72,11 @@ export default function MediaToolkit({
 }: {
   initialTab?: ToolkitTab;
 }) {
+  const { t } = useI18n();
   const [activeTab, setActiveTab] = useState<ToolkitTab>(initialTab);
 
   const csrfTokenRef = useRef<string | null>(null);
+  const sourceFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [downloadDir, setDownloadDir] = useState("");
   const [urlInputs, setUrlInputs] = useState<string[]>([""]);
@@ -81,9 +84,7 @@ export default function MediaToolkit({
   const [cookiesProfile, setCookiesProfile] = useState("");
   const [poToken, setPoToken] = useState("");
   const [resolutions, setResolutions] = useState<number[]>([]);
-  const [downloaderStatus, setDownloaderStatus] = useState(
-    "Вставь ссылку и нажми Анализ."
-  );
+  const [downloaderStatus, setDownloaderStatus] = useState(() => t("media.pasteLink"));
   const [downloaderError, setDownloaderError] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
@@ -98,7 +99,7 @@ export default function MediaToolkit({
     []
   );
   const [converterTarget, setConverterTarget] = useState("");
-  const [converterStatus, setConverterStatus] = useState("Выбери исходный файл.");
+  const [converterStatus, setConverterStatus] = useState(() => t("media.selectSource"));
   const [converterError, setConverterError] = useState<string | null>(null);
   const [isConverting, setIsConverting] = useState(false);
   const [isPickingConverterDir, setIsPickingConverterDir] = useState(false);
@@ -161,7 +162,7 @@ export default function MediaToolkit({
     }
 
     if (filledUrls.length === 0) {
-      setDownloaderError("Добавь ссылку YouTube.");
+      setDownloaderError(t("media.pasteLink"));
       return;
     }
 
@@ -171,12 +172,12 @@ export default function MediaToolkit({
     setAnalyzedAuthSignature(null);
 
     if (isBatchMode) {
-      setDownloaderStatus('Пакетный режим: нажми "Скачать все (лучшее)".');
+      setDownloaderStatus(t("media.batchReady"));
       return;
     }
 
     setIsAnalyzing(true);
-    setDownloaderStatus("Анализ доступных разрешений...");
+    setDownloaderStatus(t("media.analyzing"));
 
     try {
       const csrfToken = await ensureCsrfToken();
@@ -197,20 +198,20 @@ export default function MediaToolkit({
 
       const payload = (await response.json().catch(() => ({}))) as AnalyzeYoutubePayload;
       if (!response.ok || !payload.data?.resolutions) {
-        throw new Error(payload.error ?? "Не удалось получить доступные разрешения.");
+        throw new Error(payload.error ?? t("media.analysisFailed"));
       }
 
       setResolutions(payload.data.resolutions);
       setAnalyzedUrl(filledUrls[0] ?? null);
       setAnalyzedAuthSignature(authSignature(cookiesBrowser, cookiesProfile, poToken));
-      setDownloaderStatus("Выбери разрешение и нажми Скачать.");
+      setDownloaderStatus(t("media.chooseResolution"));
     } catch (error) {
       setDownloaderError(
         error instanceof Error
           ? error.message
-          : "Не удалось получить доступные разрешения."
+          : t("media.analysisFailed")
       );
-      setDownloaderStatus("Анализ не удался.");
+      setDownloaderStatus(t("media.analysisFailed"));
     } finally {
       setIsAnalyzing(false);
     }
@@ -223,12 +224,12 @@ export default function MediaToolkit({
 
     const currentUrl = filledUrls[0] ?? "";
     if (!currentUrl) {
-      setDownloaderError("Добавь ссылку YouTube.");
+      setDownloaderError(t("media.pasteLink"));
       return;
     }
 
     if (!downloadDir.trim()) {
-      setDownloaderError("Укажи папку загрузки.");
+      setDownloaderError(t("media.enterDownloadFolder"));
       return;
     }
 
@@ -236,7 +237,7 @@ export default function MediaToolkit({
       analyzedUrl !== currentUrl ||
       analyzedAuthSignature !== authSignature(cookiesBrowser, cookiesProfile, poToken)
     ) {
-      setDownloaderError("Сначала нажми Анализ для текущей ссылки и настроек.");
+      setDownloaderError(t("media.analyzeFirst"));
       return;
     }
 
@@ -266,15 +267,15 @@ export default function MediaToolkit({
 
       const payload = (await response.json().catch(() => ({}))) as DownloadYoutubePayload;
       if (!response.ok || !payload.data) {
-        throw new Error(payload.error ?? "Не удалось скачать видео.");
+        throw new Error(payload.error ?? t("media.downloadFailed"));
       }
 
-      setDownloaderStatus(`Готово: ${payload.data.outputDir}`);
+      setDownloaderStatus(t("media.readyPath", { path: payload.data.outputDir }));
     } catch (error) {
       setDownloaderError(
-        error instanceof Error ? error.message : "Не удалось скачать видео."
+        error instanceof Error ? error.message : t("media.downloadFailed")
       );
-      setDownloaderStatus("Скачивание не удалось.");
+      setDownloaderStatus(t("media.downloadFailed"));
     } finally {
       setIsDownloading(false);
     }
@@ -286,12 +287,12 @@ export default function MediaToolkit({
     }
 
     if (filledUrls.length < 2) {
-      setDownloaderError("Для пакетного режима добавь минимум две ссылки.");
+      setDownloaderError(t("media.batchMin"));
       return;
     }
 
     if (!downloadDir.trim()) {
-      setDownloaderError("Укажи папку загрузки.");
+      setDownloaderError(t("media.enterDownloadFolder"));
       return;
     }
 
@@ -320,7 +321,7 @@ export default function MediaToolkit({
 
       const payload = (await response.json().catch(() => ({}))) as DownloadYoutubePayload;
       if (!response.ok || !payload.data) {
-        throw new Error(payload.error ?? "Не удалось выполнить пакетную загрузку.");
+        throw new Error(payload.error ?? t("media.batchFailed"));
       }
 
       const done = payload.data.done ?? 0;
@@ -336,9 +337,9 @@ export default function MediaToolkit({
       setDownloaderError(
         error instanceof Error
           ? error.message
-          : "Не удалось выполнить пакетную загрузку."
+          : t("media.batchFailed")
       );
-      setDownloaderStatus("Пакетная загрузка не удалась.");
+      setDownloaderStatus(t("media.batchFailed"));
     } finally {
       setIsDownloading(false);
     }
@@ -364,20 +365,20 @@ export default function MediaToolkit({
 
       const payload = (await response.json().catch(() => ({}))) as SelectFolderPayload;
       if (!response.ok || !payload.data) {
-        throw new Error(payload.error ?? "Не удалось открыть выбор папки.");
+        throw new Error(payload.error ?? t("media.pickFolderFailed"));
       }
 
       const selectedPath = payload.data.path?.trim() ?? "";
       if (!selectedPath) {
-        setConverterStatus("Выбор папки отменен.");
+        setConverterStatus(t("media.pickFolderCanceled"));
         return;
       }
 
       setConverterOutputDir(selectedPath);
-      setConverterStatus("Папка назначения выбрана.");
+      setConverterStatus(t("media.folderSelected"));
     } catch (error) {
       setConverterError(
-        error instanceof Error ? error.message : "Не удалось открыть выбор папки."
+        error instanceof Error ? error.message : t("media.pickFolderFailed")
       );
     } finally {
       setIsPickingConverterDir(false);
@@ -391,7 +392,7 @@ export default function MediaToolkit({
     if (!file) {
       setConverterTargets([]);
       setConverterTarget("");
-      setConverterStatus("Выбери исходный файл.");
+      setConverterStatus(t("media.selectSource"));
       return;
     }
 
@@ -399,8 +400,8 @@ export default function MediaToolkit({
       setSourceFile(null);
       setConverterTargets([]);
       setConverterTarget("");
-      setConverterError("Файл слишком большой для конвертации.");
-      setConverterStatus("Файл слишком большой.");
+      setConverterError(t("media.fileTooLarge"));
+      setConverterStatus(t("media.fileTooLarge"));
       return;
     }
 
@@ -408,14 +409,14 @@ export default function MediaToolkit({
     if (!details) {
       setConverterTargets([]);
       setConverterTarget("");
-      setConverterError("Файл не поддерживается для конвертации.");
-      setConverterStatus("Файл не поддерживается.");
+      setConverterError(t("media.unsupportedFile"));
+      setConverterStatus(t("media.unsupportedFile"));
       return;
     }
 
     setConverterTargets(details.options);
     setConverterTarget(details.options[0]?.value ?? "");
-    setConverterStatus("Форматы для конвертации обновлены.");
+    setConverterStatus(t("media.formatsUpdated"));
   }
 
   async function handleConvertSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -426,28 +427,28 @@ export default function MediaToolkit({
     }
 
     if (!sourceFile) {
-      setConverterError("Выбери исходный файл.");
+      setConverterError(t("media.selectSource"));
       return;
     }
 
     if (sourceFile.size > MAX_SOURCE_FILE_BYTES) {
-      setConverterError("Файл слишком большой для конвертации.");
+      setConverterError(t("media.fileTooLarge"));
       return;
     }
 
     if (!converterTarget) {
-      setConverterError("Выбери формат назначения.");
+      setConverterError(t("media.selectTarget"));
       return;
     }
 
     if (!converterOutputDir.trim()) {
-      setConverterError("Укажи папку назначения.");
+      setConverterError(t("media.enterTargetFolder"));
       return;
     }
 
     setConverterError(null);
     setIsConverting(true);
-    setConverterStatus("Конвертация...");
+    setConverterStatus(t("media.converting"));
 
     try {
       const csrfToken = await ensureCsrfToken();
@@ -467,63 +468,69 @@ export default function MediaToolkit({
 
       const payload = (await response.json().catch(() => ({}))) as ConvertPayload;
       if (!response.ok || !payload.data?.outputPath) {
-        throw new Error(payload.error ?? "Не удалось конвертировать файл.");
+        throw new Error(payload.error ?? t("media.convertFailed"));
       }
 
-      setConverterStatus(`Готово: ${payload.data.outputPath}`);
+      setConverterStatus(t("media.readyPath", { path: payload.data.outputPath }));
     } catch (error) {
       setConverterError(
-        error instanceof Error ? error.message : "Не удалось конвертировать файл."
+        error instanceof Error ? error.message : t("media.convertFailed")
       );
-      setConverterStatus("Конвертация не удалась.");
+      setConverterStatus(t("media.convertFailed"));
     } finally {
       setIsConverting(false);
     }
   }
 
   return (
-    <main className="workspace-root flex w-full items-stretch p-0">
-      <div className="frame-shell entry-shell relative flex h-full w-full items-center justify-center p-4">
-        <div className="popup-3d w-full max-w-4xl p-6">
-          <h1 className="font-display entry-title text-center leading-none">
-            YouTube Downloader + Converter
+    <main className="workspace-root toolkit-root flex w-full items-stretch p-0">
+      <div className="frame-shell entry-shell toolkit-shell relative flex h-full w-full items-center justify-center p-4">
+        <div className="popup-3d toolkit-panel w-full max-w-4xl p-6">
+          <h1 className="font-display entry-title toolkit-title text-center leading-none">
+            {t("media.title")}
           </h1>
 
-          <div className="mt-5 flex flex-wrap justify-center gap-2">
-            <button
-              type="button"
-              className={`mini-action entry-button inline-flex items-center justify-center ${
-                activeTab === "downloader" ? "toolkit-tab-active" : ""
-              }`}
-              onClick={() => setActiveTab("downloader")}
-              disabled={isConverting || downloaderBusy}
-            >
-              YouTube Downloader
-            </button>
+          <div className="toolkit-navigation mt-5">
+            <div className="toolkit-tabs" role="tablist">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeTab === "downloader"}
+                className={`mini-action entry-button inline-flex items-center justify-center ${
+                  activeTab === "downloader" ? "toolkit-tab-active" : ""
+                }`}
+                onClick={() => setActiveTab("downloader")}
+                disabled={isConverting || downloaderBusy}
+              >
+                {t("media.youtube")}
+              </button>
 
-            <button
-              type="button"
-              className={`mini-action entry-button inline-flex items-center justify-center ${
-                activeTab === "converter" ? "toolkit-tab-active" : ""
-              }`}
-              onClick={() => setActiveTab("converter")}
-              disabled={isConverting || downloaderBusy}
-            >
-              Converter
-            </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeTab === "converter"}
+                className={`mini-action entry-button inline-flex items-center justify-center ${
+                  activeTab === "converter" ? "toolkit-tab-active" : ""
+                }`}
+                onClick={() => setActiveTab("converter")}
+                disabled={isConverting || downloaderBusy}
+              >
+                {t("media.converter")}
+              </button>
+            </div>
 
             <Link
               href="/"
-              className="mini-action entry-button inline-flex items-center justify-center"
+              className="mini-action toolkit-home-link inline-flex items-center justify-center"
             >
-              Главное меню
+              {t("media.mainMenu")}
             </Link>
           </div>
 
           {activeTab === "downloader" ? (
-            <section className="mx-auto mt-6 flex w-full max-w-3xl flex-col gap-3">
+            <section className="toolkit-content mx-auto mt-6 flex w-full max-w-3xl flex-col gap-3">
               <label className="settings-label" htmlFor="download-folder">
-                Папка загрузки
+                {t("media.downloadFolder")}
               </label>
               <input
                 id="download-folder"
@@ -535,10 +542,10 @@ export default function MediaToolkit({
                 placeholder="E:\\downloads"
               />
 
-              <label className="settings-label">Ссылки YouTube</label>
+              <label className="settings-label">{t("media.youtubeLinks")}</label>
               <div className="flex flex-col gap-2">
                 {urlInputs.map((value, index) => (
-                  <div key={`url-${index}`} className="flex items-center gap-2">
+                  <div key={`url-${index}`} className="toolkit-url-row">
                     <input
                       type="text"
                       className="settings-input"
@@ -549,24 +556,25 @@ export default function MediaToolkit({
                     />
                     <button
                       type="button"
-                      className="mini-action inline-flex items-center justify-center"
+                      className="mini-action toolkit-remove-url inline-flex items-center justify-center"
                       onClick={() => removeUrlInput(index)}
                       disabled={downloaderBusy}
+                      aria-label={`${t("media.removeUrl")} ${index + 1}`}
                     >
-                      -
+                      ×
                     </button>
                   </div>
                 ))}
               </div>
 
-              <div className="mt-1 flex flex-wrap items-center gap-2">
+              <div className="toolkit-primary-actions mt-1">
                 <button
                   type="button"
                   className="mini-action inline-flex items-center justify-center"
                   onClick={addUrlInput}
                   disabled={downloaderBusy}
                 >
-                  + URL
+                  + {t("media.addUrl")}
                 </button>
 
                 <button
@@ -575,7 +583,7 @@ export default function MediaToolkit({
                   onClick={handleAnalyzeYoutube}
                   disabled={downloaderBusy || filledUrls.length === 0}
                 >
-                  {isAnalyzing ? "Анализ..." : "Анализ"}
+                  {isAnalyzing ? t("media.analyzing") : t("media.analyze")}
                 </button>
 
                 {isBatchMode && (
@@ -585,13 +593,13 @@ export default function MediaToolkit({
                     onClick={handleDownloadBatchBest}
                     disabled={downloaderBusy}
                   >
-                    {isDownloading ? "Скачивание..." : "Скачать все (лучшее)"}
+                    {isDownloading ? t("media.downloading") : t("media.downloadAllBest")}
                   </button>
                 )}
               </div>
 
               <details className="toolkit-advanced">
-                <summary className="toolkit-advanced-summary">advanced</summary>
+                <summary className="toolkit-advanced-summary">{t("media.advanced")}</summary>
 
                 <div className="toolkit-advanced-grid grid gap-3 md:grid-cols-3">
                 <div className="md:col-span-1">
@@ -668,7 +676,9 @@ export default function MediaToolkit({
                       onClick={() => handleDownloadByResolution(height)}
                       disabled={downloaderBusy}
                     >
-                      {isDownloading ? "Скачивание..." : `Скачать ${height}p`}
+                      {isDownloading
+                        ? t("media.downloading")
+                        : t("media.downloadResolution", { height })}
                     </button>
                   ))}
                 </div>
@@ -686,22 +696,36 @@ export default function MediaToolkit({
             </section>
           ) : (
             <form
-              className="mx-auto mt-6 flex w-full max-w-3xl flex-col gap-3"
+              className="toolkit-content mx-auto mt-6 flex w-full max-w-3xl flex-col gap-3"
               onSubmit={handleConvertSubmit}
             >
               <label className="settings-label" htmlFor="converter-source">
-                Исходный файл
+                {t("media.sourceFile")}
               </label>
-              <input
-                id="converter-source"
-                type="file"
-                className="settings-input"
-                onChange={(event) => handleSourceFileChange(event.target.files?.[0] ?? null)}
-                disabled={isConverting}
-              />
+              <div className="toolkit-file-picker">
+                <input
+                  ref={sourceFileInputRef}
+                  id="converter-source"
+                  type="file"
+                  className="toolkit-file-input"
+                  onChange={(event) => handleSourceFileChange(event.target.files?.[0] ?? null)}
+                  disabled={isConverting}
+                />
+                <button
+                  type="button"
+                  className="mini-action toolkit-file-button"
+                  onClick={() => sourceFileInputRef.current?.click()}
+                  disabled={isConverting}
+                >
+                  {t("media.chooseFile")}
+                </button>
+                <span className="toolkit-file-name" title={sourceFile?.name ?? ""}>
+                  {sourceFile?.name ?? t("media.noFile")}
+                </span>
+              </div>
 
               <label className="settings-label" htmlFor="converter-target">
-                Формат назначения
+                {t("media.targetFormat")}
               </label>
               <select
                 id="converter-target"
@@ -711,7 +735,7 @@ export default function MediaToolkit({
                 disabled={isConverting || converterTargets.length === 0}
               >
                 {converterTargets.length === 0 ? (
-                  <option value="">Нет доступных форматов</option>
+                  <option value="">{t("media.noFormats")}</option>
                 ) : (
                   converterTargets.map((option) => (
                     <option key={option.value} value={option.value}>
@@ -728,7 +752,7 @@ export default function MediaToolkit({
               )}
 
               <label className="settings-label" htmlFor="converter-output-dir">
-                Папка назначения
+                {t("media.targetFolder")}
               </label>
               <div className="settings-input-wrap">
                 <input
@@ -747,7 +771,7 @@ export default function MediaToolkit({
                   onClick={handlePickConverterOutputDir}
                   disabled={isConverting || isPickingConverterDir}
                 >
-                  {isPickingConverterDir ? "..." : "Обзор"}
+                  {isPickingConverterDir ? "..." : t("media.browse")}
                 </button>
               </div>
 
@@ -762,7 +786,7 @@ export default function MediaToolkit({
                   converterTargets.length === 0
                 }
               >
-                {isConverting ? "Конвертация..." : "Конвертировать"}
+                {isConverting ? t("media.converting") : t("media.convert")}
               </button>
 
               {converterError && (

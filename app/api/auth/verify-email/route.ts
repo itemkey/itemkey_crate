@@ -1,5 +1,6 @@
 import { cookies } from "next/headers";
 
+import { API_ERROR_CODES } from "@/lib/api-errors";
 import {
   assertAuthRateLimit,
   AuthRateLimitError,
@@ -17,6 +18,7 @@ import {
   SESSION_COOKIE_NAME,
 } from "@/lib/auth/session";
 import { toErrorMessage } from "@/lib/errors";
+import { getLocaleCookieOptions } from "@/lib/i18n-server";
 
 export const dynamic = "force-dynamic";
 
@@ -34,6 +36,7 @@ export async function POST(request: Request) {
         return Response.json(
           {
             error: error.message,
+            code: API_ERROR_CODES.RATE_LIMITED,
           },
           {
             status: 429,
@@ -62,6 +65,10 @@ export async function POST(request: Request) {
         expires: session.expiresAt,
         ...getSessionCookieBaseOptions(),
       });
+      cookieStore.set({
+        ...getLocaleCookieOptions(),
+        value: account.locale,
+      });
 
       maybeRunAuthCleanup();
       await recordAuthRateEvent(rateLimitContext, true);
@@ -71,6 +78,7 @@ export async function POST(request: Request) {
           id: account.id,
           email: account.email,
           emailVerifiedAt: account.email_verified_at,
+          locale: account.locale,
         },
         source: "postgres",
       });
@@ -78,7 +86,10 @@ export async function POST(request: Request) {
       await recordAuthRateEvent(rateLimitContext, false);
 
       if (error instanceof EmailVerificationTokenInvalidError) {
-        return Response.json({ error: error.message }, { status: 400 });
+        return Response.json(
+          { code: API_ERROR_CODES.TOKEN_INVALID, error: error.message },
+          { status: 400 }
+        );
       }
 
       throw error;
@@ -88,6 +99,7 @@ export async function POST(request: Request) {
     return Response.json(
       {
         error: toErrorMessage(error, "Не удалось подтвердить email."),
+        code: API_ERROR_CODES.INTERNAL_ERROR,
       },
       { status: 500 }
     );

@@ -2,6 +2,8 @@ import "server-only";
 
 import nodemailer, { type Transporter } from "nodemailer";
 
+import { type Locale, normalizeLocale } from "@/lib/i18n";
+
 export class AuthEmailDeliveryError extends Error {
   constructor(message: string) {
     super(message);
@@ -131,9 +133,12 @@ export async function sendEmailVerificationMail(input: {
   to: string;
   token: string;
   expiresAt: Date;
+  locale?: Locale;
 }): Promise<void> {
   const link = buildVerificationLink(input.token);
-  const expiresAtText = input.expiresAt.toLocaleString("ru-RU", {
+  const locale = normalizeLocale(input.locale);
+  const isEnglish = locale === "en";
+  const expiresAtText = input.expiresAt.toLocaleString(isEnglish ? "en-GB" : "ru-RU", {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -144,18 +149,25 @@ export async function sendEmailVerificationMail(input: {
 
   await sendAuthEmail({
     to: input.to,
-    subject: "Подтверждение email в Item Key",
-    text: [
-      "Подтверди email для входа в Item Key.",
-      "",
-      `Ссылка: ${link}`,
-      `Действует до: ${expiresAtText}`,
-    ].join("\n"),
+    subject: isEnglish ? "Confirm your Item Key email" : "Подтверждение email в Item Key",
+    text: isEnglish
+      ? [
+          "Confirm your email to sign in to Item Key.",
+          "",
+          `Link: ${link}`,
+          `Valid until: ${expiresAtText}`,
+        ].join("\n")
+      : [
+          "Подтверди email для входа в Item Key.",
+          "",
+          `Ссылка: ${link}`,
+          `Действует до: ${expiresAtText}`,
+        ].join("\n"),
     html: `
       <div style="font-family:Segoe UI,Arial,sans-serif;line-height:1.5;color:#1a1a1a">
-        <p>Подтверди email для входа в <strong>Item Key</strong>.</p>
-        <p><a href="${link}">Подтвердить email</a></p>
-        <p style="font-size:13px;color:#555">Ссылка действует до: ${expiresAtText}</p>
+        <p>${isEnglish ? "Confirm your email to sign in to" : "Подтверди email для входа в"} <strong>Item Key</strong>.</p>
+        <p><a href="${link}">${isEnglish ? "Confirm email" : "Подтвердить email"}</a></p>
+        <p style="font-size:13px;color:#555">${isEnglish ? "Valid until" : "Ссылка действует до"}: ${expiresAtText}</p>
       </div>
     `,
   });
@@ -165,9 +177,12 @@ export async function sendPasswordResetMail(input: {
   to: string;
   token: string;
   expiresAt: Date;
+  locale?: Locale;
 }): Promise<void> {
   const link = buildResetLink(input.token);
-  const expiresAtText = input.expiresAt.toLocaleString("ru-RU", {
+  const locale = normalizeLocale(input.locale);
+  const isEnglish = locale === "en";
+  const expiresAtText = input.expiresAt.toLocaleString(isEnglish ? "en-GB" : "ru-RU", {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -178,21 +193,30 @@ export async function sendPasswordResetMail(input: {
 
   await sendAuthEmail({
     to: input.to,
-    subject: "Сброс пароля в Item Key",
-    text: [
-      "Получен запрос на сброс пароля в Item Key.",
-      "",
-      `Ссылка: ${link}`,
-      `Действует до: ${expiresAtText}`,
-      "",
-      "Если это были не вы, просто проигнорируйте это письмо.",
-    ].join("\n"),
+    subject: isEnglish ? "Reset your Item Key password" : "Сброс пароля в Item Key",
+    text: isEnglish
+      ? [
+          "We received a request to reset your Item Key password.",
+          "",
+          `Link: ${link}`,
+          `Valid until: ${expiresAtText}`,
+          "",
+          "If this was not you, ignore this email.",
+        ].join("\n")
+      : [
+          "Получен запрос на сброс пароля в Item Key.",
+          "",
+          `Ссылка: ${link}`,
+          `Действует до: ${expiresAtText}`,
+          "",
+          "Если это были не вы, просто проигнорируйте это письмо.",
+        ].join("\n"),
     html: `
       <div style="font-family:Segoe UI,Arial,sans-serif;line-height:1.5;color:#1a1a1a">
-        <p>Получен запрос на сброс пароля в <strong>Item Key</strong>.</p>
-        <p><a href="${link}">Сбросить пароль</a></p>
-        <p style="font-size:13px;color:#555">Ссылка действует до: ${expiresAtText}</p>
-        <p style="font-size:13px;color:#555">Если это были не вы, просто проигнорируйте это письмо.</p>
+        <p>${isEnglish ? "We received a password reset request for" : "Получен запрос на сброс пароля в"} <strong>Item Key</strong>.</p>
+        <p><a href="${link}">${isEnglish ? "Reset password" : "Сбросить пароль"}</a></p>
+        <p style="font-size:13px;color:#555">${isEnglish ? "Valid until" : "Ссылка действует до"}: ${expiresAtText}</p>
+        <p style="font-size:13px;color:#555">${isEnglish ? "If this was not you, ignore this email." : "Если это были не вы, просто проигнорируйте это письмо."}</p>
       </div>
     `,
   });

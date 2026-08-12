@@ -1,7 +1,9 @@
 import { NextRequest } from "next/server";
 
 import { getAccountStore } from "@/lib/account-store";
+import { API_ERROR_CODES } from "@/lib/api-errors";
 import { toErrorMessage } from "@/lib/errors";
+import { isLocale, type Locale } from "@/lib/i18n";
 import { getRequestUser } from "@/lib/request-user";
 
 export const dynamic = "force-dynamic";
@@ -72,7 +74,10 @@ export async function GET(request: NextRequest) {
   try {
     const user = await getRequestUser(request);
     if (!user) {
-      return Response.json({ error: "Требуется вход в аккаунт." }, { status: 401 });
+      return Response.json(
+        { code: API_ERROR_CODES.UNAUTHORIZED, error: "Требуется вход в аккаунт." },
+        { status: 401 }
+      );
     }
 
     const accountStore = await getAccountStore();
@@ -89,6 +94,7 @@ export async function GET(request: NextRequest) {
         nickname: user.nickname,
         profileDescription: user.profileDescription,
         avatarUrl: user.avatarUrl,
+        locale: user.locale,
         canChangeUserIdNow: availability.canChangeNow,
         nextUserIdChangeAt: availability.nextAllowedAt,
         activeMigrationCode,
@@ -99,6 +105,7 @@ export async function GET(request: NextRequest) {
     return Response.json(
       {
         error: toErrorMessage(error, "Не удалось загрузить профиль аккаунта."),
+        code: API_ERROR_CODES.ACCOUNT_LOAD_FAILED,
       },
       { status: 500 }
     );
@@ -109,19 +116,24 @@ export async function PATCH(request: NextRequest) {
   try {
     const user = await getRequestUser(request);
     if (!user) {
-      return Response.json({ error: "Требуется вход в аккаунт." }, { status: 401 });
+      return Response.json(
+        { code: API_ERROR_CODES.UNAUTHORIZED, error: "Требуется вход в аккаунт." },
+        { status: 401 }
+      );
     }
 
     const body = (await request.json()) as {
       nickname?: unknown;
       profileDescription?: unknown;
       avatarUrl?: unknown;
+      locale?: unknown;
     };
 
     const patch: {
       nickname?: string;
       profileDescription?: string;
       avatarUrl?: string | null;
+      locale?: Locale;
     } = {};
 
     try {
@@ -136,10 +148,18 @@ export async function PATCH(request: NextRequest) {
       if ("avatarUrl" in body) {
         patch.avatarUrl = parseAvatarUrl(body.avatarUrl);
       }
+
+      if ("locale" in body) {
+        if (!isLocale(body.locale)) {
+          throw new Error("Поддерживаются только языки ru и en.");
+        }
+        patch.locale = body.locale;
+      }
     } catch (error) {
       return Response.json(
         {
           error: toErrorMessage(error, "Некорректные данные профиля."),
+          code: API_ERROR_CODES.INVALID_INPUT,
         },
         { status: 400 }
       );
@@ -149,6 +169,7 @@ export async function PATCH(request: NextRequest) {
       return Response.json(
         {
           error: "Нет данных для обновления профиля.",
+          code: API_ERROR_CODES.INVALID_INPUT,
         },
         { status: 400 }
       );
@@ -169,6 +190,7 @@ export async function PATCH(request: NextRequest) {
         nickname: updated.nickname,
         profileDescription: updated.profile_description,
         avatarUrl: updated.avatar_url,
+        locale: updated.locale,
         canChangeUserIdNow: availability.canChangeNow,
         nextUserIdChangeAt: availability.nextAllowedAt,
         activeMigrationCode,
@@ -179,6 +201,7 @@ export async function PATCH(request: NextRequest) {
     return Response.json(
       {
         error: toErrorMessage(error, "Не удалось обновить профиль аккаунта."),
+        code: API_ERROR_CODES.ACCOUNT_UPDATE_FAILED,
       },
       { status: 500 }
     );

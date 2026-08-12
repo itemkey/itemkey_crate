@@ -3,13 +3,19 @@
 import Link from "next/link";
 import { useState } from "react";
 
+import { useI18n } from "@/components/i18n-provider";
+import LocaleSwitcher from "@/components/locale-switcher";
+import { localizeApiError } from "@/lib/api-errors";
+
 type ForgotPasswordPayload = {
   ok?: boolean;
   message?: string;
   error?: string;
+  code?: string;
 };
 
 export default function ForgotPasswordPage() {
+  const { locale, t } = useI18n();
   const [email, setEmail] = useState("");
   const [isBusy, setIsBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -18,7 +24,7 @@ export default function ForgotPasswordPage() {
   async function handleSubmit() {
     const normalized = email.trim();
     if (!normalized) {
-      setError("Введи email.");
+      setError(t("auth.enterEmail"));
       return;
     }
 
@@ -38,18 +44,15 @@ export default function ForgotPasswordPage() {
 
       const payload = (await response.json()) as ForgotPasswordPayload;
       if (!response.ok) {
-        throw new Error(payload.error ?? "Не удалось отправить ссылку для сброса.");
+        throw new Error(localizeApiError(locale, payload, "auth.resetSendFailed"));
       }
 
-      setInfo(
-        payload.message ??
-          "Если аккаунт с таким email существует, мы отправили ссылку для сброса."
-      );
+      setInfo(t("auth.resetSent"));
     } catch (requestError) {
       setError(
         requestError instanceof Error
           ? requestError.message
-          : "Не удалось отправить ссылку для сброса."
+          : t("auth.resetSendFailed")
       );
     } finally {
       setIsBusy(false);
@@ -59,10 +62,13 @@ export default function ForgotPasswordPage() {
   return (
     <main className="workspace-root flex w-full items-stretch p-0">
       <div className="frame-shell relative flex h-full w-full items-center justify-center p-4">
-        <div className="popup-3d w-full max-w-xl p-5">
-          <h1 className="font-display text-5xl leading-none">Сброс пароля</h1>
+        <div className="popup-3d entry-form-panel w-full max-w-xl p-5">
+          <div className="entry-form-head">
+            <h1 className="font-display text-5xl leading-none">{t("auth.forgotTitle")}</h1>
+            <LocaleSwitcher compact />
+          </div>
           <p className="mt-3 text-sm text-[#202020]">
-            Введи email, привязанный к аккаунту. Мы отправим ссылку для установки нового пароля.
+            {t("auth.forgotIntro")}
           </p>
 
           <label className="settings-label mt-4">Email</label>
@@ -94,13 +100,13 @@ export default function ForgotPasswordPage() {
               onClick={() => void handleSubmit()}
               disabled={isBusy}
             >
-              отправить ссылку
+              {t("auth.sendReset")}
             </button>
             <Link
               href="/crate"
               className="mini-action inline-flex items-center justify-center"
             >
-              назад к входу
+              {t("auth.backToLogin")}
             </Link>
           </div>
         </div>

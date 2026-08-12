@@ -4,6 +4,7 @@ import "./pdf-viewer.css";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { useI18n } from "@/components/i18n-provider";
 import {
   deleteExpiredPdfViewerFiles,
   getPdfViewerFile,
@@ -52,7 +53,7 @@ async function waitForPdfViewerFile(id: string): Promise<PdfViewerFileRecord | n
   return null;
 }
 
-function formatPdfFileSize(bytes: number): string {
+function formatPdfFileSize(bytes: number, locale: string): string {
   if (!Number.isFinite(bytes) || bytes <= 0) {
     return "";
   }
@@ -66,15 +67,18 @@ function formatPdfFileSize(bytes: number): string {
   }
 
   const digits = unitIndex === 0 || value >= 100 ? 0 : 1;
-  return `${value.toFixed(digits)} ${units[unitIndex]}`;
+  return `${new Intl.NumberFormat(locale, {
+    maximumFractionDigits: digits,
+  }).format(value)} ${units[unitIndex]}`;
 }
 
 export default function PdfViewerPage() {
+  const { locale, t } = useI18n();
   const [fileName, setFileName] = useState("PDF");
   const [fileSizeLabel, setFileSizeLabel] = useState("");
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [pages, setPages] = useState<number[]>([]);
-  const [status, setStatus] = useState("Готовим PDF...");
+  const [status, setStatus] = useState(() => t("pdf.preparing"));
   const [error, setError] = useState<string | null>(null);
   const [resizeTick, setResizeTick] = useState(0);
   const pdfDocumentRef = useRef<PdfDocumentProxy | null>(null);
@@ -99,22 +103,22 @@ export default function PdfViewerPage() {
         }
 
         if (!id.trim()) {
-          throw new Error("PDF не найден.");
+          throw new Error(t("pdf.notFound"));
         }
 
         const record = await waitForPdfViewerFile(id);
         if (!record) {
-          throw new Error("PDF не успел передаться в новую вкладку. Открой файл ещё раз.");
+          throw new Error(t("pdf.transferTimeout"));
         }
         if (isCancelled) {
           return;
         }
 
         setFileName(record.fileName);
-        setFileSizeLabel(formatPdfFileSize(record.sizeBytes));
+        setFileSizeLabel(formatPdfFileSize(record.sizeBytes, locale));
         objectUrl = URL.createObjectURL(record.blob);
         setDownloadUrl(objectUrl);
-        setStatus("Загружаем PDF...");
+        setStatus(t("pdf.loading"));
 
         const pdfjs = await loadPdfJs();
         if (isCancelled) {
@@ -136,15 +140,19 @@ export default function PdfViewerPage() {
 
         pdfDocumentRef.current = pdfDocument;
         setPages(Array.from({ length: pdfDocument.numPages }, (_, index) => index + 1));
-        setStatus(`Страниц: ${pdfDocument.numPages}`);
+        setStatus(
+          t("pdf.pageCount", {
+            count: new Intl.NumberFormat(locale).format(pdfDocument.numPages),
+          })
+        );
       } catch (loadError) {
         if (!isCancelled) {
           setError(
             loadError instanceof Error
               ? loadError.message
-              : "Не удалось открыть PDF."
+              : t("pdf.openFailed")
           );
-          setStatus("PDF не открылся.");
+          setStatus(t("pdf.openFailed"));
         }
       }
     }
@@ -159,7 +167,7 @@ export default function PdfViewerPage() {
         URL.revokeObjectURL(objectUrl);
       }
     };
-  }, []);
+  }, [locale, t]);
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -194,7 +202,7 @@ export default function PdfViewerPage() {
 
     async function renderPages() {
       try {
-        setStatus("Рисуем страницы...");
+        setStatus(t("pdf.rendering"));
 
         for (const pageNumber of pages) {
           if (isCancelled) {
@@ -222,7 +230,7 @@ export default function PdfViewerPage() {
           const cssViewport = page.getViewport({ scale: cssScale });
           const context = canvas.getContext("2d", { alpha: false });
           if (!context) {
-            throw new Error("Браузер не смог подготовить canvas для PDF.");
+            throw new Error(t("pdf.canvasFailed"));
           }
 
           canvas.width = Math.ceil(renderViewport.width);
@@ -244,16 +252,20 @@ export default function PdfViewerPage() {
         }
 
         if (!isCancelled) {
-          setStatus(`Готово: ${pages.length} стр.`);
+          setStatus(
+            t("pdf.readyCount", {
+              count: new Intl.NumberFormat(locale).format(pages.length),
+            })
+          );
         }
       } catch (renderError) {
         if (!isCancelled) {
           setError(
             renderError instanceof Error
               ? renderError.message
-              : "Не удалось отрисовать PDF."
+              : t("pdf.renderFailed")
           );
-          setStatus("PDF не открылся.");
+          setStatus(t("pdf.openFailed"));
         }
       }
     }
@@ -266,7 +278,7 @@ export default function PdfViewerPage() {
         task.cancel();
       }
     };
-  }, [pages, resizeTick]);
+  }, [locale, pages, resizeTick, t]);
 
   return (
     <main className="pdf-viewer-page">
@@ -278,27 +290,31 @@ export default function PdfViewerPage() {
         </div>
         {downloadUrl ? (
           <a className="pdf-viewer-download" href={downloadUrl} download={title}>
-            скачать
+            {t("common.download")}
           </a>
         ) : null}
       </header>
 
       {error ? (
         <section className="pdf-viewer-error">
-          <h2>Не удалось показать PDF</h2>
+          <h2>{t("pdf.failed")}</h2>
           <p>{error}</p>
           {downloadUrl ? (
             <a href={downloadUrl} download={title}>
-              скачать файл
+              {t("pdf.downloadFile")}
             </a>
           ) : null}
         </section>
       ) : null}
 
-      <section className="pdf-viewer-pages" aria-label="Страницы PDF">
+      <section className="pdf-viewer-pages" aria-label={t("pdf.pages")}>
         {pages.map((pageNumber) => (
           <article className="pdf-viewer-page-frame" key={pageNumber}>
-            <div className="pdf-viewer-page-number">стр. {pageNumber}</div>
+            <div className="pdf-viewer-page-number">
+              {t("pdf.pageNumber", {
+                number: new Intl.NumberFormat(locale).format(pageNumber),
+              })}
+            </div>
             <canvas
               ref={(element) => {
                 canvasRefs.current[pageNumber] = element;

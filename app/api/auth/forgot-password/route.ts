@@ -1,4 +1,5 @@
 import { AuthEmailDeliveryError, sendPasswordResetMail } from "@/lib/auth/mailer";
+import { API_ERROR_CODES } from "@/lib/api-errors";
 import {
   assertAuthRateLimit,
   AuthRateLimitError,
@@ -36,6 +37,7 @@ export async function POST(request: Request) {
       return Response.json(
         {
           error: toErrorMessage(error, "Некорректный email."),
+          code: API_ERROR_CODES.INVALID_INPUT,
         },
         { status: 400 }
       );
@@ -54,6 +56,7 @@ export async function POST(request: Request) {
         return Response.json(
           {
             error: error.message,
+            code: API_ERROR_CODES.RATE_LIMITED,
           },
           {
             status: 429,
@@ -74,6 +77,7 @@ export async function POST(request: Request) {
           to: issued.email,
           token: issued.token,
           expiresAt: issued.expiresAt,
+          locale: issued.locale,
         });
       }
 
@@ -91,6 +95,7 @@ export async function POST(request: Request) {
         return Response.json(
           {
             error: toErrorMessage(error, "Не удалось отправить письмо для сброса пароля."),
+            code: API_ERROR_CODES.MAIL_DELIVERY_FAILED,
           },
           { status: 503 }
         );
@@ -103,6 +108,7 @@ export async function POST(request: Request) {
     return Response.json(
       {
         error: toErrorMessage(error, "Не удалось отправить ссылку для сброса пароля."),
+        code: API_ERROR_CODES.INTERNAL_ERROR,
       },
       { status: 500 }
     );

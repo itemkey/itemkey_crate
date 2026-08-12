@@ -81,6 +81,7 @@ export type WorkspaceShellData = {
     nickname: string;
     profileDescription: string;
     avatarUrl: string | null;
+    locale: "ru" | "en";
   };
   categories: CategorySummaryRow[];
   projects: ProjectRow[];
@@ -97,6 +98,7 @@ export type AppUserRow = {
   nickname: string;
   profile_description: string;
   avatar_url: string | null;
+  locale: "ru" | "en";
   created_at: string;
   updated_at: string;
 };

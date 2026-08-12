@@ -2,6 +2,7 @@ import "server-only";
 
 import { getSessionTokenFromRequest } from "@/lib/auth/session";
 import { getUserBySessionToken } from "@/lib/auth/store";
+import type { Locale } from "@/lib/i18n";
 
 export type RequestUser = {
   id: string;
@@ -12,6 +13,7 @@ export type RequestUser = {
   nickname: string;
   profileDescription: string;
   avatarUrl: string | null;
+  locale: Locale;
 };
 
 export async function getRequestUserBySessionToken(
@@ -35,6 +37,7 @@ export async function getRequestUserBySessionToken(
     nickname: appUser.nickname,
     profileDescription: appUser.profile_description,
     avatarUrl: appUser.avatar_url,
+    locale: appUser.locale,
   };
 }
 

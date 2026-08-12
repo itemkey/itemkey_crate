@@ -27,6 +27,7 @@ import {
   getInitialCategoryId,
   sortByPosition,
 } from "@/lib/categories";
+import { localizeApiError } from "@/lib/api-errors";
 import {
   CATEGORY_TREE_SCHEMA_VERSION,
   type CategoryTreeDocument,
@@ -105,6 +106,13 @@ import {
 import RuleEditor, { RuleCard } from "@/components/rule-editor";
 import CrateAuthScreen from "@/components/crate-auth-screen";
 import ContentAnalyticsLoading from "@/components/content-analytics-loading";
+import { useI18n } from "@/components/i18n-provider";
+import LocaleSwitcher from "@/components/locale-switcher";
+import {
+  MobileMorePanel,
+  MobileWorkspaceDock,
+} from "@/components/workspace/mobile-workspace-navigation";
+import WorkspaceDialog from "@/components/workspace/workspace-dialog";
 import {
   createDefaultRuleDocument,
   createRuleId,
@@ -134,6 +142,8 @@ import type {
   PublicCategoryPanel,
   WorkspaceShellData,
 } from "@/lib/types";
+import type { Locale } from "@/lib/i18n";
+import { shouldKeepCategoryPanelOpen } from "@/lib/workspace-navigation";
 
 const loadContentAnalytics = () => import("@/components/content-analytics");
 
@@ -155,6 +165,7 @@ type CategorySummariesPayload = {
   data?: CategorySummaryRow[];
   source?: DataSource;
   error?: string;
+  code?: string;
 };
 
 type CategoryPayload = {
@@ -245,6 +256,7 @@ type AccountPayload = {
     nickname: string;
     profileDescription: string;
     avatarUrl: string | null;
+    locale: Locale;
     canChangeUserIdNow: boolean;
     nextUserIdChangeAt: string | null;
     activeMigrationCode?: {
@@ -254,6 +266,7 @@ type AccountPayload = {
   };
   source?: DataSource;
   error?: string;
+  code?: string;
 };
 
 type AccountUserIdPayload = {
@@ -921,7 +934,8 @@ type ConfirmDialogState = {
 };
 
 type MenuPanel = "main" | "account" | "settings" | "friends";
-type MobilePanel = "categories" | "projects" | "settings" | "tools" | null;
+type MobilePanel = "categories" | "projects" | "settings" | "tools" | "more" | null;
+type MobileToolsTab = "insert" | "format";
 type OpenCategoryOptions = {
   keepMobilePanel?: boolean;
 };
@@ -987,6 +1001,23 @@ export default function CategoryWorkspace({
   initialShellData,
   initialDetailPromise = null,
 }: CategoryWorkspaceProps) {
+  const { locale, setLocale, t } = useI18n();
+  const mobileNavigationLabels = useMemo(
+    () => ({
+      back: t("common.back"),
+      categories: t("workspace.categories"),
+      add: t("common.add"),
+      search: t("common.search"),
+      more: t("common.more"),
+      projects: t("workspace.projects"),
+      tools: t("common.tools"),
+      settings: t("common.settings"),
+      account: t("workspace.account"),
+      close: t("common.close"),
+      navigation: t("workspace.mobileNavigation"),
+    }),
+    [t]
+  );
   const [categories, setCategories] = useState<CategoryRow[]>(() =>
     initialShellData.categories.map(categorySummaryToClientRow)
   );
@@ -1065,6 +1096,7 @@ export default function CategoryWorkspace({
   const [accountWindowTab, setAccountWindowTab] =
     useState<AccountWindowTab | null>(null);
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>(null);
+  const [mobileToolsTab, setMobileToolsTab] = useState<MobileToolsTab>("insert");
   const [showCategoryTagSuggestions, setShowCategoryTagSuggestions] =
     useState(false);
   const [showCategoryTagLibrary, setShowCategoryTagLibrary] = useState(false);
@@ -1132,6 +1164,8 @@ export default function CategoryWorkspace({
   const [showTextColorPalette, setShowTextColorPalette] = useState(false);
   const [showLinkPlaceholderModal, setShowLinkPlaceholderModal] = useState(false);
   const [linkSelectionPreview, setLinkSelectionPreview] = useState("");
+  const [linkUrlDraft, setLinkUrlDraft] = useState("https://");
+  const [linkUrlError, setLinkUrlError] = useState<string | null>(null);
   const [selectedRichImage, setSelectedRichImage] =
     useState<RichImageSelection | null>(null);
   const [activeRichImageDeleteLine, setActiveRichImageDeleteLine] =
@@ -1182,6 +1216,7 @@ export default function CategoryWorkspace({
     initialShellData.account.avatarUrl ?? null
   );
   const [isSavingAccountProfile, setIsSavingAccountProfile] = useState(false);
+  const [isSavingLocale, setIsSavingLocale] = useState(false);
   const [isUploadingAccountAvatar, setIsUploadingAccountAvatar] = useState(false);
   const [isDeletingAccountAvatar, setIsDeletingAccountAvatar] = useState(false);
   const [motivationImages, setMotivationImages] = useState<AccountImageMeta[]>([]);
@@ -1426,6 +1461,15 @@ export default function CategoryWorkspace({
     () => visibleCategoriesById.get(currentCategoryId ?? "") ?? null,
     [visibleCategoriesById, currentCategoryId]
   );
+  const currentCategoryPath = useMemo(
+    () =>
+      currentCategory
+        ? buildCategoryPath(visibleCategories, currentCategory.id)
+            .map((node) => node.title)
+            .join(" / ")
+        : activeProject?.title ?? t("workspace.hub"),
+    [activeProject?.title, currentCategory, t, visibleCategories]
+  );
   const currentCategoryContentLoaded = Boolean(
     currentCategoryId && loadedCategoryIds.has(currentCategoryId)
   );
@@ -1441,9 +1485,6 @@ export default function CategoryWorkspace({
   const currentCategoryCanEdit =
     currentCategoryContentLoaded && currentCategory?.access_role !== "viewer";
   const currentCategoryCanManagePublic = currentCategory?.access_role === "owner";
-  const currentCategoryVisibilityLabel =
-    currentCategory?.visibility === "public" ? "public" : "local";
-
   const insertionTarget = useMemo(
     () => visibleCategoriesById.get(insertionTargetId ?? "") ?? null,
     [visibleCategoriesById, insertionTargetId]
@@ -2738,7 +2779,7 @@ export default function CategoryWorkspace({
       const response = await authorizedFetch("/api/account", { cache: "no-store" });
       const payload = (await response.json()) as AccountPayload;
       if (!response.ok || !payload.data) {
-        throw new Error(payload.error ?? "Не удалось загрузить профиль аккаунта.");
+        throw new Error(localizeApiError(locale, payload, "error.accountLoad"));
       }
 
       setSource((prev) => payload.source ?? prev);
@@ -2748,13 +2789,14 @@ export default function CategoryWorkspace({
       setAccountProfileDescriptionDraft(payload.data.profileDescription);
       setAccountAvatarUrlDraft(payload.data.avatarUrl ?? "");
       setAccountAvatarUrl(payload.data.avatarUrl ?? null);
+      setLocale(payload.data.locale);
       setAccountCanChangeUserIdNow(Boolean(payload.data.canChangeUserIdNow));
       setAccountNextUserIdChangeAt(payload.data.nextUserIdChangeAt ?? null);
       setActiveMigrationCodeMeta(payload.data.activeMigrationCode ?? null);
     } catch (error) {
       pushNotice(toErrorMessage(error, "Не удалось загрузить профиль аккаунта."), "error");
     }
-  }, [authorizedFetch, pushNotice]);
+  }, [authorizedFetch, locale, pushNotice, setLocale]);
 
   void loadAccountProfile;
 
@@ -2930,6 +2972,10 @@ export default function CategoryWorkspace({
       setIsLoadingMotivationImages(false);
     }
   }, [authorizedFetch, preloadMotivationImages, pushNotice]);
+
+  useEffect(() => {
+    setLocale(initialShellData.account.locale);
+  }, [initialShellData.account.locale, setLocale]);
 
   useEffect(() => {
     if (!dictionaryStudy?.motivateOnCorrect && !dictionaryStudy?.adhdMode) {
@@ -4311,6 +4357,7 @@ export default function CategoryWorkspace({
         setShowSearch(false);
         setShowDictionaryGlobalSearch(false);
         setShowMenu(false);
+        setAccountWindowTab(null);
         setMobilePanel(null);
         setShowCategoryTagLibrary(false);
         setShowProjectCreateModal(false);
@@ -7856,6 +7903,31 @@ export default function CategoryWorkspace({
   function closeLinkPlaceholderModal() {
     setShowLinkPlaceholderModal(false);
     setLinkSelectionPreview("");
+    setLinkUrlDraft("https://");
+    setLinkUrlError(null);
+  }
+
+  function handleApplyToolbarLink() {
+    const scope = savedRichSelectionRef.current?.scope ?? null;
+    const normalizedUrl = normalizeRichLinkUrl(linkUrlDraft);
+    if (!scope || !normalizedUrl) {
+      setLinkUrlError(t("workspace.invalidLink"));
+      return;
+    }
+
+    const editor = focusRichEditorForToolbar(scope);
+    if (!editor || !restoreRichSelection(scope)) {
+      setLinkUrlError(t("workspace.invalidLink"));
+      return;
+    }
+
+    pushEditorUndoSnapshot(scope);
+    document.execCommand("createLink", false, normalizedUrl);
+    normalizeEditorLinks(editor);
+    applyEditorDomValue(scope, editor);
+    rememberRichSelection(scope);
+    syncRichToolbarState(scope);
+    closeLinkPlaceholderModal();
   }
 
   function getSelectionRangeInEditor(scope: RichEditorScope): {
@@ -7904,7 +7976,10 @@ export default function CategoryWorkspace({
     }
 
     setShowTextColorPalette(false);
+    rememberRichSelection(scope);
     setLinkSelectionPreview(selectionInfo.selection.toString().trim());
+    setLinkUrlDraft("https://");
+    setLinkUrlError(null);
     setShowLinkPlaceholderModal(true);
   }
 
@@ -8467,6 +8542,9 @@ export default function CategoryWorkspace({
   }
 
   function openMobilePanel(panel: Exclude<MobilePanel, null>) {
+    if (panel === "tools") {
+      setMobileToolsTab("insert");
+    }
     setMobilePanel(panel);
     setShowMenu(false);
   }
@@ -8522,16 +8600,6 @@ export default function CategoryWorkspace({
       }
       return next;
     });
-  }
-
-  function selectCurrentCategoryAsTarget() {
-    if (!currentCategoryId) {
-      return;
-    }
-
-    setSelectedMessageId(null);
-    setInsertionTargetId(currentCategoryId);
-    pushNotice(`Точка добавления: ${currentCategory?.title ?? "категория"}.`);
   }
 
   function handleSelectProjectTab(projectId: string | null) {
@@ -9013,7 +9081,10 @@ export default function CategoryWorkspace({
       return;
     }
 
-    const shouldKeepMobileCategoriesOpen = mobilePanel === "categories";
+    const shouldKeepMobileCategoriesOpen = shouldKeepCategoryPanelOpen(
+      "back",
+      mobilePanel
+    );
     const parentId = currentCategory.parent_id;
     if (parentId && visibleCategoriesById.has(parentId)) {
       openCategory(parentId, undefined, {
@@ -15529,7 +15600,7 @@ export default function CategoryWorkspace({
 
       const payload = (await response.json()) as AccountPayload;
       if (!response.ok || !payload.data) {
-        throw new Error(payload.error ?? "Не удалось обновить профиль аккаунта.");
+        throw new Error(localizeApiError(locale, payload, "error.accountUpdate"));
       }
 
       setSource((prev) => payload.source ?? prev);
@@ -15548,6 +15619,27 @@ export default function CategoryWorkspace({
       pushNotice(toErrorMessage(error, "Не удалось обновить профиль аккаунта."), "error");
     } finally {
       setIsSavingAccountProfile(false);
+    }
+  }
+
+  async function handleLocaleChange(nextLocale: Locale) {
+    setLocale(nextLocale);
+    setIsSavingLocale(true);
+    try {
+      const response = await authorizedFetch("/api/account", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ locale: nextLocale }),
+      });
+      const payload = (await response.json()) as AccountPayload;
+      if (!response.ok || !payload.data) {
+        throw new Error(localizeApiError(locale, payload, "language.syncError"));
+      }
+      setLocale(payload.data.locale);
+    } catch {
+      pushNotice(t("language.syncError"), "warn");
+    } finally {
+      setIsSavingLocale(false);
     }
   }
 
@@ -15595,7 +15687,7 @@ export default function CategoryWorkspace({
     const normalized = normalizeUserId(accountUserIdDraft);
     if (!accountCanChangeUserIdNow && accountNextUserIdChangeAt) {
       pushNotice(
-        `Сейчас смена user-id недоступна. Следующая дата: ${formatDateTime(accountNextUserIdChangeAt)}.`,
+        `Сейчас смена user-id недоступна. Следующая дата: ${formatDateTime(accountNextUserIdChangeAt, locale)}.`,
         "warn"
       );
       return;
@@ -15649,7 +15741,7 @@ export default function CategoryWorkspace({
       setSource((prev) => payload.source ?? prev);
       if (payload.data.nextUserIdChangeAt) {
         pushNotice(
-          `user-id изменен. Следующая смена доступна: ${formatDateTime(payload.data.nextUserIdChangeAt)}.`
+          `user-id изменен. Следующая смена доступна: ${formatDateTime(payload.data.nextUserIdChangeAt, locale)}.`
         );
       } else {
         pushNotice("user-id сохранен.");
@@ -18530,8 +18622,8 @@ export default function CategoryWorkspace({
             <h1 className="font-display text-5xl leading-none">Item Key</h1>
             <p className="mt-3 text-sm text-[#202020]">
               {isCategoryLoadError
-                ? "Не удалось загрузить категории."
-                : "Подготавливаю дерево категорий..."}
+                ? t("workspace.loadCategoriesFailed")
+                : t("workspace.loadingCategories")}
             </p>
             {isCategoryLoadError && loadError && (
               <p className="mt-3 rounded border-2 border-[#6a1313] bg-[#dca3a3] px-3 py-2 text-sm text-[#3a0e0e]">
@@ -18548,7 +18640,7 @@ export default function CategoryWorkspace({
                   void loadProjects();
                 }}
               >
-                повторить загрузку
+                {t("workspace.retryLoading")}
               </button>
             )}
           </div>
@@ -18573,28 +18665,27 @@ export default function CategoryWorkspace({
         }`}
       >
         <header className="top-strip bevel-panel flex h-[4.7rem] flex-none items-center gap-2 px-2 py-2 sm:gap-3 sm:px-3">
-          <button
-            type="button"
-            onClick={selectCurrentCategoryAsTarget}
-            className={`title-chip flex min-w-[11rem] flex-1 items-center px-3 py-2 ${
-              insertionTargetId === currentCategoryId ? "title-chip-active" : ""
-            }`}
-          >
-            <span className="font-display text-[1.6rem] leading-none sm:text-[1.95rem]">
-              :{(currentCategory?.title ?? "no category").toUpperCase()}
-            </span>
+          <div className="title-chip flex min-w-0 flex-1 items-center px-3 py-2">
+            <div className="title-chip-copy min-w-0">
+              <span className="title-chip-kicker">{t("workspace.currentCategory")}</span>
+              <span className="font-display block truncate text-[1.6rem] leading-none sm:text-[1.95rem]">
+                :{(currentCategory?.title ?? t("workspace.noCategory")).toUpperCase()}
+              </span>
+            </div>
             <span className="visibility-badge ml-2">
-              {currentCategoryVisibilityLabel}
+              {currentCategory?.visibility === "public"
+                ? t("workspace.public")
+                : t("workspace.local")}
             </span>
-          </button>
+          </div>
 
           <button
             type="button"
             className="mobile-header-action mobile-project-trigger mobile-only"
             onClick={() => openMobilePanel("projects")}
-            aria-label="Open projects"
+            aria-label={t("workspace.projects")}
           >
-            #{activeProject?.title ?? "HUB"}
+            #{activeProject?.title ?? t("workspace.hub")}
           </button>
 
           <div className="project-topbar-group">
@@ -18646,12 +18737,26 @@ export default function CategoryWorkspace({
         <div className="content-bay flex min-h-0 flex-1">
           <aside className="sidebar-rail flex flex-col p-0">
             <div className="mobile-panel-head mobile-only">
-              <span className="font-display">categories</span>
+              <button
+                type="button"
+                className="mobile-panel-back-button"
+                onClick={() => void handleBack()}
+                disabled={!canGoBack || isMutating}
+                aria-label={t("workspace.parentCategory")}
+              >
+                ←
+              </button>
+              <div className="mobile-panel-title-group">
+                <span className="font-display">{t("workspace.categories")}</span>
+                <span className="mobile-category-path" title={currentCategoryPath}>
+                  {currentCategoryPath}
+                </span>
+              </div>
               <button
                 type="button"
                 className="menu-action h-9 w-9 text-xl"
                 onClick={closeMobilePanel}
-                aria-label="Close categories"
+                aria-label={t("common.close")}
               >
                 x
               </button>
@@ -18666,7 +18771,7 @@ export default function CategoryWorkspace({
                 }`}
                 onClick={() => setSidebarTab("categories")}
               >
-                Категории
+                {t("workspace.categories")}
               </button>
               <button
                 type="button"
@@ -18682,7 +18787,7 @@ export default function CategoryWorkspace({
                   }
                 }}
               >
-                Группы словарей
+                {t("workspace.dictionaryGroups")}
               </button>
             </div>
             <div className="sidebar-scroll flex-1">
@@ -18704,14 +18809,36 @@ export default function CategoryWorkspace({
                           }`}
                           onClick={() =>
                             openCategory(node.id, undefined, {
-                              keepMobilePanel: mobilePanel === "categories",
+                              keepMobilePanel: shouldKeepCategoryPanelOpen(
+                                "drill",
+                                mobilePanel
+                              ),
                             })
                           }
                           onMouseEnter={() => prefetchCategoryDetail(node)}
                           onFocus={() => prefetchCategoryDetail(node)}
                           onPointerDown={() => prefetchCategoryDetail(node)}
+                          aria-label={t("workspace.expandCategory", { title: node.title })}
                         >
                           <span className="sidebar-item-title">{node.title}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          className="sidebar-enter"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            openCategory(node.id, undefined, {
+                              keepMobilePanel: shouldKeepCategoryPanelOpen(
+                                "enter",
+                                mobilePanel
+                              ),
+                            });
+                          }}
+                          onPointerDown={() => prefetchCategoryDetail(node)}
+                          aria-label={t("workspace.openCategory", { title: node.title })}
+                        >
+                          →
                         </button>
 
                         <button
@@ -18722,7 +18849,7 @@ export default function CategoryWorkspace({
                             void handleDeleteCategoryFromPanel(node.id);
                           }}
                           disabled={!canDeleteNode || isMutating || isLoading}
-                          aria-label={`Delete category ${node.title}`}
+                          aria-label={`${t("workspace.deleteCategory")}: ${node.title}`}
                         >
                           -
                         </button>
@@ -19921,17 +20048,21 @@ export default function CategoryWorkspace({
 
           <aside className="settings-panel">
             <div className="mobile-panel-head mobile-only">
-              <span className="font-display">settings</span>
+              <span className="font-display">
+                {selectedMessage ? t("workspace.blockSettings") : t("workspace.categorySettings")}
+              </span>
               <button
                 type="button"
                 className="menu-action h-9 w-9 text-xl"
                 onClick={closeMobilePanel}
-                aria-label="Close settings"
+                aria-label={t("common.close")}
               >
                 x
               </button>
             </div>
-            <h2 className="settings-title font-display">settings</h2>
+            <h2 className="settings-title font-display">
+              {selectedMessage ? t("workspace.blockSettings") : t("workspace.categorySettings")}
+            </h2>
 
             {selectedMessage && currentCategory?.format === "block" ? (
               <div className="settings-group">
@@ -19939,7 +20070,7 @@ export default function CategoryWorkspace({
                   блок: {selectedMessage.title} / {currentCategory.title}
                 </p>
 
-                <label className="settings-label">название блока</label>
+                <label className="settings-label">{t("workspace.renameBlock")}</label>
                 <input
                   value={messageTitleDraft}
                   onChange={(event) => setMessageTitleDraft(event.target.value)}
@@ -19953,7 +20084,7 @@ export default function CategoryWorkspace({
                   className="mini-action"
                   onClick={() => setSelectedMessageId(null)}
                 >
-                  настройки категории
+                  ← {t("workspace.backToCategorySettings")}
                 </button>
 
                 {currentCategory.category_type === "learning" && (
@@ -19979,12 +20110,16 @@ export default function CategoryWorkspace({
                   onClick={handleDeleteMessage}
                   disabled={!currentCategoryCanEdit || isMutating}
                 >
-                  удалить сообщение
+                  {t("workspace.deleteMessage")}
                 </button>
               </div>
             ) : currentCategory ? (
               <div className="settings-group">
                 <p className="settings-caption">категория: {currentCategory.title}</p>
+
+                <details className="settings-section" open>
+                  <summary>{t("workspace.generalSection")}</summary>
+                  <div className="settings-section-body">
 
                 {activeProject && (
                   <>
@@ -20102,6 +20237,12 @@ export default function CategoryWorkspace({
                   переместить
                 </button>
 
+                  </div>
+                </details>
+
+                <details className="settings-section" open>
+                  <summary>{t("workspace.organizationSection")}</summary>
+                  <div className="settings-section-body">
                 <label className="settings-label"># категории</label>
                 {isProjectMode ? (
                   <>
@@ -20218,6 +20359,12 @@ export default function CategoryWorkspace({
                   </>
                 )}
 
+                  </div>
+                </details>
+
+                <details className="settings-section">
+                  <summary>{t("workspace.checklistsSection")}</summary>
+                  <div className="settings-section-body">
                 <label className="settings-label">участие в #Checklist</label>
                 <div className="settings-checklist-links">
                   {checklistParticipation.length === 0 ? (
@@ -20276,6 +20423,12 @@ export default function CategoryWorkspace({
                   )}
                 </div>
 
+                  </div>
+                </details>
+
+                <details className="settings-section" open>
+                  <summary>{t("workspace.categoryFormat")}</summary>
+                  <div className="settings-section-body">
                 <label className="settings-label">формат категории</label>
                 <select
                   value={categoryForm.format}
@@ -20305,6 +20458,12 @@ export default function CategoryWorkspace({
                   Для типа learning у сообщений доступно: информация / упражнение.
                 </p>
 
+                  </div>
+                </details>
+
+                <details className="settings-section">
+                  <summary>{t("workspace.sharingSection")}</summary>
+                  <div className="settings-section-body">
                 <label className="settings-label">поделиться</label>
                 <div className="category-share-panel">
                   <select
@@ -20485,6 +20644,12 @@ export default function CategoryWorkspace({
                   </div>
                 )}
 
+                  </div>
+                </details>
+
+                <details className="settings-section">
+                  <summary>{t("workspace.transferSection")}</summary>
+                  <div className="settings-section-body">
                 <label className="settings-label">экспорт / импорт категории</label>
                 <div className="flex flex-wrap gap-2">
                   <button
@@ -20515,6 +20680,22 @@ export default function CategoryWorkspace({
                   Импорт заменяет текущую категорию вместе со всеми вложенными
                   подкатегориями и сообщениями.
                 </p>
+                  </div>
+                </details>
+
+                <details className="settings-section settings-section-danger">
+                  <summary>{t("workspace.dangerSection")}</summary>
+                  <div className="settings-section-body">
+                    <button
+                      type="button"
+                      className="danger-action"
+                      onClick={handleDeleteCategory}
+                      disabled={!canDelete || isMutating || isLoading}
+                    >
+                      {t("workspace.deleteCategory")}
+                    </button>
+                  </div>
+                </details>
               </div>
             ) : (
               <p className="settings-caption">Выбери категорию.</p>
@@ -20523,30 +20704,30 @@ export default function CategoryWorkspace({
           </aside>
         </div>
 
-        {mobilePanel && mobilePanel !== "categories" && (
+        {mobilePanel && (
           <button
             type="button"
             className="mobile-panel-backdrop mobile-only"
             onClick={closeMobilePanel}
-            aria-label="Close mobile panel"
+            aria-label={t("common.close")}
           />
         )}
 
         {mobilePanel === "projects" && (
           <aside className="mobile-sheet mobile-project-sheet mobile-only">
             <div className="mobile-panel-head">
-              <span className="font-display">projects</span>
+              <span className="font-display">{t("workspace.projects")}</span>
               <button
                 type="button"
                 className="menu-action h-9 w-9 text-xl"
                 onClick={closeMobilePanel}
-                aria-label="Close projects"
+                aria-label={t("common.close")}
               >
                 x
               </button>
             </div>
 
-            <div className="mobile-project-list" role="tablist" aria-label="Projects">
+            <div className="mobile-project-list" role="tablist" aria-label={t("workspace.projects")}>
               <button
                 type="button"
                 role="tab"
@@ -20557,7 +20738,7 @@ export default function CategoryWorkspace({
                   closeMobilePanel();
                 }}
               >
-                HUB
+                {t("workspace.hub")}
               </button>
 
               {sortedProjects.map((project) => (
@@ -20584,7 +20765,7 @@ export default function CategoryWorkspace({
               className="mini-action mobile-wide-action"
               onClick={openProjectCreateModal}
             >
-              manage / create project
+              {t("workspace.projects")}
             </button>
           </aside>
         )}
@@ -20592,18 +20773,39 @@ export default function CategoryWorkspace({
         {mobilePanel === "tools" && (
           <aside className="mobile-sheet mobile-tools-sheet mobile-only">
             <div className="mobile-panel-head">
-              <span className="font-display">tools</span>
+              <span className="font-display">{t("common.tools")}</span>
               <button
                 type="button"
                 className="menu-action h-9 w-9 text-xl"
                 onClick={closeMobilePanel}
-                aria-label="Close tools"
+                aria-label={t("common.close")}
               >
                 x
               </button>
             </div>
 
-            <div className="mobile-tools-actions">
+            <div className="mobile-tools-tabs" role="tablist" aria-label={t("common.tools")}>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={mobileToolsTab === "insert"}
+                className={mobileToolsTab === "insert" ? "is-active" : ""}
+                onClick={() => setMobileToolsTab("insert")}
+              >
+                {t("workspace.contentTools")}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={mobileToolsTab === "format"}
+                className={mobileToolsTab === "format" ? "is-active" : ""}
+                onClick={() => setMobileToolsTab("format")}
+              >
+                {t("workspace.formatTools")}
+              </button>
+            </div>
+
+            {mobileToolsTab === "insert" && <div className="mobile-tools-actions">
               {currentCategory?.format === "block" && (
                 <button
                   type="button"
@@ -20614,7 +20816,7 @@ export default function CategoryWorkspace({
                   }}
                   disabled={!currentCategoryId || !currentCategoryCanEdit || isMutating}
                 >
-                  + message
+                  {t("workspace.addMessage")}
                 </button>
               )}
               <button
@@ -20648,7 +20850,7 @@ export default function CategoryWorkspace({
                 }}
                 disabled={!currentCategoryId || !currentCategoryCanEdit || isMutating || isLoading}
               >
-                Расписание
+                {t("workspace.schedule")}
               </button>
               <button
                 type="button"
@@ -20661,7 +20863,7 @@ export default function CategoryWorkspace({
                 onPointerDown={prefetchContentAnalytics}
                 disabled={!currentCategoryId || isLoading || !currentCategoryContentLoaded}
               >
-                Аналитика
+                {t("workspace.analytics")}
               </button>
               <button
                 type="button"
@@ -20685,54 +20887,51 @@ export default function CategoryWorkspace({
               >
                 Rule import
               </button>
-              {renderEditorTextScaleControls(!currentCategoryContentLoaded)}
-            </div>
+            </div>}
 
-            <div className="mobile-rich-tools">
+            {mobileToolsTab === "format" && <div className="mobile-rich-tools">
+              {renderEditorTextScaleControls(!currentCategoryContentLoaded)}
               {renderRichTextTools(
                 currentCategory?.format === "block" ? "block" : "continuous",
                 !currentCategoryContentLoaded
               )}
-            </div>
+            </div>}
           </aside>
         )}
 
+        {mobilePanel === "more" && (
+          <MobileMorePanel
+            labels={mobileNavigationLabels}
+            toolsDisabled={!currentCategory || isLoading}
+            settingsDisabled={!currentCategory || isLoading}
+            onClose={closeMobilePanel}
+            onProjects={() => openMobilePanel("projects")}
+            onTools={() => openMobilePanel("tools")}
+            onSettings={() => openMobilePanel("settings")}
+            onAccount={() => {
+              closeMobilePanel();
+              openMenuPanel("account");
+            }}
+          />
+        )}
+
         <footer className="bottom-strip bevel-panel flex h-[6rem] flex-none items-end justify-between gap-3 px-2 pb-2 pt-[1.1rem] sm:h-[6.2rem] sm:px-3 sm:pb-3 sm:pt-[1.15rem]">
-          <div className="flex items-end gap-2 sm:gap-3">
+          <div className="desktop-dock mobile-hide flex items-end gap-2 sm:gap-3">
             <button
               type="button"
               className="tool-button tool-red"
-              onClick={() => {
-                if (mobilePanel !== "categories") {
-                  closeMobilePanel();
-                }
-                void handleBack();
-              }}
+              onClick={() => void handleBack()}
               disabled={!canGoBack || isMutating}
-              aria-label="Назад"
+              aria-label={t("common.back")}
             >
               &lt;
             </button>
             <button
               type="button"
-              className="tool-button tool-blue mobile-only"
-              onClick={() => openMobilePanel("categories")}
-              disabled={isLoading || Boolean(loadError)}
-              aria-label="Open categories"
-            >
-              cat
-            </button>
-            <button
-              type="button"
               className="tool-button tool-green"
-              onClick={() => {
-                if (mobilePanel !== "categories") {
-                  closeMobilePanel();
-                }
-                void handleAddCategory();
-              }}
+              onClick={() => void handleAddCategory()}
               disabled={!canCreate || isMutating || isLoading}
-              aria-label="Добавить категорию"
+              aria-label={t("workspace.addCategory")}
             >
               +
             </button>
@@ -20741,15 +20940,20 @@ export default function CategoryWorkspace({
               className="tool-button tool-yellow mobile-hide"
               onClick={handleDeleteCategory}
               disabled={!canDelete || isMutating || isLoading}
-              aria-label="Удалить категорию"
+              aria-label={t("workspace.deleteCategory")}
             >
               -
             </button>
           </div>
 
-          <p className={`mobile-hide hidden text-sm font-semibold sm:block ${statusColor}`}>{statusText}</p>
+          <div className="workspace-status mobile-hide">
+            <span className={`text-sm font-semibold ${statusColor}`}>{statusText}</span>
+            <span className="insertion-target-label" title={insertionTarget?.title ?? ""}>
+              + {insertionTarget?.title ?? t("workspace.noCategory")}
+            </span>
+          </div>
 
-          <div className="flex items-end gap-2 sm:gap-3">
+          <div className="desktop-dock mobile-hide flex items-end gap-2 sm:gap-3">
             <button
               type="button"
               className="tool-button tool-blue"
@@ -20759,39 +20963,37 @@ export default function CategoryWorkspace({
                 setShowSearch(true);
               }}
               disabled={isLoading || Boolean(loadError)}
-              aria-label="Открыть поиск"
+              aria-label={t("common.search")}
             >
               <SearchIcon />
             </button>
             <button
               type="button"
-              className="tool-button tool-red mobile-only"
-              onClick={() => openMobilePanel("tools")}
-              disabled={!currentCategory || isLoading}
-              aria-label="Open tools"
-            >
-              tools
-            </button>
-            <button
-              type="button"
-              className="tool-button tool-yellow mobile-only"
+              className="tool-button tool-yellow settings-drawer-trigger"
               onClick={() => openMobilePanel("settings")}
               disabled={!currentCategory || isLoading}
-              aria-label="Open settings"
+              aria-label={t("common.settings")}
             >
-              set
-            </button>
-            <button
-              type="button"
-              className="tool-button tool-red mobile-hide"
-              onClick={() =>
-                pushNotice("Раздел «Больше инструментов» будет добавлен позже.")
-              }
-              aria-label="Больше инструментов"
-            >
-              &gt;
+              ⚙
             </button>
           </div>
+
+          <MobileWorkspaceDock
+            labels={mobileNavigationLabels}
+            searchIcon={<SearchIcon />}
+            canGoBack={canGoBack && !isMutating}
+            canAdd={canCreate && !isMutating && !isLoading}
+            canSearch={!isLoading && !loadError}
+            onBack={() => void handleBack()}
+            onCategories={() => openMobilePanel("categories")}
+            onAdd={() => void handleAddCategory()}
+            onSearch={() => {
+              closeMobilePanel();
+              setShowDictionaryGlobalSearch(false);
+              setShowSearch(true);
+            }}
+            onMore={() => openMobilePanel("more")}
+          />
         </footer>
 
         <input
@@ -20892,72 +21094,59 @@ export default function CategoryWorkspace({
         )}
 
         {showLinkPlaceholderModal && (
-          <div className="absolute inset-0 z-[68] flex items-center justify-center p-3">
-            <button
-              type="button"
-              className="absolute inset-0 bg-black/45"
-              onClick={closeLinkPlaceholderModal}
-              aria-label="Закрыть окно ссылки"
-            />
-
-            <div className="confirm-modal popup-3d relative z-10 w-full max-w-lg p-4 sm:p-5">
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <h2 className="font-display text-4xl leading-none">Ссылка</h2>
-                <button
-                  type="button"
-                  className="menu-action h-9 w-9 text-xl"
-                  onClick={closeLinkPlaceholderModal}
-                  aria-label="Закрыть окно ссылки"
-                >
-                  x
-                </button>
-              </div>
-
-              <p className="settings-hint">
-                Здесь появится выбор, на что ссылаться. Пока это окно-заглушка.
-              </p>
-              <p className="settings-hint mt-2 break-words">
-                Выделенный текст: {linkSelectionPreview || "(пусто)"}
-              </p>
-
-              <div className="confirm-modal-actions">
+          <WorkspaceDialog
+            title={t("workspace.link")}
+            closeLabel={t("common.close")}
+            onClose={closeLinkPlaceholderModal}
+            footer={
+              <>
                 <button
                   type="button"
                   className="mini-action"
                   onClick={closeLinkPlaceholderModal}
                 >
-                  закрыть
+                  {t("common.cancel")}
                 </button>
-              </div>
-            </div>
-          </div>
+                <button type="button" className="mini-action" onClick={handleApplyToolbarLink}>
+                  {t("common.add")}
+                </button>
+              </>
+            }
+          >
+            <label className="settings-label" htmlFor="workspace-link-url">
+              {t("workspace.linkUrl")}
+            </label>
+            <input
+              id="workspace-link-url"
+              type="url"
+              className="settings-input"
+              value={linkUrlDraft}
+              onChange={(event) => {
+                setLinkUrlDraft(event.target.value);
+                setLinkUrlError(null);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  handleApplyToolbarLink();
+                }
+              }}
+              autoFocus
+            />
+            <p className="settings-hint break-words">
+              {t("workspace.selectedText", { text: linkSelectionPreview || "—" })}
+            </p>
+            {linkUrlError && <p className="workspace-dialog-error">{linkUrlError}</p>}
+          </WorkspaceDialog>
         )}
 
         {confirmDialog && (
-          <div className="absolute inset-0 z-[90] flex items-center justify-center p-3">
-            <button
-              type="button"
-              className="absolute inset-0 bg-black/45"
-              onClick={() => settleConfirmDialog(false)}
-              aria-label="Закрыть окно подтверждения"
-            />
-
-            <div className="confirm-modal popup-3d relative z-10 w-full max-w-xl p-4 sm:p-5">
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <h2 className="font-display text-4xl leading-none">{confirmDialog.title}</h2>
-                <button
-                  type="button"
-                  className="menu-action h-9 w-9 text-xl"
-                  onClick={() => settleConfirmDialog(false)}
-                  aria-label="Закрыть подтверждение"
-                >
-                  x
-                </button>
-              </div>
-
-              <p className="confirm-modal-message">{confirmDialog.message}</p>
-
-              <div className="confirm-modal-actions">
+          <WorkspaceDialog
+            title={confirmDialog.title}
+            closeLabel={t("common.close")}
+            onClose={() => settleConfirmDialog(false)}
+            footer={
+              <>
                 <button
                   type="button"
                   className="mini-action"
@@ -20976,9 +21165,11 @@ export default function CategoryWorkspace({
                 >
                   {confirmDialog.confirmLabel}
                 </button>
-              </div>
-            </div>
-          </div>
+              </>
+            }
+          >
+            <p className="confirm-modal-message">{confirmDialog.message}</p>
+          </WorkspaceDialog>
         )}
 
         {renderScheduleModal()}
@@ -23803,6 +23994,19 @@ export default function CategoryWorkspace({
                     &lt; назад
                   </button>
 
+                  <section className="settings-section settings-section-language">
+                    <label className="settings-label">{t("language.label")}</label>
+                    <LocaleSwitcher
+                      onChange={handleLocaleChange}
+                      disabled={isSavingLocale}
+                    />
+                    {isSavingLocale && (
+                      <p className="settings-hint" role="status">
+                        {t("language.syncing")}
+                      </p>
+                    )}
+                  </section>
+
                   <label className="settings-label">Почта</label>
                   <input value={accountEmailLabel} className="settings-input" readOnly />
 
@@ -23825,7 +24029,7 @@ export default function CategoryWorkspace({
                   </button>
                   {!accountCanChangeUserIdNow && accountNextUserIdChangeAt && (
                     <p className="settings-hint">
-                      Следующая смена user-id: {formatDateTime(accountNextUserIdChangeAt)}
+                      Следующая смена user-id: {formatDateTime(accountNextUserIdChangeAt, locale)}
                     </p>
                   )}
 
@@ -23869,12 +24073,12 @@ export default function CategoryWorkspace({
                   </button>
                   {issuedMigrationCode && (
                     <p className="settings-hint break-all">
-                      Новый код: {issuedMigrationCode.code} (до {formatDateTime(issuedMigrationCode.expiresAt)})
+                      Новый код: {issuedMigrationCode.code} (до {formatDateTime(issuedMigrationCode.expiresAt, locale)})
                     </p>
                   )}
                   {!issuedMigrationCode && activeMigrationCodeMeta && (
                     <p className="settings-hint break-all">
-                      Активный код: {activeMigrationCodeMeta.codeHint} (до {formatDateTime(activeMigrationCodeMeta.expiresAt)})
+                      Активный код: {activeMigrationCodeMeta.codeHint} (до {formatDateTime(activeMigrationCodeMeta.expiresAt, locale)})
                     </p>
                   )}
 
@@ -24083,6 +24287,18 @@ export default function CategoryWorkspace({
                 {accountWindowTab === "settings" && (
                   <div className="account-settings-grid">
                     <section className="account-window-section">
+                      <label className="settings-label">{t("language.label")}</label>
+                      <LocaleSwitcher
+                        onChange={handleLocaleChange}
+                        disabled={isSavingLocale}
+                      />
+                      {isSavingLocale && (
+                        <p className="settings-hint" role="status">
+                          {t("language.syncing")}
+                        </p>
+                      )}
+                    </section>
+                    <section className="account-window-section">
                       <label className="settings-label">Почта</label>
                       <input value={accountEmailLabel} className="settings-input" readOnly />
 
@@ -24106,7 +24322,7 @@ export default function CategoryWorkspace({
                       {!accountCanChangeUserIdNow && accountNextUserIdChangeAt && (
                         <p className="settings-hint">
                           Следующая смена user-id:{" "}
-                          {formatDateTime(accountNextUserIdChangeAt)}
+                          {formatDateTime(accountNextUserIdChangeAt, locale)}
                         </p>
                       )}
                     </section>
@@ -24159,13 +24375,13 @@ export default function CategoryWorkspace({
                       {issuedMigrationCode && (
                         <p className="settings-hint break-all">
                           Новый код: {issuedMigrationCode.code} (до{" "}
-                          {formatDateTime(issuedMigrationCode.expiresAt)})
+                          {formatDateTime(issuedMigrationCode.expiresAt, locale)})
                         </p>
                       )}
                       {!issuedMigrationCode && activeMigrationCodeMeta && (
                         <p className="settings-hint break-all">
                           Активный код: {activeMigrationCodeMeta.codeHint} (до{" "}
-                          {formatDateTime(activeMigrationCodeMeta.expiresAt)})
+                          {formatDateTime(activeMigrationCodeMeta.expiresAt, locale)})
                         </p>
                       )}
                     </section>
@@ -30810,13 +31026,13 @@ function isDisplayImageUrl(value: string): boolean {
   return isValidHttpUrl(value) || isInternalAccountImageUrl(value);
 }
 
-function formatDateTime(value: string): string {
+function formatDateTime(value: string, locale: Locale): string {
   const parsed = new Date(value);
   if (!Number.isFinite(parsed.getTime())) {
     return value;
   }
 
-  return parsed.toLocaleString("ru-RU", {
+  return parsed.toLocaleString(locale === "en" ? "en-GB" : "ru-RU", {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",

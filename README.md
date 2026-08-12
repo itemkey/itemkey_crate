@@ -92,6 +92,7 @@ See `.env.example`.
 2. If this is a fresh setup, run `postgres/schema.sql`.
 3. If you already have production/local data, run the relevant upgrade scripts instead.
 4. Before deploying the progressive `/crate` loader, apply `postgres/performance-upgrade.sql`. It is idempotent and does not delete user data.
+5. Before deploying the bilingual interface, apply `postgres/account-locale-upgrade.sql`. It is idempotent; existing accounts receive `ru`.
 
 > `postgres/schema.sql` intentionally drops existing tables before recreate.
 > This fully resets all user data.

@@ -11,11 +11,12 @@ import type {
 
 import { assertValidUserId } from "@/lib/account-user-id";
 import { getPostgresPool } from "@/lib/db/postgres";
+import { type Locale, normalizeLocale } from "@/lib/i18n";
 import { toErrorMessage } from "@/lib/errors";
 import type { AppUserRow } from "@/lib/types";
 
 const APP_USER_COLUMNS =
-  "id,email,email_verified_at,user_id,user_id_changed_at,nickname,profile_description,avatar_url,created_at,updated_at";
+  "id,email,email_verified_at,user_id,user_id_changed_at,nickname,profile_description,avatar_url,locale,created_at,updated_at";
 const MIGRATION_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 const USER_ID_CHANGE_COOLDOWN_DAYS = parseBoundedIntEnv(
@@ -90,6 +91,7 @@ export type AccountStore = {
       nickname?: string;
       profileDescription?: string;
       avatarUrl?: string | null;
+      locale?: Locale;
     }
   ): Promise<AppUserRow>;
   updateUserId(appUserId: string, userId: string): Promise<AppUserRow>;
@@ -139,6 +141,7 @@ function normalizeAppUser(row: AppUserRow): AppUserRow {
       typeof row.avatar_url === "string" && row.avatar_url.trim().length > 0
         ? row.avatar_url
         : null,
+    locale: normalizeLocale(row.locale),
     email: typeof row.email === "string" ? row.email : "",
   };
 }
@@ -298,6 +301,7 @@ function createPostgresAccountStore(): AccountStore {
           patch.profileDescription ?? current.profile_description;
         const nextAvatarUrl =
           typeof patch.avatarUrl === "undefined" ? current.avatar_url : patch.avatarUrl;
+        const nextLocale = patch.locale ?? current.locale;
 
         const { rows } = await client.query<AppUserRow>(
           `
@@ -305,11 +309,12 @@ function createPostgresAccountStore(): AccountStore {
             set
               nickname = $2::text,
               profile_description = $3::text,
-              avatar_url = $4::text
+              avatar_url = $4::text,
+              locale = $5::text
             where id = $1::uuid
             returning ${APP_USER_COLUMNS}
           `,
-          [appUserId, nextNickname, nextProfileDescription, nextAvatarUrl]
+          [appUserId, nextNickname, nextProfileDescription, nextAvatarUrl, nextLocale]
         );
 
         const updated = rows[0];

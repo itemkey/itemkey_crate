@@ -1,6 +1,7 @@
 import { cookies } from "next/headers";
 
 import { assertValidUserId } from "@/lib/account-user-id";
+import { API_ERROR_CODES } from "@/lib/api-errors";
 import { assertValidPasswordCandidate } from "@/lib/auth/password";
 import {
   assertAuthRateLimit,
@@ -20,6 +21,7 @@ import {
   SESSION_COOKIE_NAME,
 } from "@/lib/auth/session";
 import { toErrorMessage } from "@/lib/errors";
+import { getLocaleCookieOptions } from "@/lib/i18n-server";
 
 export const dynamic = "force-dynamic";
 
@@ -46,6 +48,7 @@ export async function POST(request: Request) {
       return Response.json(
         {
           error: toErrorMessage(error, "Некорректные данные входа."),
+          code: API_ERROR_CODES.INVALID_INPUT,
         },
         { status: 400 }
       );
@@ -64,6 +67,7 @@ export async function POST(request: Request) {
         return Response.json(
           {
             error: error.message,
+            code: API_ERROR_CODES.RATE_LIMITED,
           },
           {
             status: 429,
@@ -91,6 +95,10 @@ export async function POST(request: Request) {
         expires: session.expiresAt,
         ...getSessionCookieBaseOptions(),
       });
+      cookieStore.set({
+        ...getLocaleCookieOptions(),
+        value: account.locale,
+      });
 
       maybeRunAuthCleanup();
       await recordAuthRateEvent(rateLimitContext, true);
@@ -100,6 +108,7 @@ export async function POST(request: Request) {
           id: account.id,
           email: account.email,
           emailVerifiedAt: account.email_verified_at,
+          locale: account.locale,
         },
         source: "postgres",
       });
@@ -107,14 +116,17 @@ export async function POST(request: Request) {
       await recordAuthRateEvent(rateLimitContext, false);
 
       if (error instanceof InvalidCredentialsError) {
-        return Response.json({ error: error.message }, { status: 401 });
+        return Response.json(
+          { code: API_ERROR_CODES.INVALID_CREDENTIALS, error: error.message },
+          { status: 401 }
+        );
       }
 
       if (error instanceof EmailNotVerifiedError) {
         return Response.json(
           {
             error: error.message,
-            code: "email_not_verified",
+            code: API_ERROR_CODES.EMAIL_NOT_VERIFIED,
           },
           { status: 403 }
         );
@@ -127,6 +139,7 @@ export async function POST(request: Request) {
     return Response.json(
       {
         error: toErrorMessage(error, "Не удалось выполнить вход."),
+        code: API_ERROR_CODES.INTERNAL_ERROR,
       },
       { status: 500 }
     );

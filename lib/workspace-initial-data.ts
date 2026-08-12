@@ -56,6 +56,7 @@ export async function loadWorkspaceShell(
       nickname: user.nickname,
       profileDescription: user.profileDescription,
       avatarUrl: user.avatarUrl,
+      locale: user.locale,
     },
     categories,
     projects,

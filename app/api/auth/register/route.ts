@@ -1,6 +1,7 @@
 import { cookies } from "next/headers";
 
 import { assertValidUserId } from "@/lib/account-user-id";
+import { API_ERROR_CODES } from "@/lib/api-errors";
 import { AuthEmailDeliveryError, sendEmailVerificationMail } from "@/lib/auth/mailer";
 import { assertValidPasswordCandidate } from "@/lib/auth/password";
 import {
@@ -24,10 +25,14 @@ import {
   SESSION_COOKIE_NAME,
 } from "@/lib/auth/session";
 import { toErrorMessage } from "@/lib/errors";
+import { LOCALE_COOKIE_NAME, normalizeLocale } from "@/lib/i18n";
+import { getLocaleCookieOptions } from "@/lib/i18n-server";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
+  const cookieStore = await cookies();
+  const locale = normalizeLocale(cookieStore.get(LOCALE_COOKIE_NAME)?.value);
   let rateLimitContext = buildAuthRateLimitContext({
     action: "register",
     request,
@@ -53,6 +58,7 @@ export async function POST(request: Request) {
       return Response.json(
         {
           error: toErrorMessage(error, "Некорректные данные регистрации."),
+          code: API_ERROR_CODES.INVALID_INPUT,
         },
         { status: 400 }
       );
@@ -71,6 +77,7 @@ export async function POST(request: Request) {
         return Response.json(
           {
             error: error.message,
+            code: API_ERROR_CODES.RATE_LIMITED,
           },
           {
             status: 429,
@@ -89,6 +96,7 @@ export async function POST(request: Request) {
         email,
         password,
         userId,
+        locale,
       });
 
       if (isEmailVerificationRequired() && !account.email_verified_at) {
@@ -97,6 +105,7 @@ export async function POST(request: Request) {
           to: account.email,
           token: verification.token,
           expiresAt: verification.expiresAt,
+          locale,
         });
 
         maybeRunAuthCleanup();
@@ -113,12 +122,15 @@ export async function POST(request: Request) {
       }
 
       const session = await createSessionForUser(account.id);
-      const cookieStore = await cookies();
       cookieStore.set({
         name: SESSION_COOKIE_NAME,
         value: session.token,
         expires: session.expiresAt,
         ...getSessionCookieBaseOptions(),
+      });
+      cookieStore.set({
+        ...getLocaleCookieOptions(),
+        value: account.locale,
       });
 
       maybeRunAuthCleanup();
@@ -130,6 +142,7 @@ export async function POST(request: Request) {
             id: account.id,
             email: account.email,
             emailVerifiedAt: account.email_verified_at,
+            locale: account.locale,
           },
           source: "postgres",
         },
@@ -139,13 +152,23 @@ export async function POST(request: Request) {
       await recordAuthRateEvent(rateLimitContext, false);
 
       if (error instanceof AuthEmailTakenError || error instanceof AuthUserIdTakenError) {
-        return Response.json({ error: error.message }, { status: 409 });
+        return Response.json(
+          {
+            code:
+              error instanceof AuthEmailTakenError
+                ? API_ERROR_CODES.EMAIL_TAKEN
+                : API_ERROR_CODES.USER_ID_TAKEN,
+            error: error.message,
+          },
+          { status: 409 }
+        );
       }
 
       if (error instanceof AuthEmailDeliveryError) {
         return Response.json(
           {
             error: toErrorMessage(error, "Не удалось отправить письмо подтверждения."),
+            code: API_ERROR_CODES.MAIL_DELIVERY_FAILED,
           },
           { status: 503 }
         );
@@ -158,6 +181,7 @@ export async function POST(request: Request) {
     return Response.json(
       {
         error: toErrorMessage(error, "Не удалось создать аккаунт."),
+        code: API_ERROR_CODES.INTERNAL_ERROR,
       },
       { status: 500 }
     );

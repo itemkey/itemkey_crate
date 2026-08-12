@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 
 import { getAccountStore } from "@/lib/account-store";
 import { parseUserIdCandidate } from "@/lib/account-user-id";
+import { API_ERROR_CODES } from "@/lib/api-errors";
 import { toErrorMessage } from "@/lib/errors";
 
 export const dynamic = "force-dynamic";
@@ -15,6 +16,7 @@ export async function GET(request: NextRequest) {
         {
           error:
             "user-id: 3-32 символа, только a-z, 0-9, ., _, -, начало и конец: буква/цифра.",
+          code: API_ERROR_CODES.INVALID_INPUT,
         },
         { status: 400 }
       );
@@ -34,6 +36,7 @@ export async function GET(request: NextRequest) {
     return Response.json(
       {
         error: toErrorMessage(error, "Не удалось проверить user-id."),
+        code: API_ERROR_CODES.INTERNAL_ERROR,
       },
       { status: 500 }
     );

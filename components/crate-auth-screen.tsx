@@ -3,7 +3,10 @@
 import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
 
+import { useI18n } from "@/components/i18n-provider";
+import LocaleSwitcher from "@/components/locale-switcher";
 import { normalizeUserId, validateUserId } from "@/lib/account-user-id";
+import { localizeApiError } from "@/lib/api-errors";
 import { toErrorMessage } from "@/lib/errors";
 
 type AuthTab = "login" | "register";
@@ -12,9 +15,11 @@ type AuthMutationPayload = {
   data?: {
     id: string;
     email: string | null;
+    locale?: "ru" | "en";
   };
   requiresEmailVerification?: boolean;
   error?: string;
+  code?: string;
 };
 
 type UserIdAvailabilityPayload = {
@@ -23,6 +28,7 @@ type UserIdAvailabilityPayload = {
     available: boolean;
   };
   error?: string;
+  code?: string;
 };
 
 type CsrfPayload = {
@@ -30,6 +36,7 @@ type CsrfPayload = {
     token: string;
   };
   error?: string;
+  code?: string;
 };
 
 type CrateAuthScreenProps = {
@@ -40,6 +47,7 @@ export default function CrateAuthScreen({
   initialError = null,
 }: CrateAuthScreenProps) {
   const router = useRouter();
+  const { locale, t, setLocale } = useI18n();
   const csrfTokenRef = useRef<string | null>(null);
   const clientIdRef = useRef<string | null>(null);
   const [authTab, setAuthTab] = useState<AuthTab>("login");
@@ -76,7 +84,7 @@ export default function CrateAuthScreen({
     });
     const payload = (await response.json()) as CsrfPayload;
     if (!response.ok || !payload.data?.token) {
-      throw new Error(payload.error ?? "Не удалось инициализировать CSRF-токен.");
+      throw new Error(localizeApiError(locale, payload));
     }
 
     csrfTokenRef.current = payload.data.token;
@@ -112,7 +120,7 @@ export default function CrateAuthScreen({
     const userIdValidationError = validateUserId(normalizedUserId);
 
     if (!authLoginUserIdDraft.trim() || !authLoginPassword) {
-      setAuthError("Введи user-id и пароль.");
+      setAuthError(t("auth.missingLogin"));
       return;
     }
 
@@ -137,15 +145,18 @@ export default function CrateAuthScreen({
       const payload = (await response.json()) as AuthMutationPayload;
 
       if (!response.ok || !payload.data) {
-        throw new Error(payload.error ?? "Не удалось войти в аккаунт.");
+        throw new Error(localizeApiError(locale, payload, "auth.loginFailed"));
       }
 
       authenticated = true;
+      if (payload.data.locale) {
+        setLocale(payload.data.locale);
+      }
       setAuthLoginPassword("");
       setShowAuthLoginPassword(false);
       completeAuthentication();
     } catch (error) {
-      setAuthError(toErrorMessage(error, "Не удалось войти в аккаунт."));
+      setAuthError(toErrorMessage(error, t("auth.loginFailed")));
     } finally {
       if (!authenticated) {
         setIsAuthBusy(false);
@@ -168,12 +179,12 @@ export default function CrateAuthScreen({
       !authRegisterPassword ||
       !authRegisterPasswordRepeat
     ) {
-      setAuthError("Введи email, user-id и пароль два раза.");
+      setAuthError(t("auth.missingRegistration"));
       return;
     }
 
     if (authRegisterPassword !== authRegisterPasswordRepeat) {
-      setAuthError("Пароли не совпадают.");
+      setAuthError(t("auth.passwordMismatch"));
       return;
     }
 
@@ -195,12 +206,12 @@ export default function CrateAuthScreen({
         (await availabilityResponse.json()) as UserIdAvailabilityPayload;
       if (!availabilityResponse.ok || !availabilityPayload.data) {
         throw new Error(
-          availabilityPayload.error ?? "Не удалось проверить user-id."
+          localizeApiError(locale, availabilityPayload, "auth.userIdCheckFailed")
         );
       }
 
       if (!availabilityPayload.data.available) {
-        setAuthError("Такой user-id уже занят.");
+        setAuthError(t("auth.userIdTaken"));
         return;
       }
 
@@ -216,7 +227,7 @@ export default function CrateAuthScreen({
       const payload = (await response.json()) as AuthMutationPayload;
 
       if (!response.ok) {
-        throw new Error(payload.error ?? "Не удалось создать аккаунт.");
+        throw new Error(localizeApiError(locale, payload, "auth.registerFailed"));
       }
 
       if (payload.requiresEmailVerification) {
@@ -228,13 +239,13 @@ export default function CrateAuthScreen({
         setAuthLoginUserIdDraft(normalizedUserId);
         setAuthTab("login");
         setAuthInfo(
-          "Аккаунт создан. Письмо подтверждения отправлено автоматически — подтверди email и войди."
+          t("auth.accountCreated")
         );
         return;
       }
 
       if (!payload.data) {
-        throw new Error("Сервер не вернул данные нового аккаунта.");
+        throw new Error(t("auth.registerFailed"));
       }
 
       authenticated = true;
@@ -245,7 +256,7 @@ export default function CrateAuthScreen({
       setShowAuthRegisterPassword(false);
       completeAuthentication();
     } catch (error) {
-      setAuthError(toErrorMessage(error, "Не удалось создать аккаунт."));
+      setAuthError(toErrorMessage(error, t("auth.registerFailed")));
     } finally {
       if (!authenticated) {
         setIsAuthBusy(false);
@@ -262,12 +273,15 @@ export default function CrateAuthScreen({
   return (
     <main className="workspace-root flex w-full items-stretch p-0">
       <div className="frame-shell relative flex h-full w-full items-center justify-center p-4">
-        <div className="popup-3d w-full max-w-xl p-5">
-          <h1 className="font-display text-5xl leading-none">Item Key</h1>
+        <div className="popup-3d entry-form-panel w-full max-w-xl p-5">
+          <div className="entry-form-head">
+            <h1 className="font-display text-5xl leading-none">{t("auth.title")}</h1>
+            <LocaleSwitcher compact />
+          </div>
           <p className="mt-3 text-sm text-[#202020]">
             {authTab === "login"
-              ? "Введи данные для входа: user-id и пароль."
-              : "Введи данные для регистрации аккаунта."}
+              ? t("auth.loginIntro")
+              : t("auth.registerIntro")}
           </p>
 
           <div className="mt-4 flex flex-wrap gap-2">
@@ -281,7 +295,7 @@ export default function CrateAuthScreen({
               onClick={() => selectAuthTab("login")}
               disabled={isAuthBusy}
             >
-              вход
+              {t("auth.login")}
             </button>
             <button
               type="button"
@@ -293,7 +307,7 @@ export default function CrateAuthScreen({
               onClick={() => selectAuthTab("register")}
               disabled={isAuthBusy}
             >
-              регистрация
+              {t("auth.register")}
             </button>
           </div>
 
@@ -304,7 +318,7 @@ export default function CrateAuthScreen({
                 void handleAuthSignIn();
               }}
             >
-              <label className="settings-label mt-4">user-id</label>
+              <label className="settings-label mt-4">{t("auth.userId")}</label>
               <input
                 type="text"
                 value={authLoginUserIdDraft}
@@ -315,14 +329,14 @@ export default function CrateAuthScreen({
                 spellCheck={false}
               />
 
-              <label className="settings-label mt-3">Пароль</label>
+              <label className="settings-label mt-3">{t("auth.password")}</label>
               <div className="settings-input-wrap">
                 <input
                   type={showAuthLoginPassword ? "text" : "password"}
                   value={authLoginPassword}
                   onChange={(event) => setAuthLoginPassword(event.target.value)}
                   className="settings-input pr-14"
-                  placeholder="Твой пароль"
+                  placeholder={t("auth.passwordPlaceholder")}
                   autoComplete="current-password"
                 />
                 <button
@@ -330,22 +344,22 @@ export default function CrateAuthScreen({
                   className="input-inline-action"
                   onClick={() => setShowAuthLoginPassword((previous) => !previous)}
                   aria-label={
-                    showAuthLoginPassword ? "Скрыть пароль" : "Показать пароль"
+                    showAuthLoginPassword ? t("common.hide") : t("common.show")
                   }
                 >
-                  {showAuthLoginPassword ? "hide" : "show"}
+                  {showAuthLoginPassword ? t("common.hide") : t("common.show")}
                 </button>
               </div>
 
               <div className="mt-4 flex flex-wrap gap-2">
                 <button type="submit" className="mini-action" disabled={isAuthBusy}>
-                  войти
+                  {t("auth.signIn")}
                 </button>
                 <a
                   href="/forgot-password"
                   className="mini-action inline-flex items-center justify-center"
                 >
-                  забыли пароль
+                  {t("auth.forgotPassword")}
                 </a>
               </div>
             </form>
@@ -356,7 +370,7 @@ export default function CrateAuthScreen({
                 void handleAuthSignUp();
               }}
             >
-              <label className="settings-label mt-4">Email</label>
+              <label className="settings-label mt-4">{t("auth.email")}</label>
               <input
                 type="email"
                 value={authRegisterEmail}
@@ -366,7 +380,7 @@ export default function CrateAuthScreen({
                 autoComplete="email"
               />
 
-              <label className="settings-label mt-3">user-id</label>
+              <label className="settings-label mt-3">{t("auth.userId")}</label>
               <input
                 type="text"
                 value={authRegisterUserIdDraft}
@@ -377,14 +391,14 @@ export default function CrateAuthScreen({
                 spellCheck={false}
               />
 
-              <label className="settings-label mt-3">Пароль</label>
+              <label className="settings-label mt-3">{t("auth.password")}</label>
               <div className="settings-input-wrap">
                 <input
                   type={showAuthRegisterPassword ? "text" : "password"}
                   value={authRegisterPassword}
                   onChange={(event) => setAuthRegisterPassword(event.target.value)}
                   className="settings-input pr-14"
-                  placeholder="Минимум 6 символов"
+                  placeholder={t("auth.passwordMin")}
                   autoComplete="new-password"
                 />
                 <button
@@ -394,14 +408,14 @@ export default function CrateAuthScreen({
                     setShowAuthRegisterPassword((previous) => !previous)
                   }
                   aria-label={
-                    showAuthRegisterPassword ? "Скрыть пароль" : "Показать пароль"
+                    showAuthRegisterPassword ? t("common.hide") : t("common.show")
                   }
                 >
-                  {showAuthRegisterPassword ? "hide" : "show"}
+                  {showAuthRegisterPassword ? t("common.hide") : t("common.show")}
                 </button>
               </div>
 
-              <label className="settings-label mt-3">Повтори пароль</label>
+              <label className="settings-label mt-3">{t("auth.repeatPassword")}</label>
               <input
                 type={showAuthRegisterPassword ? "text" : "password"}
                 value={authRegisterPasswordRepeat}
@@ -409,18 +423,18 @@ export default function CrateAuthScreen({
                   setAuthRegisterPasswordRepeat(event.target.value)
                 }
                 className="settings-input"
-                placeholder="Повтори пароль"
+                placeholder={t("auth.repeatPasswordPlaceholder")}
                 autoComplete="new-password"
               />
 
               <div className="mt-4 flex flex-wrap gap-2">
                 <button type="submit" className="mini-action" disabled={isAuthBusy}>
-                  зарегистрироваться
+                  {t("auth.signUp")}
                 </button>
               </div>
 
               <p className="settings-hint mt-3">
-                Письмо подтверждения отправляем автоматически после регистрации.
+                {t("auth.verificationHint")}
               </p>
             </form>
           )}
@@ -441,8 +455,7 @@ export default function CrateAuthScreen({
           )}
 
           <p className="settings-hint mt-3">
-            После входа данные привязываются к твоему аккаунту и синхронизируются
-            между устройствами.
+            {t("auth.syncHint")}
           </p>
         </div>
       </div>

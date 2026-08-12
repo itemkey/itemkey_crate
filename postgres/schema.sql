@@ -30,6 +30,7 @@ create table public.app_users (
   nickname text not null default '',
   profile_description text not null default '',
   avatar_url text null,
+  locale text not null default 'ru',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   constraint app_users_email_lower_check check (email = lower(email)),
@@ -39,7 +40,8 @@ create table public.app_users (
     check (
       user_id is null
       or user_id ~ '^[a-z0-9][a-z0-9._-]{1,30}[a-z0-9]$'
-    )
+    ),
+  constraint app_users_locale_check check (locale in ('ru', 'en'))
 );
 
 create unique index app_users_email_unique_idx

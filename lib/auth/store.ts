@@ -21,10 +21,11 @@ import {
   hashSessionToken,
 } from "@/lib/auth/session";
 import { getPostgresPool } from "@/lib/db/postgres";
+import { type Locale, normalizeLocale } from "@/lib/i18n";
 import type { AppUserRow } from "@/lib/types";
 
 const APP_USER_COLUMNS =
-  "id,email,email_verified_at,user_id,user_id_changed_at,nickname,profile_description,avatar_url,created_at,updated_at";
+  "id,email,email_verified_at,user_id,user_id_changed_at,nickname,profile_description,avatar_url,locale,created_at,updated_at";
 const APP_USER_COLUMNS_FROM_USERS = APP_USER_COLUMNS.split(",")
   .map((column) => `users.${column}`)
   .join(",");
@@ -202,6 +203,7 @@ function normalizeAppUser(row: AppUserRow): AppUserRow {
       typeof row.avatar_url === "string" && row.avatar_url.trim().length > 0
         ? row.avatar_url
         : null,
+    locale: normalizeLocale(row.locale),
     email: typeof row.email === "string" ? row.email : "",
   };
 }
@@ -355,6 +357,7 @@ export async function registerWithEmailPassword(input: {
   email: unknown;
   password: unknown;
   userId: string;
+  locale?: Locale;
 }): Promise<AppUserRow> {
   const email = assertValidEmailCandidate(input.email);
   const password = assertValidPasswordCandidate(input.password);
@@ -376,7 +379,8 @@ export async function registerWithEmailPassword(input: {
           user_id_changed_at,
           nickname,
           profile_description,
-          avatar_url
+          avatar_url,
+          locale
         )
         values (
           $1::text,
@@ -386,11 +390,12 @@ export async function registerWithEmailPassword(input: {
           now(),
           '',
           '',
-          null
+          null,
+          $5::text
         )
         returning ${APP_USER_COLUMNS}
       `,
-      [email, emailVerifiedAt, passwordHash, input.userId]
+      [email, emailVerifiedAt, passwordHash, input.userId, normalizeLocale(input.locale)]
     );
 
     const created = rows[0];
@@ -750,6 +755,7 @@ export async function issuePasswordResetTokenForEmail(email: unknown): Promise<{
   email: string;
   token: string;
   expiresAt: Date;
+  locale: Locale;
 } | null> {
   const normalizedEmail = assertValidEmailCandidate(email);
   const authUser = await getAuthUserByEmail(normalizedEmail);
@@ -767,6 +773,7 @@ export async function issuePasswordResetTokenForEmail(email: unknown): Promise<{
     email: authUser.email,
     token: issued.token,
     expiresAt: issued.expiresAt,
+    locale: authUser.locale,
   };
 }
 
@@ -932,6 +939,7 @@ export async function issueEmailVerificationTokenByEmail(email: unknown): Promis
   email: string;
   token: string;
   expiresAt: Date;
+  locale: Locale;
 } | null> {
   const normalizedEmail = assertValidEmailCandidate(email);
   const authUser = await getAuthUserByEmail(normalizedEmail);
@@ -949,6 +957,7 @@ export async function issueEmailVerificationTokenByEmail(email: unknown): Promis
     email: authUser.email,
     token: issued.token,
     expiresAt: issued.expiresAt,
+    locale: authUser.locale,
   };
 }
 
