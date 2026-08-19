@@ -2126,6 +2126,41 @@ button:disabled,
   font-size: 0.72em;
 }
 
+.schedule-card-readonly {
+  border: 1px solid #9aa19d;
+  border-radius: 999px;
+  padding: 0.2em 0.52em;
+  color: #505a54;
+  background: #e3e8e4;
+  font-size: 0.68em;
+  font-weight: 800;
+}
+
+.schedule-legacy-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.42em;
+  border: 1px solid #8aa2d4;
+  background: #e9effb;
+  padding: 0.45em 0.55em;
+  color: #263d6c;
+  font-size: 0.72em;
+}
+
+.schedule-legacy-banner span {
+  flex: 1 1 18em;
+}
+
+.schedule-legacy-banner a {
+  border: 1px solid #6381bd;
+  background: #fff;
+  color: #24457e;
+  padding: 0.3em 0.52em;
+  font-weight: 800;
+  text-decoration: none;
+}
+
 .schedule-toolbar {
   display: flex;
   flex-wrap: wrap;

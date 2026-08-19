@@ -28,6 +28,13 @@ export default function Home() {
             </Link>
 
             <Link
+              href="/planner"
+              className="mini-action entry-button inline-flex items-center justify-center"
+            >
+              {t("entry.planner")}
+            </Link>
+
+            <Link
               href="/media-converter"
               className="mini-action entry-button inline-flex items-center justify-center"
             >

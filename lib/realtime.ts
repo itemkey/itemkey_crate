@@ -16,6 +16,7 @@ export type RealtimeEvent = {
     | "projects"
     | "friends"
     | "inbox"
+    | "planner"
     | "public";
   action: string;
   userIds: string[];

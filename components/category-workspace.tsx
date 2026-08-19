@@ -54,8 +54,6 @@ import {
   buildScheduleAutoplanPreview,
   buildScheduleSuggestions,
   buildSpontaneousSchedulePreview,
-  createDefaultScheduleBlock,
-  createDefaultSchedulePayload,
   createScheduleId,
   formatScheduleDateShort,
   formatScheduleMinutes,
@@ -11743,62 +11741,6 @@ export default function CategoryWorkspace({
     }
   }
 
-  async function handleAddScheduleBlock() {
-    if (!currentCategory) {
-      return;
-    }
-
-    setChecklistEditor(null);
-    setDictionaryEditor(null);
-    setDictionaryStudy(null);
-    setScheduleModal(null);
-
-    if (currentCategory.format === "continuous") {
-      const sourceDocument = getContinuousDocumentForCategory(currentCategory.id);
-      if (!sourceDocument) {
-        pushNotice("Не удалось добавить расписание.", "error");
-        return;
-      }
-
-      const createdSchedule = createDefaultScheduleBlock();
-      commitContinuousDocumentForCategory(currentCategory.id, {
-        text: sourceDocument.text,
-        checklists: sourceDocument.checklists,
-        dictionaries: sourceDocument.dictionaries,
-        schedules: [...sourceDocument.schedules, createdSchedule],
-        rules: sourceDocument.rules,
-      });
-      pushNotice("Расписание добавлено.");
-      return;
-    }
-
-    setIsMutating(true);
-    try {
-      const created = await createMessageRequest(
-        currentCategory.id,
-        "Расписание",
-        serializeMessageScheduleContent(createDefaultSchedulePayload()),
-        "info"
-      );
-      savedMessageContentRef.current[created.id] = created.content;
-      messageDraftVersionRef.current[created.id] = 0;
-      messageAckVersionRef.current[created.id] = 0;
-      clearMessageSaveState(created.id);
-      setMessagesByCategory((prev) => ({
-        ...prev,
-        [currentCategory.id]: [...(prev[currentCategory.id] ?? []), created].sort(
-          sortMessages
-        ),
-      }));
-      setSelectedMessageId(created.id);
-      pushNotice("Расписание добавлено.");
-    } catch (error) {
-      pushNotice(toErrorMessage(error, "Не удалось добавить расписание."), "error");
-    } finally {
-      setIsMutating(false);
-    }
-  }
-
   function closeRuleSiblingEditors() {
     setChecklistEditor(null);
     setDictionaryEditor(null);
@@ -19138,10 +19080,9 @@ export default function CategoryWorkspace({
                   <button
                     type="button"
                     className="mini-action"
-                    onClick={() => void handleAddScheduleBlock()}
-                    disabled={!currentCategoryId || !currentCategoryCanEdit || isMutating || isLoading}
+                    onClick={() => window.location.assign("/planner")}
                   >
-                    Расписание
+                    {t("workspace.planner")}
                   </button>
                   <button
                     type="button"
@@ -19702,10 +19643,9 @@ export default function CategoryWorkspace({
                   <button
                     type="button"
                     className="mini-action"
-                    onClick={() => void handleAddScheduleBlock()}
-                    disabled={!currentCategoryId || !currentCategoryCanEdit || isMutating || isLoading}
+                    onClick={() => window.location.assign("/planner")}
                   >
-                    Расписание
+                    {t("workspace.planner")}
                   </button>
                   <button
                     type="button"
@@ -21063,11 +21003,10 @@ export default function CategoryWorkspace({
                 className="mini-action"
                 onClick={() => {
                   closeMobilePanel();
-                  void handleAddScheduleBlock();
+                  window.location.assign("/planner");
                 }}
-                disabled={!currentCategoryId || !currentCategoryCanEdit || isMutating || isLoading}
               >
-                {t("workspace.schedule")}
+                {t("workspace.planner")}
               </button>
               <button
                 type="button"
@@ -23886,6 +23825,14 @@ export default function CategoryWorkspace({
                   <button
                     type="button"
                     className="menu-action px-4 py-3 text-left text-lg font-semibold"
+                    onClick={() => window.location.assign("/planner")}
+                  >
+                    {t("workspace.planner")}
+                  </button>
+
+                  <button
+                    type="button"
+                    className="menu-action px-4 py-3 text-left text-lg font-semibold"
                     onClick={goToEntryMenu}
                   >
                     Главное меню
@@ -24993,18 +24940,18 @@ function ScheduleCard({
   title,
   payload,
   sourceRef,
-  canEdit,
   style,
-  onViewModeChange,
-  onDateChange,
   onOpenEvent,
   onOpenAssistant,
   onOpenTaskBase,
   onStatusChange,
   onDeleteEvent,
-  onDeleteBlock,
 }: ScheduleCardProps) {
-  const normalized = normalizeSchedulePayload(payload);
+  const initial = normalizeSchedulePayload(payload);
+  const [legacyViewMode, setLegacyViewMode] = useState(initial.viewMode);
+  const [legacyDate, setLegacyDate] = useState(initial.selectedDate);
+  const normalized = { ...initial, viewMode: legacyViewMode, selectedDate: legacyDate };
+  const canEdit = false;
   const weekDates = getScheduleWeekDates(normalized.selectedDate);
   const activeDates =
     normalized.viewMode === "week" ? weekDates : [normalized.selectedDate];
@@ -25112,15 +25059,14 @@ function ScheduleCard({
           <p className="schedule-card-kicker">schedule</p>
           <h3 className="schedule-card-title">{title}</h3>
         </div>
-        <button
-          type="button"
-          className="danger-action schedule-card-delete"
-          onClick={() => onDeleteBlock(sourceRef)}
-          disabled={!canEdit}
-        >
-          удалить
-        </button>
+        <span className="schedule-card-readonly">только чтение</span>
       </header>
+
+      <div className="schedule-legacy-banner">
+        <span>Это старое расписание. Оригинал сохранён для безопасного переноса.</span>
+        <a href="/planner?import=1">Импортировать</a>
+        <a href="/planner">Открыть планировщик</a>
+      </div>
 
       <div className="schedule-toolbar">
         <div className="schedule-tabs" role="tablist" aria-label="Режим расписания">
@@ -25131,8 +25077,7 @@ function ScheduleCard({
               className={`mini-action schedule-tab ${
                 normalized.viewMode === viewMode ? "schedule-tab-active" : ""
               }`}
-              onClick={() => onViewModeChange(sourceRef, viewMode)}
-              disabled={!canEdit}
+              onClick={() => setLegacyViewMode(viewMode)}
             >
               {viewMode === "day" ? "День" : viewMode === "week" ? "Неделя" : "Список"}
             </button>
@@ -25143,8 +25088,7 @@ function ScheduleCard({
           type="date"
           value={normalized.selectedDate}
           className="settings-input schedule-date-input"
-          onChange={(event) => onDateChange(sourceRef, event.target.value)}
-          disabled={!canEdit}
+          onChange={(event) => setLegacyDate(event.target.value)}
           aria-label="Дата расписания"
         />
 
@@ -25246,8 +25190,7 @@ function ScheduleCard({
                 className={`schedule-week-day ${
                   date === normalized.selectedDate ? "schedule-week-day-active" : ""
                 }`}
-                onClick={() => onDateChange(sourceRef, date)}
-                disabled={!canEdit}
+                onClick={() => setLegacyDate(date)}
               >
                 <span>{formatScheduleDateShort(date)}</span>
                 <strong>{events.length} дел</strong>
