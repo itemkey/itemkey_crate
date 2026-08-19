@@ -7,6 +7,8 @@ function source(relativeFromRepository: string): string {
 }
 
 const store = source("lib/planner/store.ts");
+const plannerUpgrade = source("postgres/planner-upgrade.sql");
+const freshSchema = source("postgres/schema.sql");
 const mutationRoutes = [
   "app/api/planner/settings/route.ts",
   "app/api/planner/items/route.ts",
@@ -17,6 +19,7 @@ const mutationRoutes = [
   "app/api/planner/proposals/[id]/apply/route.ts",
   "app/api/planner/change-sets/[id]/undo/route.ts",
   "app/api/planner/legacy-import/route.ts",
+  "app/api/planner/reset/route.ts",
 ];
 
 test("every planner mutation route authenticates the request and emits planner sync", () => {
@@ -37,11 +40,23 @@ test("direct mutations require a revision while proposal apply verifies its base
     "app/api/planner/blocks/[id]/route.ts",
     "app/api/planner/blocks/[id]/action/route.ts",
     "app/api/planner/legacy-import/route.ts",
+    "app/api/planner/reset/route.ts",
   ]) {
     assert.match(source(route), /assertPlannerRevision/, `${route} must validate expected revision`);
   }
   assert.match(store, /Number\(row\.base_revision\) !== current\.revision/);
   assert.match(store, /throw new PlannerRevisionError\(\)/);
+});
+
+test("assistant parsing stays private and reset verifies password, revision and rate limits", () => {
+  const assistant = source("app/api/planner/assistant/parse/route.ts");
+  const reset = source("app/api/planner/reset/route.ts");
+  assert.match(assistant, /getRequestUser\(request\)/);
+  assert.match(reset, /assertPlannerRevision/);
+  assert.match(reset, /assertAuthRateLimit/);
+  assert.match(reset, /planner_reset/);
+  assert.match(store, /verifyPassword\(password, rows\[0\]\.password_hash\)/);
+  assert.match(store, /delete from public\.planner_sleep_events/);
 });
 
 test("proposal application and undo are transactional and account-scoped", () => {
@@ -57,4 +72,13 @@ test("legacy import is idempotent and never mutates legacy category/message tabl
   const legacyStoreSection = store.slice(store.indexOf("async importLegacy"));
   assert.match(legacyStoreSection, /on conflict \(app_user_id,source_key\) do nothing/);
   assert.doesNotMatch(legacyStoreSection, /(?:update|delete from) public\.(?:categories|category_messages)/i);
+});
+
+test("planner upgrade is idempotent and fresh installs include protected sleep", () => {
+  assert.match(plannerUpgrade, /add column if not exists sleep_schedule/);
+  assert.match(plannerUpgrade, /create table if not exists public\.planner_sleep_events/);
+  assert.match(plannerUpgrade, /planner_reset/);
+  assert.doesNotMatch(plannerUpgrade, /drop table if exists public\.planner_(?:profiles|items|blocks|sleep_events)/);
+  assert.match(freshSchema, /create table public\.planner_sleep_events/);
+  assert.match(freshSchema, /assistant_setup_version integer not null default 0/);
 });

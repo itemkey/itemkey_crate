@@ -21,6 +21,40 @@ export type PlannerEnergyWindow = PlannerTimeWindow & {
   energy: PlannerEnergy;
 };
 
+export type PlannerSleepRule = {
+  bedtime: string;
+  durationMinutes: number;
+};
+
+export type PlannerSleepSchedule = {
+  weekdays: PlannerSleepRule;
+  weekends: PlannerSleepRule;
+};
+
+export type PlannerSleepEvent = {
+  wakeDate: string;
+  actualStartAt: string;
+  projectedEndAt: string;
+  actualEndAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type PlannerSleepBlock = {
+  id: string;
+  wakeDate: string;
+  title: string;
+  startAt: string;
+  endAt: string;
+  plannedStartAt: string;
+  plannedEndAt: string;
+  actualStartAt?: string;
+  actualEndAt?: string;
+  fixed: true;
+  locked: true;
+  kind: "sleep";
+};
+
 export type PlannerProfile = {
   userId?: string;
   timezone: string;
@@ -29,6 +63,8 @@ export type PlannerProfile = {
   defaultBufferMinutes: number;
   availability: PlannerAvailability;
   energyWindows: PlannerEnergyWindow[];
+  sleepSchedule: PlannerSleepSchedule;
+  assistantSetupVersion: number;
   revision: number;
   onboardingCompleted: boolean;
 };
@@ -36,6 +72,9 @@ export type PlannerProfile = {
 export type PlannerRecurrence = {
   frequency: "daily" | "weekly" | "custom";
   weekdays?: number[];
+  startDate?: string;
+  startTime?: string;
+  endTime?: string;
 };
 
 export type PlannerItem = {
@@ -88,6 +127,18 @@ export type PlannerDraft = Partial<PlannerItem> & {
 };
 
 export type PlannerProposalChange =
+  | {
+      id: string;
+      kind: "update_profile";
+      profile: PlannerProfile;
+      reason: string;
+    }
+  | {
+      id: string;
+      kind: "upsert_sleep_event";
+      event: PlannerSleepEvent;
+      reason: string;
+    }
   | {
       id: string;
       kind: "add_item";
@@ -143,8 +194,16 @@ export type PlannerUnplaced = {
 export type PlannerProposal = {
   id?: string;
   baseRevision: number;
-  trigger: "autoplan" | "quick_add" | "plans_changed" | "day_refresh";
+  trigger:
+    | "autoplan"
+    | "quick_add"
+    | "plans_changed"
+    | "day_refresh"
+    | "assistant_setup"
+    | "assistant_update"
+    | "sleep_changed";
   normalizedDraft?: PlannerDraft;
+  normalizedDrafts?: PlannerDraft[];
   changes: PlannerProposalChange[];
   conflicts: PlannerConflict[];
   unplaced: PlannerUnplaced[];
@@ -157,6 +216,8 @@ export type PlannerBootstrap = {
   profile: PlannerProfile;
   items: PlannerItem[];
   blocks: PlannerBlock[];
+  sleepEvents: PlannerSleepEvent[];
+  sleepBlocks: PlannerSleepBlock[];
   latestChangeSetId?: string;
   durationSuggestions?: Array<{
     itemId: string;
@@ -164,6 +225,33 @@ export type PlannerBootstrap = {
     currentMinutes: number;
     suggestedMinutes: number;
   }>;
+};
+
+export type PlannerProposalInput = {
+  command?: string;
+  draft?: PlannerDraft;
+  drafts?: PlannerDraft[];
+  profilePatch?: Partial<PlannerProfile>;
+  sleepEvent?: PlannerSleepEvent;
+  trigger?: PlannerProposal["trigger"];
+  rebuildFuture?: boolean;
+};
+
+export type PlannerAssistantAmbiguity = {
+  index: number;
+  field: "title" | "kind" | "duration" | "date" | "time";
+  message: string;
+};
+
+export type PlannerAssistantParseResult = {
+  drafts: PlannerDraft[];
+  ambiguities: PlannerAssistantAmbiguity[];
+};
+
+export type PlannerSleepParseResult = {
+  bedtime?: string;
+  durationMinutes?: number;
+  ambiguities: string[];
 };
 
 export const DEFAULT_PLANNER_AVAILABILITY: PlannerAvailability = {
@@ -182,6 +270,11 @@ export const DEFAULT_PLANNER_ENERGY_WINDOWS: PlannerEnergyWindow[] = [
   { start: "18:00", end: "22:00", energy: "low" },
 ];
 
+export const DEFAULT_PLANNER_SLEEP_SCHEDULE: PlannerSleepSchedule = {
+  weekdays: { bedtime: "23:00", durationMinutes: 8 * 60 },
+  weekends: { bedtime: "23:00", durationMinutes: 8 * 60 },
+};
+
 export function createDefaultPlannerProfile(timezone = "Europe/Minsk"): PlannerProfile {
   return {
     timezone,
@@ -190,6 +283,8 @@ export function createDefaultPlannerProfile(timezone = "Europe/Minsk"): PlannerP
     defaultBufferMinutes: 15,
     availability: DEFAULT_PLANNER_AVAILABILITY,
     energyWindows: DEFAULT_PLANNER_ENERGY_WINDOWS,
+    sleepSchedule: DEFAULT_PLANNER_SLEEP_SCHEDULE,
+    assistantSetupVersion: 0,
     revision: 0,
     onboardingCompleted: false,
   };

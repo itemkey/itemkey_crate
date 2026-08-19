@@ -2,6 +2,7 @@ create extension if not exists pgcrypto;
 
 drop table if exists public.auth_rate_events cascade;
 drop table if exists public.planner_legacy_imports cascade;
+drop table if exists public.planner_sleep_events cascade;
 drop table if exists public.planner_change_sets cascade;
 drop table if exists public.planner_proposals cascade;
 drop table if exists public.planner_blocks cascade;
@@ -138,7 +139,8 @@ create table public.auth_rate_events (
         'reset_password',
         'verify_email',
         'resend_verification',
-        'change_password'
+        'change_password',
+        'planner_reset'
       )
     )
 );
@@ -437,6 +439,8 @@ create table public.planner_profiles (
   default_buffer_minutes integer not null default 15 check (default_buffer_minutes between 0 and 120),
   availability jsonb not null default '{}'::jsonb,
   energy_windows jsonb not null default '[]'::jsonb,
+  sleep_schedule jsonb not null default '{"weekdays":{"bedtime":"23:00","durationMinutes":480},"weekends":{"bedtime":"23:00","durationMinutes":480}}'::jsonb,
+  assistant_setup_version integer not null default 0,
   revision bigint not null default 0,
   onboarding_completed boolean not null default false,
   created_at timestamptz not null default now(),
@@ -543,6 +547,24 @@ create table public.planner_legacy_imports (
   primary key (app_user_id, source_key)
 );
 
+create table public.planner_sleep_events (
+  app_user_id uuid not null references public.app_users(id) on delete cascade,
+  wake_date date not null,
+  actual_start_at timestamptz not null,
+  projected_end_at timestamptz not null,
+  actual_end_at timestamptz null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key (app_user_id, wake_date),
+  constraint planner_sleep_events_time_check check (
+    projected_end_at > actual_start_at
+    and (actual_end_at is null or actual_end_at > actual_start_at)
+  )
+);
+
+create index planner_sleep_events_user_range_idx
+  on public.planner_sleep_events(app_user_id, wake_date desc);
+
 create or replace function public.set_updated_at()
 returns trigger
 language plpgsql
@@ -607,4 +629,8 @@ for each row execute function public.set_updated_at();
 
 create trigger trg_planner_blocks_updated_at
 before update on public.planner_blocks
+for each row execute function public.set_updated_at();
+
+create trigger trg_planner_sleep_events_updated_at
+before update on public.planner_sleep_events
 for each row execute function public.set_updated_at();

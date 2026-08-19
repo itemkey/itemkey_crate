@@ -93,7 +93,7 @@ See `.env.example`.
 3. If you already have production/local data, run the relevant upgrade scripts instead.
 4. Before deploying the progressive `/crate` loader, apply `postgres/performance-upgrade.sql`. It is idempotent and does not delete user data.
 5. Before deploying the bilingual interface, apply `postgres/account-locale-upgrade.sql`. It is idempotent; existing accounts receive `ru`.
-6. Before deploying the private planner, apply `postgres/planner-upgrade.sql`. It is idempotent and keeps all legacy schedule cards intact for the import wizard.
+6. Before deploying or updating the private planner, apply `postgres/planner-upgrade.sql`. It is idempotent, adds protected sleep/autoplanner fields and keeps all legacy schedule cards intact for the import wizard.
 
 > `postgres/schema.sql` intentionally drops existing tables before recreate.
 > This fully resets all user data.

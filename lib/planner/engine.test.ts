@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { applyProposalChanges, buildPlannerProposal, parsePlannerCommand, plannerCompletionSuggestion } from "./engine.ts";
+import {
+  applyProposalChanges,
+  buildPlannerProposal,
+  parsePlannerCommand,
+  parsePlannerCommands,
+  parseSleepCommand,
+  plannerCompletionSuggestion,
+} from "./engine.ts";
+import { createPlannerSleepEvent } from "./sleep.ts";
 import { createDefaultPlannerProfile, type PlannerBlock, type PlannerItem } from "./types.ts";
 import { formatDateInTimeZone, formatTimeInTimeZone, plannerTimeToMinutes, zonedPlannerDateTimeToUtc } from "./time.ts";
 
@@ -273,4 +281,186 @@ test("autoplan keeps the standard buffer and honors preferred time", () => {
   assert.ok(added && added.kind === "add_block");
   assert.equal(formatTimeInTimeZone(new Date(added.block.startAt), profile.timezone), "14:00");
   assert.ok(new Date(added.block.startAt).getTime() - new Date(fixed.endAt).getTime() >= 15 * 60_000);
+});
+
+test("protected sleep excludes task placement", () => {
+  const allDay = {
+    ...profile,
+    defaultBufferMinutes: 0,
+    reserveRatio: 0,
+    availability: Object.fromEntries(Array.from({ length: 7 }, (_, index) => [String(index + 1), [{ start: "00:00", end: "23:59" }]])),
+  };
+  const sleepEvent = createPlannerSleepEvent({
+    profile: allDay,
+    wakeDate: "2026-08-20",
+    actualStartAt: "2026-08-19T22:00:00.000Z",
+  });
+  const proposal = buildPlannerProposal({
+    profile: allDay,
+    items: [item()],
+    blocks: [],
+    sleepEvents: [sleepEvent],
+    now: new Date("2026-08-19T20:30:00.000Z"),
+  });
+  const added = proposal.changes.find((change) => change.kind === "add_block");
+  assert.ok(added && added.kind === "add_block");
+  assert.ok(
+    new Date(added.block.endAt) <= new Date(sleepEvent.actualStartAt)
+      || new Date(added.block.startAt) >= new Date(sleepEvent.projectedEndAt)
+  );
+});
+
+test("late bedtime preserves sleep duration without changing the regular schedule", () => {
+  const before = structuredClone(profile.sleepSchedule);
+  const event = createPlannerSleepEvent({
+    profile,
+    wakeDate: "2026-08-20",
+    actualStartAt: "2026-08-19T23:15:00.000Z",
+  });
+  assert.equal(
+    (new Date(event.projectedEndAt).getTime() - new Date(event.actualStartAt).getTime()) / 60_000,
+    profile.sleepSchedule.weekdays.durationMinutes
+  );
+  assert.deepEqual(profile.sleepSchedule, before);
+});
+
+test("full future rebuild keeps every task minute or reports it in the queue", () => {
+  const future: PlannerBlock = {
+    id: "future-task",
+    itemId: "task-1",
+    title: "Сделать важную работу",
+    startAt: "2026-08-20T07:00:00.000Z",
+    endAt: "2026-08-20T08:00:00.000Z",
+    status: "planned",
+    source: "auto",
+    fixed: false,
+  };
+  const proposal = buildPlannerProposal({
+    profile,
+    items: [item()],
+    blocks: [future],
+    now: new Date("2026-08-19T08:00:00.000Z"),
+    trigger: "sleep_changed",
+    rebuildFuture: true,
+    sleepEvent: createPlannerSleepEvent({
+      profile,
+      wakeDate: "2026-08-20",
+      actualStartAt: "2026-08-19T23:00:00.000Z",
+    }),
+  });
+  const applied = applyProposalChanges([item()], [future], proposal);
+  const scheduledMinutes = applied.blocks
+    .filter((block) => block.itemId === "task-1" && !["cancelled", "skipped"].includes(block.status))
+    .reduce((sum, block) => sum + (new Date(block.endAt).getTime() - new Date(block.startAt).getTime()) / 60_000, 0);
+  const queuedMinutes = proposal.unplaced
+    .filter((entry) => entry.itemId === "task-1")
+    .reduce((sum, entry) => sum + entry.remainingMinutes, 0);
+  assert.equal(scheduledMinutes + queuedMinutes, 60);
+  assert.equal(applied.items.find((entry) => entry.id === "task-1")?.estimateMinutes, 60);
+});
+
+test("recurring fixed commitments fill missing occurrences without duplicates", () => {
+  const commitment = item({
+    id: "school",
+    kind: "fixed_event",
+    title: "Занятие",
+    estimateMinutes: 60,
+    autoPlan: false,
+    recurrence: {
+      frequency: "custom",
+      weekdays: [1, 2, 3, 4, 5],
+      startDate: "2026-08-19",
+      startTime: "09:00",
+      endTime: "10:00",
+    },
+  });
+  const existing: PlannerBlock = {
+    id: "school-existing",
+    itemId: commitment.id,
+    title: commitment.title,
+    startAt: "2026-08-19T06:00:00.000Z",
+    endAt: "2026-08-19T07:00:00.000Z",
+    status: "planned",
+    source: "auto",
+    fixed: true,
+    occurrenceKey: "school:2026-08-19",
+  };
+  const proposal = buildPlannerProposal({
+    profile,
+    items: [commitment],
+    blocks: [existing],
+    now: new Date("2026-08-19T04:00:00.000Z"),
+  });
+  const occurrences = proposal.changes.flatMap((change) =>
+    change.kind === "add_block" && change.block.itemId === commitment.id
+      ? [change.block.occurrenceKey]
+      : []
+  );
+  assert.ok(!occurrences.includes(existing.occurrenceKey));
+  assert.equal(new Set(occurrences).size, occurrences.length);
+});
+
+test("multiline RU and EN parsing marks only genuinely ambiguous rows", () => {
+  const parsed = parsePlannerCommands(
+    "Каждый понедельник спорт с 19 до 20\nSubmit report tomorrow 2 hours urgent\nПрочитать книгу",
+    profile,
+    new Date("2026-08-19T10:00:00.000Z")
+  );
+  assert.equal(parsed.drafts.length, 3);
+  assert.equal(parsed.drafts[0].kind, "fixed_event");
+  assert.deepEqual(parsed.drafts[0].recurrence?.weekdays, [1]);
+  assert.equal(parsed.drafts[1].priority, "critical");
+  assert.equal(parsed.drafts[1].estimateMinutes, 120);
+  assert.equal(formatDateInTimeZone(new Date(parsed.drafts[1].deadlineAt!), profile.timezone), "2026-08-20");
+  assert.ok(parsed.ambiguities.some((entry) => entry.index === 2 && entry.field === "duration"));
+  assert.ok(!parsed.ambiguities.some((entry) => entry.index === 0));
+});
+
+test("sleep phrases parse deterministically and require missing fields", () => {
+  assert.deepEqual(parseSleepCommand("Ложусь спать в 23:30, сплю 8 часов"), {
+    bedtime: "23:30",
+    durationMinutes: 480,
+    ambiguities: [],
+  });
+  assert.ok(parseSleepCommand("обычный сон").ambiguities.length >= 2);
+});
+
+test("one-off late wake shifts that day's energy window", () => {
+  const energyProfile = {
+    ...profile,
+    defaultBufferMinutes: 0,
+    reserveRatio: 0,
+    availability: Object.fromEntries(Array.from({ length: 7 }, (_, index) => [String(index + 1), [{ start: "07:00", end: "18:00" }]])),
+    energyWindows: [
+      { start: "08:00", end: "10:00", energy: "high" as const },
+      { start: "10:00", end: "18:00", energy: "normal" as const },
+    ],
+  };
+  const proposal = buildPlannerProposal({
+    profile: energyProfile,
+    items: [item({ estimateMinutes: 60, energy: "high" })],
+    blocks: [],
+    sleepEvents: [createPlannerSleepEvent({
+      profile: energyProfile,
+      wakeDate: "2026-08-20",
+      actualStartAt: "2026-08-19T22:00:00.000Z",
+    })],
+    now: new Date("2026-08-20T06:00:00.000Z"),
+  });
+  const added = proposal.changes.find((change) => change.kind === "add_block");
+  assert.ok(added && added.kind === "add_block");
+  assert.equal(formatTimeInTimeZone(new Date(added.block.startAt), energyProfile.timezone), "10:00");
+});
+
+test("identical input creates an identical proposal", () => {
+  const input = {
+    profile,
+    items: [item()],
+    blocks: [] as PlannerBlock[],
+    now: new Date("2026-08-19T04:00:00.000Z"),
+    drafts: [{ title: "Важный отчёт", kind: "flexible_task" as const, estimateMinutes: 90 }],
+    trigger: "assistant_update" as const,
+    rebuildFuture: true,
+  };
+  assert.deepEqual(buildPlannerProposal(input), buildPlannerProposal(input));
 });

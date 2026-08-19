@@ -53,7 +53,8 @@ create table if not exists public.auth_rate_events (
         'reset_password',
         'verify_email',
         'resend_verification',
-        'change_password'
+        'change_password',
+        'planner_reset'
       )
     )
 );

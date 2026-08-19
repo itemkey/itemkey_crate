@@ -4,14 +4,19 @@ import {
   type PlannerConflict,
   type PlannerDraft,
   type PlannerEnergy,
+  type PlannerAssistantParseResult,
   type PlannerItem,
   type PlannerPriority,
   type PlannerProfile,
   type PlannerProposal,
+  type PlannerProposalInput,
   type PlannerProposalChange,
+  type PlannerSleepEvent,
+  type PlannerSleepParseResult,
   type PlannerTimeWindow,
   type PlannerUnplaced,
 } from "./types.ts";
+import { buildPlannerSleepBlocks, normalizeSleepSchedule } from "./sleep.ts";
 import {
   addIsoMinutes,
   addPlannerDays,
@@ -27,14 +32,12 @@ import {
 
 const STEP_MINUTES = 15;
 
-type PlannerEngineInput = {
+type PlannerEngineInput = PlannerProposalInput & {
   profile: PlannerProfile;
   items: PlannerItem[];
   blocks: PlannerBlock[];
+  sleepEvents?: PlannerSleepEvent[];
   now?: Date;
-  trigger?: PlannerProposal["trigger"];
-  command?: string;
-  draft?: PlannerDraft;
 };
 
 type PlacementRequest = {
@@ -110,6 +113,8 @@ export function normalizePlannerProfile(value: Partial<PlannerProfile>): Planner
           return start && end ? [{ start, end, energy }] : [];
         })
       : fallback.energyWindows,
+    sleepSchedule: normalizeSleepSchedule(value.sleepSchedule ?? fallback.sleepSchedule),
+    assistantSetupVersion: Math.max(0, Math.round(Number(value.assistantSetupVersion ?? 0))),
     revision: Math.max(0, Math.round(Number(value.revision ?? 0))),
     onboardingCompleted: Boolean(value.onboardingCompleted),
   };
@@ -185,6 +190,23 @@ function parseTimeRange(text: string): { start: string; end: string } | undefine
   return start && end ? { start, end } : undefined;
 }
 
+function parseRecurrence(text: string): PlannerDraft["recurrence"] | undefined {
+  const lower = text.toLocaleLowerCase();
+  if (!/(?:кажд|every|по будням|weekdays|ежеднев)/i.test(lower)) return undefined;
+  if (/(?:каждый день|ежеднев|every day|daily)/i.test(lower)) return { frequency: "daily" };
+  if (/(?:по будням|weekdays)/i.test(lower)) return { frequency: "custom", weekdays: [1, 2, 3, 4, 5] };
+  const names = [
+    [/(?:понедель|monday)/i, 1], [/(?:вторник|tuesday)/i, 2],
+    [/(?:сред|wednesday)/i, 3], [/(?:четвер|thursday)/i, 4],
+    [/(?:пятниц|friday)/i, 5], [/(?:суббот|saturday)/i, 6],
+    [/(?:воскрес|sunday)/i, 7],
+  ] as const;
+  const weekdays = names.filter(([pattern]) => pattern.test(lower)).map(([, day]) => day);
+  return weekdays.length === 1
+    ? { frequency: "weekly", weekdays }
+    : { frequency: "custom", weekdays: weekdays.length ? weekdays : [1, 2, 3, 4, 5, 6, 7] };
+}
+
 export function parsePlannerCommand(
   command: string,
   profile: PlannerProfile,
@@ -197,15 +219,18 @@ export function parsePlannerCommand(
     ? Math.max(5, (plannerTimeToMinutes(range.end) - plannerTimeToMinutes(range.start) + 1440) % 1440)
     : parseDuration(text) ?? 60;
   const lower = text.toLocaleLowerCase();
+  const recurrence = parseRecurrence(text);
+  const inferredDate = inferDateFromText(text, baseDate);
   const kind = range || lower.includes("встреч") || lower.includes("appointment")
     ? "fixed_event"
-    : lower.includes("кажд") || lower.includes("every") || lower.includes("routine")
+    : recurrence || lower.includes("routine")
       ? "routine"
       : "flexible_task";
   const title = text
     .replace(/\b(?:сегодня|завтра|послезавтра|today|tomorrow)\b/gi, "")
     .replace(/(?:с|from)?\s*\d{1,2}(?::[0-5]\d)?\s*(?:-|—|–|до|to)\s*\d{1,2}(?::[0-5]\d)?/gi, "")
     .replace(/\b\d+(?:[.,]\d+)?\s*(?:час(?:а|ов)?|ч|мин(?:ут[аы]?)?|hours?|h|minutes?|min)\b/gi, "")
+    .replace(/\b(?:каждый|каждая|каждое|каждые|every|daily|ежедневно|по будням|weekdays)\b/gi, "")
     .replace(/\s+/g, " ")
     .trim()
     .replace(/^[,.;:\-–—]+|[,.;:\-–—]+$/g, "") || "Новое дело";
@@ -220,16 +245,66 @@ export function parsePlannerCommand(
     estimateMinutes: duration,
     priority,
     energy: "normal",
-    date: inferDateFromText(text, baseDate) ?? baseDate,
+    date: inferredDate ?? baseDate,
+    deadlineAt: kind === "flexible_task" && inferredDate
+      ? zonedPlannerDateTimeToUtc(inferredDate, "23:59", profile.timezone)
+      : undefined,
     start: range?.start,
     end: range?.end,
     canSplit: kind === "flexible_task" && duration >= 60,
     minChunkMinutes: 25,
     preferredWindows: [],
     avoidedWindows: [],
+    recurrence: recurrence ? {
+      ...recurrence,
+      startDate: inferredDate ?? baseDate,
+      startTime: range?.start,
+      endTime: range?.end,
+    } : undefined,
     autoPlan: kind !== "fixed_event",
     status: "active",
   };
+}
+
+export function parsePlannerCommands(
+  command: string,
+  profile: PlannerProfile,
+  now = new Date()
+): PlannerAssistantParseResult {
+  const lines = command.split(/\r?\n|;/).map((line) => line.trim()).filter(Boolean).slice(0, 100);
+  const drafts: PlannerDraft[] = [];
+  const ambiguities: PlannerAssistantParseResult["ambiguities"] = [];
+  lines.forEach((line, index) => {
+    const draft = parsePlannerCommand(line, profile, now);
+    drafts.push(draft);
+    if (!parseDuration(line) && !parseTimeRange(line)) {
+      ambiguities.push({ index, field: "duration", message: "Длительность не указана; временно поставлен 1 час." });
+    }
+    if (draft.kind === "fixed_event" && !draft.start) {
+      ambiguities.push({ index, field: "time", message: "Для фиксированного события нужно указать начало и конец." });
+    }
+    if (draft.kind === "fixed_event" && !inferDateFromText(line, formatDateInTimeZone(now, profile.timezone))) {
+      ambiguities.push({ index, field: "date", message: "Дата не указана; временно выбрано сегодня." });
+    }
+    if (!draft.title.trim()) {
+      ambiguities.push({ index, field: "title", message: "У дела нет понятного названия." });
+    }
+  });
+  return { drafts, ambiguities };
+}
+
+export function parseSleepCommand(command: string): PlannerSleepParseResult {
+  const text = command.trim();
+  const timeMatch = text.match(/(?:лож(?:усь|иться|усь спать)|спать|bed(?:time)?|sleep)\D{0,20}(\d{1,2})(?::([0-5]\d))?/i)
+    ?? text.match(/\b(?:в|at)\s*(\d{1,2})(?::([0-5]\d))?/i);
+  const bedtime = timeMatch
+    ? normalizePlannerTime(`${String(Number(timeMatch[1])).padStart(2, "0")}:${timeMatch[2] ?? "00"}`)
+    : undefined;
+  const durationMinutes = parseDuration(text);
+  const ambiguities: string[] = [];
+  if (!bedtime) ambiguities.push("Не удалось определить время отхода ко сну.");
+  if (!durationMinutes) ambiguities.push("Не удалось определить обычную длительность сна.");
+  return { bedtime, durationMinutes, ambiguities };
 }
 
 function rangesOverlap(left: Interval, right: Interval): boolean {
@@ -295,6 +370,7 @@ function availabilityForDate(profile: PlannerProfile, date: string): PlannerTime
 function getRoutineDates(item: PlannerItem, startDate: string, endDate: string): string[] {
   const dates: string[] = [];
   for (let date = startDate; date <= endDate; date = addPlannerDays(date, 1)) {
+    if (item.recurrence?.startDate && date < item.recurrence.startDate) continue;
     if (!item.recurrence || item.recurrence.frequency === "daily") dates.push(date);
     else if (item.recurrence.frequency === "weekly" && plannerWeekday(date) === (item.recurrence.weekdays?.[0] ?? 1)) dates.push(date);
     else if (item.recurrence.frequency === "custom" && item.recurrence.weekdays?.includes(plannerWeekday(date))) dates.push(date);
@@ -342,10 +418,11 @@ function scoreCandidate(
   date: string,
   startMinute: number,
   startAt: number,
-  horizonStart: number
+  horizonStart: number,
+  energyShiftMinutes = 0
 ): number {
   let score = priorityWeight[item.priority] - (startAt - horizonStart) / 3_600_000;
-  if (energyAt(profile, startMinute) === item.energy) score += 80;
+  if (energyAt(profile, startMinute - energyShiftMinutes) === item.energy) score += 80;
   if (item.preferredWindows.some((window) => windowContainsMinute(window, startMinute))) score += 120;
   if (item.deadlineAt) {
     const slackHours = (new Date(item.deadlineAt).getTime() - startAt) / 3_600_000;
@@ -365,7 +442,8 @@ function findPlacement(
   endDate: string,
   nowMs: number,
   autoMinutesByDate: Map<string, number>,
-  itemById: Map<string, PlannerItem>
+  itemById: Map<string, PlannerItem>,
+  energyShiftByDate: Map<string, number>
 ): { startAt: string; endAt: string; date: string } | null {
   let best: { startAt: string; endAt: string; date: string; score: number } | null = null;
   const horizonStartMs = new Date(zonedPlannerDateTimeToUtc(startDate, "00:00", profile.timezone)).getTime();
@@ -412,7 +490,15 @@ function findPlacement(
           }
           return true;
         })) continue;
-        const score = scoreCandidate(request.item, profile, date, localMinute, candidate.start, horizonStartMs);
+        const score = scoreCandidate(
+          request.item,
+          profile,
+          date,
+          localMinute,
+          candidate.start,
+          horizonStartMs,
+          energyShiftByDate.get(date) ?? 0
+        );
         if (!best || score > best.score) best = { startAt, endAt, date, score };
       }
     }
@@ -445,13 +531,57 @@ function blockFromDraft(draft: PlannerDraft, item: PlannerItem, profile: Planner
   };
 }
 
+function recurringFixedBlocks(
+  item: PlannerItem,
+  profile: PlannerProfile,
+  startDate: string,
+  endDate: string
+): PlannerBlock[] {
+  if (item.kind !== "fixed_event" || !item.recurrence?.startTime) return [];
+  return getRoutineDates(item, startDate, endDate)
+    .filter((date) => !item.recurrence?.startDate || date >= item.recurrence.startDate)
+    .map((date) => {
+      const startAt = zonedPlannerDateTimeToUtc(date, item.recurrence!.startTime!, profile.timezone);
+      const endTime = item.recurrence?.endTime;
+      const endDateForOccurrence = endTime && plannerTimeToMinutes(endTime) <= plannerTimeToMinutes(item.recurrence!.startTime!)
+        ? addPlannerDays(date, 1)
+        : date;
+      const endAt = endTime
+        ? zonedPlannerDateTimeToUtc(endDateForOccurrence, endTime, profile.timezone)
+        : addIsoMinutes(startAt, item.estimateMinutes);
+      return {
+        id: uniqueId("block", item.id, date),
+        itemId: item.id,
+        title: item.title,
+        startAt,
+        endAt,
+        status: "planned" as const,
+        source: "auto" as const,
+        fixed: true,
+        occurrenceKey: `${item.id}:${date}`,
+      };
+    });
+}
+
 export function buildPlannerProposal(input: PlannerEngineInput): PlannerProposal {
-  const profile = normalizePlannerProfile(input.profile);
+  const baseProfile = normalizePlannerProfile(input.profile);
+  const profile = normalizePlannerProfile({
+    ...baseProfile,
+    ...(input.profilePatch ?? {}),
+    revision: baseProfile.revision,
+  });
   const now = input.now ?? new Date();
   const startDate = formatDateInTimeZone(now, profile.timezone);
   const endDate = addPlannerDays(startDate, horizonDays(profile.horizon) - 1);
-  const trigger = input.trigger ?? (input.command || input.draft ? "quick_add" : "autoplan");
-  const normalizedDraft = input.draft ?? (input.command ? parsePlannerCommand(input.command, profile, now) : undefined);
+  const trigger = input.trigger ?? (input.command || input.draft || input.drafts?.length ? "quick_add" : "autoplan");
+  const normalizedDrafts = input.drafts?.length
+    ? input.drafts
+    : input.draft
+      ? [input.draft]
+      : input.command
+        ? [parsePlannerCommand(input.command, profile, now)]
+        : [];
+  const normalizedDraft = normalizedDrafts.length === 1 ? normalizedDrafts[0] : undefined;
   const changes: PlannerProposalChange[] = [];
   const conflicts: PlannerConflict[] = [];
   const unplaced: PlannerUnplaced[] = [];
@@ -459,42 +589,134 @@ export function buildPlannerProposal(input: PlannerEngineInput): PlannerProposal
   const movableBlocks = new Map<string, PlannerBlock>();
   let workingBlocks = [...input.blocks];
 
-  if (normalizedDraft) {
-    const item = normalizePlannerItem({
-      ...normalizedDraft,
-      id: normalizedDraft.id || uniqueId("item", normalizedDraft.title, normalizedDraft.date, normalizedDraft.start),
-      title: normalizedDraft.title,
+  if (input.profilePatch) {
+    changes.push({
+      id: uniqueId("change-profile", baseProfile.revision, trigger),
+      kind: "update_profile",
+      profile,
+      reason: "Настройки подтверждены в автопланировщике.",
     });
-    items.push(item);
-    changes.push({ id: uniqueId("change-item", item.id), kind: "add_item", item, reason: "Новое дело подтверждено из формы." });
-    const fixedBlock = blockFromDraft(normalizedDraft, item, profile);
-    if (fixedBlock) {
-      const incoming = blockInterval(fixedBlock);
-      for (const block of workingBlocks) {
-        if (block.status === "cancelled" || block.status === "skipped" || !rangesOverlap(incoming, blockInterval(block))) continue;
-        if (block.status === "in_progress") {
-          conflicts.push({
-            id: uniqueId("conflict-active", block.id),
-            kind: "active_overlap",
-            title: block.title,
-            message: "Новое событие пересекается с уже начатым делом. Выберите: пауза, закончить сначала или изменить время.",
-            blockIds: [block.id, fixedBlock.id],
-          });
-        } else if (block.fixed || block.status === "done" || new Date(block.startAt).getTime() < now.getTime()) {
-          conflicts.push({
-            id: uniqueId("conflict-fixed", block.id),
-            kind: "fixed_overlap",
-            title: block.title,
-            message: "Два фиксированных события пересекаются. Автоматический перенос запрещён.",
-            blockIds: [block.id, fixedBlock.id],
-          });
-        } else {
-          movableBlocks.set(block.id, block);
-        }
+  }
+
+  const sleepEvents = [...(input.sleepEvents ?? [])];
+  if (input.sleepEvent) {
+    const index = sleepEvents.findIndex((event) => event.wakeDate === input.sleepEvent!.wakeDate);
+    if (index >= 0) sleepEvents[index] = input.sleepEvent;
+    else sleepEvents.push(input.sleepEvent);
+    changes.push({
+      id: uniqueId("change-sleep", input.sleepEvent.wakeDate),
+      kind: "upsert_sleep_event",
+      event: input.sleepEvent,
+      reason: "Фактический сон учтён; обычный режим следующих ночей не меняется.",
+    });
+  }
+
+  const calculatedSleepBlocks = buildPlannerSleepBlocks(profile, sleepEvents, startDate, endDate);
+  const energyShiftByDate = new Map(calculatedSleepBlocks.map((block) => [
+    block.wakeDate,
+    Math.round((new Date(block.endAt).getTime() - new Date(block.plannedEndAt).getTime()) / 60_000),
+  ]));
+  const sleepBlocks = calculatedSleepBlocks.map<PlannerBlock>((block) => ({
+    id: block.id,
+    title: block.title,
+    startAt: block.startAt,
+    endAt: block.endAt,
+    status: block.actualEndAt ? "done" : "planned",
+    source: "auto",
+    fixed: true,
+    occurrenceKey: block.wakeDate,
+    actualStartAt: block.actualStartAt,
+    actualEndAt: block.actualEndAt,
+  }));
+
+  if (input.rebuildFuture) {
+    const rebuilding = workingBlocks.filter((block) =>
+      !block.fixed
+      && block.status === "planned"
+      && new Date(block.startAt).getTime() >= now.getTime()
+    );
+    const rebuildingIds = new Set(rebuilding.map((block) => block.id));
+    workingBlocks = workingBlocks.filter((block) => !rebuildingIds.has(block.id));
+    for (const block of rebuilding) {
+      changes.push({
+        id: uniqueId("remove-rebuild", block.id),
+        kind: "remove_block",
+        blockId: block.id,
+        title: block.title,
+        reason: "Будущий гибкий блок освобождён для безопасной пересборки плана.",
+      });
+    }
+  }
+
+  const considerFixedBlock = (fixedBlock: PlannerBlock, reason: string) => {
+    const incoming = blockInterval(fixedBlock);
+    for (const block of [...workingBlocks, ...sleepBlocks]) {
+      if (block.id === fixedBlock.id || block.status === "cancelled" || block.status === "skipped" || !rangesOverlap(incoming, blockInterval(block))) continue;
+      if (block.status === "in_progress") {
+        conflicts.push({
+          id: uniqueId("conflict-active", block.id, fixedBlock.id),
+          kind: "active_overlap",
+          title: block.title,
+          message: "Новое защищённое время пересекается с уже начатым делом. Выберите: пауза, закончить сначала или изменить время.",
+          blockIds: [block.id, fixedBlock.id],
+        });
+      } else if (block.fixed || block.status === "done" || new Date(block.startAt).getTime() < now.getTime()) {
+        conflicts.push({
+          id: uniqueId("conflict-fixed", block.id, fixedBlock.id),
+          kind: "fixed_overlap",
+          title: block.title,
+          message: block.id.startsWith("sleep-")
+            ? "Фиксированное событие пересекается с защищённым сном. Измените событие или данные сна."
+            : "Два фиксированных события пересекаются. Автоматический перенос запрещён.",
+          blockIds: [block.id, fixedBlock.id],
+        });
+      } else {
+        movableBlocks.set(block.id, block);
       }
-      changes.push({ id: uniqueId("change-block", fixedBlock.id), kind: "add_block", block: fixedBlock, reason: "Фиксированное событие занимает выбранное время." });
-      workingBlocks = workingBlocks.filter((block) => !Array.from(movableBlocks.values()).some((candidate) => candidate.id === block.id));
-      workingBlocks.push(fixedBlock);
+    }
+    changes.push({ id: uniqueId("change-block", fixedBlock.id), kind: "add_block", block: fixedBlock, reason });
+    workingBlocks = workingBlocks.filter((block) => !movableBlocks.has(block.id));
+    workingBlocks.push(fixedBlock);
+  };
+
+  normalizedDrafts.forEach((draft, index) => {
+    const item = normalizePlannerItem({
+      ...draft,
+      id: draft.id || uniqueId("item", index, draft.title, draft.date, draft.start),
+      title: draft.title,
+    });
+    const existingIndex = items.findIndex((candidate) => candidate.id === item.id);
+    if (existingIndex >= 0) items[existingIndex] = item;
+    else items.push(item);
+    changes.push({ id: uniqueId("change-item", item.id), kind: "add_item", item, reason: "Новое дело подтверждено из формы." });
+    const fixedBlocks = item.recurrence?.startTime
+      ? recurringFixedBlocks(item, profile, startDate, endDate)
+      : [blockFromDraft(draft, item, profile)].filter((block): block is PlannerBlock => Boolean(block));
+    fixedBlocks.forEach((block) => considerFixedBlock(block, item.recurrence
+      ? "Создано повторение постоянного обязательства."
+      : "Фиксированное событие занимает выбранное время."));
+  });
+
+  for (const item of items.filter((candidate) => candidate.kind === "fixed_event" && candidate.recurrence?.startTime)) {
+    for (const block of recurringFixedBlocks(item, profile, startDate, endDate)) {
+      if (workingBlocks.some((candidate) => candidate.itemId === item.id && candidate.occurrenceKey === block.occurrenceKey)) continue;
+      considerFixedBlock(block, "Добавлено недостающее повторение постоянного обязательства.");
+    }
+  }
+
+  for (const sleep of sleepBlocks) {
+    for (const block of workingBlocks.filter((candidate) => (candidate.fixed || candidate.status === "in_progress") && candidate.status !== "cancelled" && candidate.status !== "skipped")) {
+      if (!rangesOverlap(blockInterval(sleep), blockInterval(block))) continue;
+      if (conflicts.some((conflict) => conflict.blockIds.includes(sleep.id) && conflict.blockIds.includes(block.id))) continue;
+      conflicts.push({
+        id: uniqueId("conflict-sleep", sleep.id, block.id),
+        kind: block.status === "in_progress" ? "active_overlap" : "fixed_overlap",
+        title: block.title,
+        message: block.status === "in_progress"
+          ? "Сон пересекается с уже начатым делом. Поставьте дело на паузу, закончите его или исправьте время сна."
+          : "Фиксированное событие пересекается с защищённым сном. Измените событие или данные сна.",
+        blockIds: [block.id, sleep.id],
+      });
     }
   }
 
@@ -526,7 +748,18 @@ export function buildPlannerProposal(input: PlannerEngineInput): PlannerProposal
             Math.max(minimum, Math.ceil(remaining / 2 / STEP_MINUTES) * STEP_MINUTES)
           )
         : remaining;
-      const placement = findPlacement(request, duration, profile, workingBlocks, startDate, endDate, now.getTime(), autoMinutesByDate, itemById);
+      const placement = findPlacement(
+        request,
+        duration,
+        profile,
+        [...workingBlocks, ...sleepBlocks],
+        startDate,
+        endDate,
+        now.getTime(),
+        autoMinutesByDate,
+        itemById,
+        energyShiftByDate
+      );
       if (!placement) break;
       part += 1;
       const block: PlannerBlock = {
@@ -609,9 +842,10 @@ export function buildPlannerProposal(input: PlannerEngineInput): PlannerProposal
   }
 
   return {
-    baseRevision: profile.revision,
+    baseRevision: baseProfile.revision,
     trigger,
     normalizedDraft,
+    normalizedDrafts: normalizedDrafts.length > 1 ? normalizedDrafts : undefined,
     changes,
     conflicts,
     unplaced,

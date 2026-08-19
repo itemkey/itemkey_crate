@@ -14,9 +14,13 @@ import {
 
 import LocaleSwitcher from "@/components/locale-switcher";
 import { useI18n } from "@/components/i18n-provider";
+import AutoplannerModal from "@/components/planner/autoplanner-modal";
+import SleepChangedModal from "@/components/planner/sleep-changed-modal";
 import type { Locale } from "@/lib/i18n";
+import { availabilityFromSleepSchedule, buildPlannerSleepBlocks, createPlannerSleepEvent } from "@/lib/planner/sleep";
 import {
   createDefaultPlannerProfile,
+  type PlannerAssistantParseResult,
   type PlannerBlock,
   type PlannerBootstrap,
   type PlannerDraft,
@@ -27,7 +31,11 @@ import {
   type PlannerPriority,
   type PlannerProfile,
   type PlannerProposal,
+  type PlannerProposalInput,
   type PlannerRecurrence,
+  type PlannerSleepBlock,
+  type PlannerSleepEvent,
+  type PlannerSleepParseResult,
 } from "@/lib/planner/types";
 import {
   addIsoMinutes,
@@ -43,7 +51,22 @@ import {
 import styles from "./planner-workspace.module.css";
 
 type PlannerView = "day" | "week" | "month" | "agenda";
-type Modal = "quick" | "item" | "proposal" | "settings" | "stats" | "import" | null;
+type Modal = "quick" | "item" | "proposal" | "settings" | "stats" | "import" | "assistant" | "sleep" | null;
+type CalendarBlock = PlannerBlock | PlannerSleepBlock;
+
+function isSleepBlock(block: CalendarBlock): block is PlannerSleepBlock {
+  return "kind" in block && block.kind === "sleep";
+}
+
+function splitSleepBlocksByDate(blocks: PlannerSleepBlock[], dates: string[], timezone: string): PlannerSleepBlock[] {
+  return blocks.flatMap((block) => dates.flatMap((date) => {
+    const dayStart = new Date(zonedPlannerDateTimeToUtc(date, "00:00", timezone)).getTime();
+    const dayEnd = new Date(zonedPlannerDateTimeToUtc(addPlannerDays(date, 1), "00:00", timezone)).getTime();
+    const start = Math.max(dayStart, new Date(block.startAt).getTime());
+    const end = Math.min(dayEnd, new Date(block.endAt).getTime());
+    return end > start ? [{ ...block, id: `${block.id}:${date}`, startAt: new Date(start).toISOString(), endAt: new Date(end).toISOString() }] : [];
+  }));
+}
 
 type LegacySource = {
   sourceKey: string;
@@ -59,21 +82,6 @@ type LegacyImportResult = {
   importedSources: number;
   importedItems: number;
   importedBlocks: number;
-};
-
-type OnboardingForm = {
-  timezone: string;
-  availability: PlannerProfile["availability"];
-  energyWindows: PlannerProfile["energyWindows"];
-  reservePercent: string;
-  buffer: string;
-  horizon: PlannerHorizon;
-  routineTitle: string;
-  routineMinutes: string;
-  commitmentTitle: string;
-  commitmentDate: string;
-  commitmentStart: string;
-  commitmentEnd: string;
 };
 
 type ItemForm = {
@@ -197,7 +205,7 @@ function addPlannerMonths(date: string, months: number): string {
   return target.toISOString().slice(0, 10);
 }
 
-function localDate(block: PlannerBlock, timezone: string): string {
+function localDate(block: { startAt: string }, timezone: string): string {
   return formatDateInTimeZone(new Date(block.startAt), timezone);
 }
 
@@ -316,18 +324,6 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
   const [legacySources, setLegacySources] = useState<LegacySource[]>([]);
   const [legacyLoading, setLegacyLoading] = useState(initialLegacyImport);
   const [now, setNow] = useState(() => new Date());
-  const [onboarding, setOnboarding] = useState<OnboardingForm>(() => {
-    const defaults = createDefaultPlannerProfile(Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Minsk");
-    return {
-      timezone: defaults.timezone,
-      availability: Object.fromEntries(Object.entries(defaults.availability).map(([day, windows]) => [day, windows.map((window) => ({ ...window }))])),
-      energyWindows: defaults.energyWindows.map((window) => ({ ...window })),
-      reservePercent: "20", buffer: "15", horizon: "week",
-      routineTitle: "", routineMinutes: "45",
-      commitmentTitle: "", commitmentDate: selectedDate, commitmentStart: "", commitmentEnd: "",
-    };
-  });
-
   useEffect(() => setLocale(accountLocale), [accountLocale, setLocale]);
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 30_000);
@@ -371,7 +367,6 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
       if (!initializedDateRef.current) {
         initializedDateRef.current = true;
         setSelectedDate(profileToday);
-        setOnboarding((current) => ({ ...current, commitmentDate: profileToday }));
       }
       setError(null);
     } catch (cause) {
@@ -417,6 +412,9 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
     if (view === "month") return monthDates(selectedDate);
     return Array.from({ length: horizonDays(profile.horizon) }, (_, index) => addPlannerDays(selectedDate, index));
   }, [profile.horizon, selectedDate, view]);
+  const sleepBlocks = useMemo(() => data && visibleDates.length
+    ? buildPlannerSleepBlocks(profile, data.sleepEvents, visibleDates[0], visibleDates[visibleDates.length - 1])
+    : [], [data, profile, visibleDates]);
 
   const activeBlocks = useMemo(() => blocks.filter((block) => !["cancelled", "skipped"].includes(block.status)), [blocks]);
   const actionableBlocks = useMemo(() => activeBlocks.filter((block) => block.status === "planned" || block.status === "in_progress"), [activeBlocks]);
@@ -448,9 +446,21 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
     } finally { setBusy(false); }
   }
 
-  async function createProposal(input: { command?: string; draft?: PlannerDraft; trigger?: PlannerProposal["trigger"] }) {
+  async function createProposal(input: PlannerProposalInput) {
     const created = await api<PlannerProposal>("/api/planner/proposals", { method: "POST", body: JSON.stringify(input) });
     setProposal(created); setModal("proposal");
+  }
+
+  function replayProposalInput(current: PlannerProposal): PlannerProposalInput {
+    const profileChange = current.changes.find((change) => change.kind === "update_profile");
+    const sleepChange = current.changes.find((change) => change.kind === "upsert_sleep_event");
+    return {
+      drafts: current.normalizedDrafts,
+      profilePatch: profileChange?.kind === "update_profile" ? profileChange.profile : undefined,
+      sleepEvent: sleepChange?.kind === "upsert_sleep_event" ? sleepChange.event : undefined,
+      trigger: current.trigger,
+      rebuildFuture: current.trigger === "sleep_changed" || current.trigger === "assistant_setup" || current.trigger === "assistant_update",
+    };
   }
 
   async function submitQuick(event: FormEvent) {
@@ -469,6 +479,7 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
     if (!proposal?.id || proposal.conflicts.length > 0) return;
     await run(async () => {
       await api(`/api/planner/proposals/${proposal.id}/apply`, { method: "POST", body: "{}" });
+      try { window.localStorage.removeItem("itemkey.planner.autoplanner.v1"); } catch { /* optional draft storage */ }
       setModal(null); setProposal(null); setQuickCommand(""); await load(true);
     }, locale === "ru" ? "План применён." : "Plan applied.");
   }
@@ -502,54 +513,6 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
       }
       await load(true);
     });
-  }
-
-  async function saveSettings(patch: Partial<PlannerProfile>) {
-    const updated = await api<PlannerProfile>("/api/planner/settings", {
-      method: "PATCH", body: JSON.stringify({ expectedRevision: profile.revision, patch }),
-    });
-    setData((current) => current ? { ...current, profile: updated } : current);
-    if (patch.timezone && patch.timezone !== profile.timezone) setSelectedDate(todayIn(updated.timezone));
-    return updated;
-  }
-
-  async function finishOnboarding(event: FormEvent) {
-    event.preventDefault();
-    await run(async () => {
-      await saveSettings({
-        timezone: onboarding.timezone, horizon: onboarding.horizon,
-        reserveRatio: Number(onboarding.reservePercent) / 100,
-        defaultBufferMinutes: Number(onboarding.buffer), availability: onboarding.availability,
-        energyWindows: onboarding.energyWindows,
-        onboardingCompleted: true,
-      });
-      setSelectedDate(todayIn(onboarding.timezone));
-      if (onboarding.routineTitle.trim()) {
-        const prepared = await api<PlannerProposal>("/api/planner/proposals", {
-          method: "POST", body: JSON.stringify({
-            trigger: "quick_add", draft: {
-              title: onboarding.routineTitle, kind: "routine",
-              estimateMinutes: Number(onboarding.routineMinutes) || 45,
-              recurrence: { frequency: "daily" }, autoPlan: true,
-            },
-          }),
-        });
-        if (!prepared.conflicts.length && prepared.id) await api(`/api/planner/proposals/${prepared.id}/apply`, { method: "POST", body: "{}" });
-      }
-      if (onboarding.commitmentTitle.trim() && onboarding.commitmentStart) {
-        const prepared = await api<PlannerProposal>("/api/planner/proposals", {
-          method: "POST", body: JSON.stringify({
-            trigger: "quick_add", draft: {
-              title: onboarding.commitmentTitle, kind: "fixed_event", date: onboarding.commitmentDate,
-              start: onboarding.commitmentStart, end: onboarding.commitmentEnd || undefined,
-              estimateMinutes: 60, autoPlan: false,
-            },
-          }),
-        });
-        if (!prepared.conflicts.length && prepared.id) await api(`/api/planner/proposals/${prepared.id}/apply`, { method: "POST", body: "{}" });
-      }
-      await load(true);
-    }, locale === "ru" ? "Планировщик настроен." : "Planner configured.");
   }
 
   async function undo() {
@@ -607,7 +570,7 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
   if (loading) return <div className={styles.loading}>Собираем ваш план…</div>;
   if (!data) return <div className={styles.fatal}><p>{error}</p><button onClick={() => void load()}>Повторить</button></div>;
 
-  const showOnboarding = !profile.onboardingCompleted;
+  const showAssistantSetup = profile.assistantSetupVersion < 1 && modal !== "proposal" && modal !== "import";
 
   return (
     <main className={styles.root}>
@@ -627,7 +590,7 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
       <section className={styles.commandBar}>
         <button className={styles.primaryButton} onClick={() => openItem()}>＋ {copy.add}</button>
         <button className={styles.changeButton} onClick={() => openQuick("plans_changed")}>⚡ {copy.changed}</button>
-        <button className={styles.ghostButton} onClick={() => void run(() => createProposal({ trigger: "autoplan" }))}>✦ {copy.autoplan}</button>
+        <button className={styles.ghostButton} onClick={() => setModal("assistant")}>▣ {locale === "ru" ? "Автопланировщик" : "Autoplanner"}</button>
         <button className={styles.ghostButton} onClick={() => void openLegacyImport()}>↗ {copy.legacy}</button>
         {data.latestChangeSetId && <button className={styles.linkButton} onClick={() => void undo()} disabled={busy}>{copy.undo}</button>}
       </section>
@@ -677,17 +640,17 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
 
           {(view === "day" || view === "week") && (
             <TimeGrid
-              dates={visibleDates} blocks={blocks} profile={profile} locale={locale}
+              dates={visibleDates} blocks={blocks} sleepBlocks={sleepBlocks} profile={profile} locale={locale}
               selectedDate={selectedDate} setSelectedDate={setSelectedDate}
               onMove={moveBlock} busy={busy}
             />
           )}
           {view === "month" && (
-            <MonthGrid dates={visibleDates} blocks={blocks} profile={profile} locale={locale} selectedDate={selectedDate}
+            <MonthGrid dates={visibleDates} blocks={blocks} sleepBlocks={sleepBlocks} profile={profile} locale={locale} selectedDate={selectedDate}
               onSelect={(date) => { setSelectedDate(date); setView("day"); }} />
           )}
           {view === "agenda" && (
-            <Agenda blocks={blocks} dates={visibleDates} profile={profile} locale={locale} onAction={blockAction} />
+            <Agenda blocks={blocks} sleepBlocks={sleepBlocks} dates={visibleDates} profile={profile} locale={locale} onAction={blockAction} />
           )}
         </section>
 
@@ -718,18 +681,51 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
             <small>{locale === "ru" ? `свободно сегодня; цель резерва — ${Math.round(profile.reserveRatio * 100)}%` : `free today; reserve target is ${Math.round(profile.reserveRatio * 100)}%`}</small>
           </div>
           <button className={styles.changeWide} onClick={() => openQuick("plans_changed")}>⚡ {copy.changed}</button>
+          <button className={styles.sleepWide} onClick={() => setModal("sleep")}>■ {locale === "ru" ? "Сон изменился" : "Sleep changed"}</button>
         </aside>
       </div>
 
-      {showOnboarding && <OnboardingModal value={onboarding} setValue={setOnboarding} onSubmit={finishOnboarding} busy={busy} locale={locale} />}
+      {(showAssistantSetup || modal === "assistant") && <AutoplannerModal
+        profile={profile}
+        items={items}
+        blocksCount={blocks.length}
+        sleepEventsCount={data.sleepEvents.length}
+        locale={locale}
+        firstRun={showAssistantSetup}
+        busy={busy}
+        onClose={showAssistantSetup ? undefined : () => setModal(null)}
+        onParseTasks={(textValue) => api<PlannerAssistantParseResult>("/api/planner/assistant/parse", { method: "POST", body: JSON.stringify({ mode: "tasks", text: textValue }) })}
+        onParseSleep={(textValue) => api<PlannerSleepParseResult>("/api/planner/assistant/parse", { method: "POST", body: JSON.stringify({ mode: "sleep", text: textValue }) })}
+        onPrepare={(input) => run(() => createProposal(input))}
+        onOpenSleep={() => setModal("sleep")}
+        onReset={(password) => run(async () => {
+          await api("/api/planner/reset", { method: "POST", body: JSON.stringify({ password, expectedRevision: profile.revision }) });
+          try { window.localStorage.removeItem("itemkey.planner.autoplanner.v1"); } catch { /* optional draft storage */ }
+          setModal(null);
+          await load(true);
+        })}
+      />}
+      {modal === "sleep" && <SleepChangedModal profile={profile} locale={locale} busy={busy} onClose={() => setModal(null)} onSubmit={(sleepEvent: PlannerSleepEvent) => run(() => createProposal({ sleepEvent, trigger: "sleep_changed", rebuildFuture: true }))} />}
       {modal === "quick" && <QuickModal command={quickCommand} setCommand={setQuickCommand} onSubmit={submitQuick} onClose={() => setModal(null)} trigger={quickTrigger} busy={busy} locale={locale} />}
       {modal === "item" && <ItemModal value={itemForm} setValue={setItemForm} onSubmit={submitItem} onClose={() => setModal(null)} busy={busy} locale={locale} />}
       {modal === "proposal" && proposal && <ProposalModal proposal={proposal} profile={profile} locale={locale} busy={busy}
-        onClose={() => setModal(null)} onApply={applyProposal} onEdit={() => openItem(proposal.normalizedDraft)}
-        onFinishFirst={async (blockId) => {
+        onClose={() => setModal(null)} onApply={applyProposal} onEdit={() => proposal.normalizedDraft ? openItem(proposal.normalizedDraft) : setModal(proposal.trigger === "sleep_changed" ? "sleep" : "settings")}
+        onFinishFirst={async (blockId, protectedId) => {
           const block = blocks.find((candidate) => candidate.id === blockId);
           const draft = proposal.normalizedDraft;
-          if (!block || !draft) return;
+          if (!block) return;
+          if (!draft) {
+            const replay = replayProposalInput(proposal);
+            const wakeDate = replay.sleepEvent?.wakeDate ?? (protectedId.startsWith("sleep-") ? protectedId.slice(6) : undefined);
+            if (!wakeDate) { setModal(proposal.trigger === "sleep_changed" ? "sleep" : "settings"); return; }
+            const nextProfile = replay.profilePatch ? { ...profile, ...replay.profilePatch } : profile;
+            await run(() => createProposal({
+              ...replay,
+              sleepEvent: createPlannerSleepEvent({ profile: nextProfile, wakeDate, actualStartAt: block.endAt }),
+              rebuildFuture: true,
+            }));
+            return;
+          }
           const duration = draft.estimateMinutes ?? 60;
           const delayedEnd = addIsoMinutes(block.endAt, duration);
           await run(() => createProposal({
@@ -745,24 +741,25 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
         }}
         onPause={async (blockId) => {
           const block = blocks.find((candidate) => candidate.id === blockId);
-          if (!block || !proposal.normalizedDraft) return;
+          if (!block) return;
           if (!await blockAction(block, "pause")) return;
-          await run(() => createProposal({ draft: proposal.normalizedDraft!, trigger: "plans_changed" }));
+          await run(() => createProposal(replayProposalInput(proposal)));
         }} />}
-      {modal === "settings" && <SettingsModal profile={profile} locale={locale} busy={busy} onClose={() => setModal(null)} onSave={(patch) => run(async () => { await saveSettings(patch); setModal(null); await load(true); })} />}
+      {modal === "settings" && <SettingsModal profile={profile} locale={locale} busy={busy} onClose={() => setModal(null)} onSave={(profilePatch) => run(() => createProposal({ profilePatch, trigger: "assistant_update", rebuildFuture: true }))} />}
       {modal === "stats" && <StatsModal blocks={blocks} items={items} profile={profile} locale={locale} onClose={() => setModal(null)} />}
       {modal === "import" && <LegacyImportModal key={legacySources.map((source) => `${source.sourceKey}:${source.alreadyImported}`).join("|")} sources={legacySources} locale={locale} busy={busy} loading={legacyLoading} onClose={() => setModal(null)} onImport={importLegacy} />}
     </main>
   );
 }
 
-function TimeGrid({ dates, blocks, profile, locale, selectedDate, setSelectedDate, onMove, busy }: {
-  dates: string[]; blocks: PlannerBlock[]; profile: PlannerProfile; locale: Locale;
+function TimeGrid({ dates, blocks, sleepBlocks, profile, locale, selectedDate, setSelectedDate, onMove, busy }: {
+  dates: string[]; blocks: PlannerBlock[]; sleepBlocks: PlannerSleepBlock[]; profile: PlannerProfile; locale: Locale;
   selectedDate: string; setSelectedDate: (date: string) => void;
   onMove: (block: PlannerBlock, startAt: string, endAt: string) => Promise<void>; busy: boolean;
 }) {
+  const calendarBlocks: CalendarBlock[] = [...blocks, ...splitSleepBlocksByDate(sleepBlocks, dates, profile.timezone)];
   const relevantWindows = dates.flatMap((date) => profile.availability[String(plannerWeekday(date))] ?? []);
-  const relevantBlocks = blocks.filter((block) => dates.includes(localDate(block, profile.timezone)));
+  const relevantBlocks = calendarBlocks.filter((block) => dates.includes(localDate(block, profile.timezone)));
   const starts = [
     ...relevantWindows.map((window) => plannerTimeToMinutes(window.start)),
     ...relevantBlocks.map((block) => minutesInZone(block.startAt, profile.timezone)),
@@ -811,17 +808,18 @@ function TimeGrid({ dates, blocks, profile, locale, selectedDate, setSelectedDat
         {dates.map((date) => (
           <div key={date} className={styles.dayColumn} style={{ height }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => void drop(event, date)}>
             {hours.map((hour) => <i key={hour} style={{ top: `${((hour * 60 - dayStart) / (dayEnd - dayStart)) * 100}%` }} />)}
-            {blocks.filter((block) => localDate(block, profile.timezone) === date && !["cancelled", "skipped"].includes(block.status)).map((block) => {
+            {calendarBlocks.filter((block) => localDate(block, profile.timezone) === date && (isSleepBlock(block) || !["cancelled", "skipped"].includes(block.status))).map((block) => {
+              const sleep = isSleepBlock(block);
               const start = minutesInZone(block.startAt, profile.timezone);
               const duration = isoDurationMinutes(block.startAt, block.endAt);
               const top = ((start - dayStart) / (dayEnd - dayStart)) * 100;
               const size = Math.max(2.3, (duration / (dayEnd - dayStart)) * 100);
               return (
-                <article key={block.id} draggable={!busy && block.status === "planned"} onDragStart={() => setDragId(block.id)} onKeyDown={(event) => keyboard(event, block)} tabIndex={0}
-                  className={`${styles.calendarBlock} ${styles[block.fixed ? "fixedBlock" : "flexibleBlock"]} ${styles[block.status]}`} style={{ top: `${top}%`, height: `${size}%` }}>
-                  <strong>{block.fixed ? "◆" : "↝"} {formatTimeInTimeZone(new Date(block.startAt), profile.timezone)} · {block.title}</strong>
-                  <small>{formatDuration(duration, locale)}</small>
-                  {block.status === "planned" && <div className={styles.resizeActions}>
+                <article key={block.id} draggable={!sleep && !busy && block.status === "planned"} onDragStart={() => { if (!sleep) setDragId(block.id); }} onKeyDown={(event) => { if (!sleep) keyboard(event, block); }} tabIndex={0}
+                  className={`${styles.calendarBlock} ${sleep ? styles.sleepBlock : styles[block.fixed ? "fixedBlock" : "flexibleBlock"]} ${!sleep && block.status !== "planned" ? styles[block.status] ?? "" : ""}`} style={{ top: `${top}%`, height: `${size}%` }}>
+                  <strong>{sleep ? "■" : block.fixed ? "◆" : "↝"} {formatTimeInTimeZone(new Date(block.startAt), profile.timezone)} · {sleep ? (locale === "ru" ? "СОН · ЗАЩИЩЕНО" : "SLEEP · PROTECTED") : block.title}</strong>
+                  <small>{formatDuration(duration, locale)}{sleep ? ` · ${locale === "ru" ? "не перемещается" : "locked"}` : ""}</small>
+                  {!sleep && block.status === "planned" && <div className={styles.resizeActions}>
                     <button onClick={() => void onMove(block, block.startAt, addIsoMinutes(block.endAt, -15))} aria-label="Shorten 15 minutes">−</button>
                     <button onClick={() => void onMove(block, block.startAt, addIsoMinutes(block.endAt, 15))} aria-label="Extend 15 minutes">＋</button>
                   </div>}
@@ -836,28 +834,28 @@ function TimeGrid({ dates, blocks, profile, locale, selectedDate, setSelectedDat
   );
 }
 
-function MonthGrid({ dates, blocks, profile, locale, selectedDate, onSelect }: {
-  dates: string[]; blocks: PlannerBlock[]; profile: PlannerProfile; locale: Locale; selectedDate: string; onSelect: (date: string) => void;
+function MonthGrid({ dates, blocks, sleepBlocks, profile, locale, selectedDate, onSelect }: {
+  dates: string[]; blocks: PlannerBlock[]; sleepBlocks: PlannerSleepBlock[]; profile: PlannerProfile; locale: Locale; selectedDate: string; onSelect: (date: string) => void;
 }) {
   return <div className={styles.monthGrid}>{dates.map((date) => {
-    const dayBlocks = blocks.filter((block) => localDate(block, profile.timezone) === date && !["cancelled", "skipped"].includes(block.status));
+    const dayBlocks: CalendarBlock[] = [...blocks.filter((block) => localDate(block, profile.timezone) === date && !["cancelled", "skipped"].includes(block.status)), ...splitSleepBlocksByDate(sleepBlocks, [date], profile.timezone)];
     return <button key={date} onClick={() => onSelect(date)} className={`${styles.monthDay} ${date === selectedDate ? styles.monthSelected : ""} ${date.slice(0, 7) !== selectedDate.slice(0, 7) ? styles.otherMonth : ""}`}>
       <span>{formatDay(date, locale, { weekday: "short" })}</span><strong>{date.slice(-2)}</strong>
-      <div>{dayBlocks.slice(0, 3).map((block) => <i key={block.id} className={block.fixed ? styles.fixedPill : styles.flexPill}>{block.fixed ? "◆" : "↝"} {block.title}</i>)}</div>
+      <div>{dayBlocks.slice(0, 3).map((block) => <i key={block.id} className={isSleepBlock(block) ? styles.sleepPill : block.fixed ? styles.fixedPill : styles.flexPill}>{isSleepBlock(block) ? "■" : block.fixed ? "◆" : "↝"} {isSleepBlock(block) ? (locale === "ru" ? "Сон" : "Sleep") : block.title}</i>)}</div>
       {dayBlocks.length > 3 && <small>+{dayBlocks.length - 3}</small>}
     </button>;
   })}</div>;
 }
 
-function Agenda({ blocks, dates, profile, locale, onAction }: {
-  blocks: PlannerBlock[]; dates: string[]; profile: PlannerProfile; locale: Locale;
+function Agenda({ blocks, sleepBlocks, dates, profile, locale, onAction }: {
+  blocks: PlannerBlock[]; sleepBlocks: PlannerSleepBlock[]; dates: string[]; profile: PlannerProfile; locale: Locale;
   onAction: (block: PlannerBlock, action: string, minutes?: number) => Promise<unknown>;
 }) {
-  const selected = blocks.filter((block) => dates.includes(localDate(block, profile.timezone)) && block.status !== "cancelled").sort((a, b) => a.startAt.localeCompare(b.startAt));
+  const selected: CalendarBlock[] = [...blocks.filter((block) => dates.includes(localDate(block, profile.timezone)) && block.status !== "cancelled"), ...splitSleepBlocksByDate(sleepBlocks, dates, profile.timezone)].sort((a, b) => a.startAt.localeCompare(b.startAt));
   return <div className={styles.agenda}>{selected.map((block) => <article key={block.id}>
     <time>{formatDay(localDate(block, profile.timezone), locale)} · {formatTimeInTimeZone(new Date(block.startAt), profile.timezone)}</time>
-    <div><strong>{block.title}</strong><small>{formatDuration(isoDurationMinutes(block.startAt, block.endAt), locale)} · {block.status}</small></div>
-    {block.status === "planned" && <div><button onClick={() => void onAction(block, "start")}>▶</button><button onClick={() => void onAction(block, "done")}>✓</button><button onClick={() => void onAction(block, "skip")}>↷</button></div>}
+    <div><strong>{isSleepBlock(block) ? (locale === "ru" ? "Сон · защищено" : "Sleep · protected") : block.title}</strong><small>{formatDuration(isoDurationMinutes(block.startAt, block.endAt), locale)}{isSleepBlock(block) ? "" : ` · ${block.status}`}</small></div>
+    {!isSleepBlock(block) && block.status === "planned" && <div><button onClick={() => void onAction(block, "start")}>▶</button><button onClick={() => void onAction(block, "done")}>✓</button><button onClick={() => void onAction(block, "skip")}>↷</button></div>}
   </article>)}</div>;
 }
 
@@ -869,37 +867,6 @@ function ModalShell({ children, onClose, title }: { children: React.ReactNode; o
   return <div className={styles.modalBackdrop} role="presentation"><section className={styles.modal} role="dialog" aria-modal="true" aria-label={title}>
     <header><h2>{title}</h2>{onClose && <button onClick={onClose} aria-label="Close">×</button>}</header>{children}
   </section></div>;
-}
-
-function OnboardingModal({ value, setValue, onSubmit, busy, locale }: {
-  value: OnboardingForm; setValue: React.Dispatch<React.SetStateAction<OnboardingForm>>;
-  onSubmit: (event: FormEvent) => Promise<void>; busy: boolean; locale: Locale;
-}) {
-  const weekdays = locale === "ru" ? ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"] : ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-  const updateAvailability = (day: string, field: "start" | "end", next: string) => setValue((current) => ({
-    ...current,
-    availability: { ...current.availability, [day]: [{ ...(current.availability[day]?.[0] ?? { start: "08:00", end: "22:00" }), [field]: next }] },
-  }));
-  const updateEnergy = (index: number, field: "start" | "end", next: string) => setValue((current) => ({
-    ...current,
-    energyWindows: current.energyWindows.map((window, candidate) => candidate === index ? { ...window, [field]: next } : window),
-  }));
-  return <ModalShell title={locale === "ru" ? "Настроим устойчивый план" : "Set up a resilient plan"}>
-    <form onSubmit={(event) => void onSubmit(event)} className={styles.form}>
-      <p className={styles.modalLead}>{locale === "ru" ? "Эти настройки можно изменить позже. Автоплан не заполнит день плотнее выбранного резерва." : "You can change this later. Auto-plan will protect the selected buffer."}</p>
-      <div className={styles.formGrid}>
-        <label>{locale === "ru" ? "Часовой пояс" : "Time zone"}<input value={value.timezone} onChange={(e) => setValue((v) => ({ ...v, timezone: e.target.value }))} /></label>
-        <label>{locale === "ru" ? "Горизонт" : "Horizon"}<select value={value.horizon} onChange={(e) => setValue((v) => ({ ...v, horizon: e.target.value as PlannerHorizon }))}><option value="week">7 days</option><option value="two_weeks">14 days</option><option value="month">30 days</option></select></label>
-        <label>{locale === "ru" ? "Резерв, %" : "Protected buffer, %"}<input type="number" min="0" max="60" value={value.reservePercent} onChange={(e) => setValue((v) => ({ ...v, reservePercent: e.target.value }))} /></label>
-        <label>{locale === "ru" ? "Буфер между делами, мин" : "Buffer between items"}<input type="number" min="0" max="120" value={value.buffer} onChange={(e) => setValue((v) => ({ ...v, buffer: e.target.value }))} /></label>
-      </div>
-      <details open><summary>{locale === "ru" ? "Доступные часы по дням" : "Available hours by day"}</summary><div className={styles.availabilityRows}>{weekdays.map((label, index) => { const day = String(index + 1); const window = value.availability[day]?.[0] ?? { start: "08:00", end: "22:00" }; return <div key={day}><strong>{label}</strong><input aria-label={`${label} start`} type="time" value={window.start} onChange={(event) => updateAvailability(day, "start", event.target.value)} /><span>—</span><input aria-label={`${label} end`} type="time" value={window.end} onChange={(event) => updateAvailability(day, "end", event.target.value)} /></div>; })}</div></details>
-      <details open><summary>{locale === "ru" ? "Энергия в течение дня" : "Energy throughout the day"}</summary><div className={styles.energyRows}>{value.energyWindows.map((window, index) => <div key={window.energy}><strong>{window.energy === "high" ? (locale === "ru" ? "Высокая" : "High") : window.energy === "normal" ? (locale === "ru" ? "Обычная" : "Normal") : (locale === "ru" ? "Низкая" : "Low")}</strong><input aria-label={`${window.energy} start`} type="time" value={window.start} onChange={(event) => updateEnergy(index, "start", event.target.value)} /><span>—</span><input aria-label={`${window.energy} end`} type="time" value={window.end} onChange={(event) => updateEnergy(index, "end", event.target.value)} /></div>)}</div></details>
-      <details><summary>{locale === "ru" ? "Добавить первую routine" : "Add your first routine"}</summary><div className={styles.formGrid}><label>{locale === "ru" ? "Название" : "Title"}<input value={value.routineTitle} onChange={(e) => setValue((v) => ({ ...v, routineTitle: e.target.value }))} placeholder="Английский" /></label><label>{locale === "ru" ? "Минут в день" : "Minutes per day"}<input type="number" value={value.routineMinutes} onChange={(e) => setValue((v) => ({ ...v, routineMinutes: e.target.value }))} /></label></div></details>
-      <details><summary>{locale === "ru" ? "Добавить постоянное обязательство" : "Add a fixed commitment"}</summary><div className={styles.formGrid}><label>{locale === "ru" ? "Название" : "Title"}<input value={value.commitmentTitle} onChange={(e) => setValue((v) => ({ ...v, commitmentTitle: e.target.value }))} /></label><label>{locale === "ru" ? "Дата" : "Date"}<input type="date" value={value.commitmentDate} onChange={(e) => setValue((v) => ({ ...v, commitmentDate: e.target.value }))} /></label><label>{locale === "ru" ? "Начало" : "Start"}<input type="time" value={value.commitmentStart} onChange={(e) => setValue((v) => ({ ...v, commitmentStart: e.target.value }))} /></label><label>{locale === "ru" ? "Конец" : "End"}<input type="time" value={value.commitmentEnd} onChange={(e) => setValue((v) => ({ ...v, commitmentEnd: e.target.value }))} /></label></div></details>
-      <button className={styles.primaryButton} disabled={busy}>{locale === "ru" ? "Открыть мой план" : "Open my plan"}</button>
-    </form>
-  </ModalShell>;
 }
 
 function QuickModal({ command, setCommand, onSubmit, onClose, trigger, busy, locale }: {
@@ -950,6 +917,8 @@ function ItemModal({ value, setValue, onSubmit, onClose, busy, locale }: {
 
 function proposalChangeReason(change: PlannerProposal["changes"][number], locale: Locale): string {
   if (locale === "ru") return change.reason;
+  if (change.kind === "update_profile") return "Planner settings were confirmed in the reviewed assistant flow.";
+  if (change.kind === "upsert_sleep_event") return "This night was adjusted without changing the regular sleep schedule.";
   if (change.kind === "add_item") return "The new item was confirmed from the reviewed form.";
   if (change.kind === "update_item") return change.item.unplacedReason
     ? "The reason was saved with the item in the inbox."
@@ -961,17 +930,25 @@ function proposalChangeReason(change: PlannerProposal["changes"][number], locale
     : "A free slot was selected using priority, energy, preferences and workload.";
 }
 
+function proposalChangeTitle(change: PlannerProposal["changes"][number], locale: Locale): string {
+  if (change.kind === "update_profile") return locale === "ru" ? "Настройки плана" : "Planner settings";
+  if (change.kind === "upsert_sleep_event") return locale === "ru" ? `Сон перед ${change.event.wakeDate}` : `Sleep before ${change.event.wakeDate}`;
+  if (change.kind === "add_block") return change.block.title;
+  if (change.kind === "move_block" || change.kind === "remove_block") return change.title;
+  return change.item.title;
+}
+
 function ProposalModal({ proposal, profile, locale, busy, onClose, onApply, onEdit, onPause, onFinishFirst }: {
   proposal: PlannerProposal; profile: PlannerProfile; locale: Locale; busy: boolean;
-  onClose: () => void; onApply: () => Promise<void>; onEdit: () => void; onPause: (blockId: string) => Promise<void>; onFinishFirst: (blockId: string) => Promise<void>;
+  onClose: () => void; onApply: () => Promise<void>; onEdit: () => void; onPause: (blockId: string) => Promise<void>; onFinishFirst: (blockId: string, protectedId: string) => Promise<void>;
 }) {
   return <ModalShell title={locale === "ru" ? "Предпросмотр нового плана" : "Plan preview"} onClose={onClose}>
     <div className={styles.proposal}>
       {proposal.normalizedDraft && <section className={styles.parsed}><span>{locale === "ru" ? "Распознано — проверьте перед созданием" : "Parsed — review before creating"}</span><strong>{proposal.normalizedDraft.title}</strong><p>{kindLabel[locale][proposal.normalizedDraft.kind ?? "flexible_task"]} · {formatDuration(proposal.normalizedDraft.estimateMinutes ?? 60, locale)}{proposal.normalizedDraft.date ? ` · ${formatDay(proposal.normalizedDraft.date, locale)}` : ""}{proposal.normalizedDraft.start ? ` · ${proposal.normalizedDraft.start}` : ""}{proposal.normalizedDraft.end ? `–${proposal.normalizedDraft.end}` : ""} · {locale === "ru" ? "приоритет" : "priority"}: {proposal.normalizedDraft.priority ?? "normal"}</p><button onClick={onEdit}>{locale === "ru" ? "Изменить поля" : "Edit fields"}</button></section>}
-      {proposal.conflicts.length > 0 && <section className={styles.conflicts}><h3>{locale === "ru" ? "Нужно ваше решение" : "Your decision is needed"}</h3>{proposal.conflicts.map((conflict) => <article key={conflict.id}><strong>{conflict.title}</strong><p>{locale === "ru" ? conflict.message : conflict.kind === "active_overlap" ? "The new event overlaps work already in progress. Pause it, finish first, or edit the new event." : "Two fixed events overlap and cannot be moved automatically."}</p>{conflict.kind === "active_overlap" && <div><button onClick={() => void onPause(conflict.blockIds[0])}>{locale === "ru" ? "Поставить текущее на паузу" : "Pause current"}</button><button onClick={() => void onFinishFirst(conflict.blockIds[0])}>{locale === "ru" ? "Закончить текущее сначала" : "Finish current first"}</button><button onClick={onEdit}>{locale === "ru" ? "Изменить новое событие" : "Edit new event"}</button></div>}</article>)}</section>}
+      {proposal.conflicts.length > 0 && <section className={styles.conflicts}><h3>{locale === "ru" ? "Нужно ваше решение" : "Your decision is needed"}</h3>{proposal.conflicts.map((conflict) => <article key={conflict.id}><strong>{conflict.title}</strong><p>{locale === "ru" ? conflict.message : conflict.kind === "active_overlap" ? "The protected time overlaps work already in progress. Pause it, finish first, or edit the new input." : conflict.blockIds.some((id) => id.startsWith("sleep-")) ? "A fixed event overlaps protected sleep. Edit the event or sleep input." : "Two fixed events overlap and cannot be moved automatically."}</p>{conflict.kind === "active_overlap" ? <div><button onClick={() => void onPause(conflict.blockIds[0])}>{locale === "ru" ? "Поставить текущее на паузу" : "Pause current"}</button><button onClick={() => void onFinishFirst(conflict.blockIds[0], conflict.blockIds[1])}>{locale === "ru" ? "Закончить текущее сначала" : "Finish current first"}</button><button onClick={onEdit}>{proposal.trigger === "sleep_changed" ? (locale === "ru" ? "Исправить сон" : "Edit sleep") : (locale === "ru" ? "Изменить вводные" : "Edit input")}</button></div> : <div><button onClick={onEdit}>{locale === "ru" ? "Исправить конфликт" : "Edit conflict"}</button></div>}</article>)}</section>}
       <section><h3>{locale === "ru" ? "Изменения" : "Changes"}</h3><div className={styles.changeList}>{proposal.changes.map((change) => <article key={change.id}>
-        <span>{change.kind === "add_block" ? "+" : change.kind === "move_block" ? "→" : change.kind === "remove_block" ? "−" : "•"}</span>
-        <div><strong>{change.kind === "add_block" ? change.block.title : change.kind === "move_block" || change.kind === "remove_block" ? change.title : change.item.title}</strong><p>{proposalChangeReason(change, locale)}</p>{change.kind === "add_block" && <small>{formatDay(localDate(change.block, profile.timezone), locale)} · {formatTimeInTimeZone(new Date(change.block.startAt), profile.timezone)}–{formatTimeInTimeZone(new Date(change.block.endAt), profile.timezone)}</small>}{change.kind === "move_block" && <small>{formatTimeInTimeZone(new Date(change.fromStartAt), profile.timezone)} → {formatDay(formatDateInTimeZone(new Date(change.toStartAt), profile.timezone), locale)} {formatTimeInTimeZone(new Date(change.toStartAt), profile.timezone)}</small>}</div>
+        <span>{change.kind === "add_block" ? "+" : change.kind === "move_block" ? "→" : change.kind === "remove_block" ? "−" : change.kind === "upsert_sleep_event" ? "■" : "•"}</span>
+        <div><strong>{proposalChangeTitle(change, locale)}</strong><p>{proposalChangeReason(change, locale)}</p>{change.kind === "add_block" && <small>{formatDay(localDate(change.block, profile.timezone), locale)} · {formatTimeInTimeZone(new Date(change.block.startAt), profile.timezone)}–{formatTimeInTimeZone(new Date(change.block.endAt), profile.timezone)}</small>}{change.kind === "move_block" && <small>{formatTimeInTimeZone(new Date(change.fromStartAt), profile.timezone)} → {formatDay(formatDateInTimeZone(new Date(change.toStartAt), profile.timezone), locale)} {formatTimeInTimeZone(new Date(change.toStartAt), profile.timezone)}</small>}{change.kind === "upsert_sleep_event" && <small>{formatTimeInTimeZone(new Date(change.event.actualStartAt), profile.timezone)}–{formatTimeInTimeZone(new Date(change.event.actualEndAt ?? change.event.projectedEndAt), profile.timezone)}</small>}</div>
       </article>)}</div></section>
       {proposal.unplaced.length > 0 && <section className={styles.unplaced}><h3>{locale === "ru" ? "Останется в очереди" : "Will stay in inbox"}</h3>{proposal.unplaced.map((item, index) => <article key={`${item.itemId}-${item.remainingMinutes}-${index}`}><strong>{item.title} · {formatDuration(item.remainingMinutes, locale)}</strong><p>{locale === "ru" ? item.reason : "No free slot satisfies availability, buffers and the protected reserve. The duration was not shortened."}</p></article>)}</section>}
       <div className={styles.modalActions}><button onClick={onClose}>{locale === "ru" ? "Не применять" : "Cancel"}</button><button className={styles.primaryButton} disabled={busy || proposal.conflicts.length > 0} onClick={() => void onApply()}>{locale === "ru" ? "Применить весь план" : "Apply full plan"}</button></div>
@@ -980,29 +957,41 @@ function ProposalModal({ proposal, profile, locale, busy, onClose, onApply, onEd
 }
 
 function SettingsModal({ profile, locale, busy, onClose, onSave }: { profile: PlannerProfile; locale: Locale; busy: boolean; onClose: () => void; onSave: (patch: Partial<PlannerProfile>) => Promise<void> }) {
+  const [sleepTouched, setSleepTouched] = useState(false);
+  const [availabilityTouched, setAvailabilityTouched] = useState(false);
   const [form, setForm] = useState({
     timezone: profile.timezone,
     horizon: profile.horizon,
     reserve: String(Math.round(profile.reserveRatio * 100)),
     buffer: String(profile.defaultBufferMinutes),
+    weekdayBedtime: profile.sleepSchedule.weekdays.bedtime,
+    weekdaySleep: String(profile.sleepSchedule.weekdays.durationMinutes),
+    weekendBedtime: profile.sleepSchedule.weekends.bedtime,
+    weekendSleep: String(profile.sleepSchedule.weekends.durationMinutes),
     availability: Object.fromEntries(Object.entries(profile.availability).map(([day, windows]) => [day, windows.map((window) => ({ ...window }))])),
     energyWindows: profile.energyWindows.map((window) => ({ ...window })),
   });
   const weekdays = locale === "ru" ? ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"] : ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-  const updateAvailability = (day: string, field: "start" | "end", next: string) => setForm((current) => ({
-    ...current,
-    availability: { ...current.availability, [day]: [{ ...(current.availability[day]?.[0] ?? { start: "08:00", end: "22:00" }), [field]: next }] },
-  }));
+  const updateAvailability = (day: string, field: "start" | "end", next: string) => {
+    setAvailabilityTouched(true);
+    setForm((current) => ({
+      ...current,
+      availability: { ...current.availability, [day]: [{ ...(current.availability[day]?.[0] ?? { start: "08:00", end: "22:00" }), [field]: next }] },
+    }));
+  };
   const updateEnergy = (index: number, field: "start" | "end", next: string) => setForm((current) => ({
     ...current,
     energyWindows: current.energyWindows.map((window, candidate) => candidate === index ? { ...window, [field]: next } : window),
   }));
   return <ModalShell title={locale === "ru" ? "Настройки плана" : "Planner settings"} onClose={onClose}><form className={styles.form} onSubmit={(event) => {
     event.preventDefault();
-    void onSave({ timezone: form.timezone, horizon: form.horizon, reserveRatio: Number(form.reserve) / 100, defaultBufferMinutes: Number(form.buffer), availability: form.availability, energyWindows: form.energyWindows });
+    const sleepSchedule = { weekdays: { bedtime: form.weekdayBedtime, durationMinutes: Number(form.weekdaySleep) }, weekends: { bedtime: form.weekendBedtime, durationMinutes: Number(form.weekendSleep) } };
+    void onSave({ timezone: form.timezone, horizon: form.horizon, reserveRatio: Number(form.reserve) / 100, defaultBufferMinutes: Number(form.buffer), availability: sleepTouched && !availabilityTouched ? availabilityFromSleepSchedule(sleepSchedule) : form.availability, energyWindows: form.energyWindows, sleepSchedule });
   }}><div className={styles.formGrid}>
     <label>{locale === "ru" ? "Часовой пояс" : "Time zone"}<input value={form.timezone} onChange={(e) => setForm((v) => ({ ...v, timezone: e.target.value }))} /></label><label>{locale === "ru" ? "Горизонт" : "Horizon"}<select value={form.horizon} onChange={(e) => setForm((v) => ({ ...v, horizon: e.target.value as PlannerHorizon }))}><option value="week">7 days</option><option value="two_weeks">14 days</option><option value="month">30 days</option></select></label>
     <label>{locale === "ru" ? "Резерв, %" : "Reserve, %"}<input type="number" min="0" max="60" value={form.reserve} onChange={(e) => setForm((v) => ({ ...v, reserve: e.target.value }))} /></label><label>{locale === "ru" ? "Буфер, мин" : "Buffer, min"}<input type="number" min="0" max="120" value={form.buffer} onChange={(e) => setForm((v) => ({ ...v, buffer: e.target.value }))} /></label>
+    <label>{locale === "ru" ? "Сон перед буднями" : "Weekday bedtime"}<input type="time" value={form.weekdayBedtime} onChange={(e) => { setSleepTouched(true); setForm((v) => ({ ...v, weekdayBedtime: e.target.value })); }} /></label><label>{locale === "ru" ? "Длительность, мин" : "Duration, min"}<input type="number" min="180" max="960" value={form.weekdaySleep} onChange={(e) => { setSleepTouched(true); setForm((v) => ({ ...v, weekdaySleep: e.target.value })); }} /></label>
+    <label>{locale === "ru" ? "Сон перед выходными" : "Weekend bedtime"}<input type="time" value={form.weekendBedtime} onChange={(e) => { setSleepTouched(true); setForm((v) => ({ ...v, weekendBedtime: e.target.value })); }} /></label><label>{locale === "ru" ? "Длительность, мин" : "Duration, min"}<input type="number" min="180" max="960" value={form.weekendSleep} onChange={(e) => { setSleepTouched(true); setForm((v) => ({ ...v, weekendSleep: e.target.value })); }} /></label>
   </div><details open><summary>{locale === "ru" ? "Доступные часы" : "Available hours"}</summary><div className={styles.availabilityRows}>{weekdays.map((label, index) => { const day = String(index + 1); const window = form.availability[day]?.[0] ?? { start: "08:00", end: "22:00" }; return <div key={day}><strong>{label}</strong><input type="time" value={window.start} onChange={(event) => updateAvailability(day, "start", event.target.value)} /><span>—</span><input type="time" value={window.end} onChange={(event) => updateAvailability(day, "end", event.target.value)} /></div>; })}</div></details>
   <details><summary>{locale === "ru" ? "Энергия в течение дня" : "Energy throughout the day"}</summary><div className={styles.energyRows}>{form.energyWindows.map((window, index) => <div key={window.energy}><strong>{window.energy === "high" ? (locale === "ru" ? "Высокая" : "High") : window.energy === "normal" ? (locale === "ru" ? "Обычная" : "Normal") : (locale === "ru" ? "Низкая" : "Low")}</strong><input type="time" value={window.start} onChange={(event) => updateEnergy(index, "start", event.target.value)} /><span>—</span><input type="time" value={window.end} onChange={(event) => updateEnergy(index, "end", event.target.value)} /></div>)}</div></details>
   <div className={styles.modalActions}><button type="button" onClick={onClose}>{locale === "ru" ? "Отмена" : "Cancel"}</button><button className={styles.primaryButton} disabled={busy}>{locale === "ru" ? "Сохранить" : "Save"}</button></div></form></ModalShell>;

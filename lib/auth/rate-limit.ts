@@ -17,7 +17,8 @@ export type AuthRateLimitAction =
   | "reset_password"
   | "verify_email"
   | "resend_verification"
-  | "change_password";
+  | "change_password"
+  | "planner_reset";
 
 export type AuthRateLimitContext = {
   action: AuthRateLimitAction;
@@ -62,6 +63,11 @@ const RULES: Record<AuthRateLimitAction, AuthRateLimitRule> = {
     windowSeconds: 900,
     maxByIp: 20,
     maxByEmail: 8,
+  },
+  planner_reset: {
+    windowSeconds: 900,
+    maxByIp: 12,
+    maxByEmail: 6,
   },
 };
 

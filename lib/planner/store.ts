@@ -4,16 +4,19 @@ import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 
 import { getPostgresPool } from "@/lib/db/postgres";
+import { assertValidPasswordCandidate, verifyPassword } from "@/lib/auth/password";
 import { applyProposalChanges, buildPlannerProposal, normalizePlannerItem, normalizePlannerProfile, plannerCompletionSuggestion } from "@/lib/planner/engine";
+import { buildPlannerSleepBlocks } from "@/lib/planner/sleep";
 import {
   createDefaultPlannerProfile,
   type PlannerBlock,
   type PlannerBlockStatus,
   type PlannerBootstrap,
-  type PlannerDraft,
   type PlannerItem,
   type PlannerProfile,
   type PlannerProposal,
+  type PlannerProposalInput,
+  type PlannerSleepEvent,
 } from "@/lib/planner/types";
 import { addIsoMinutes, isoDurationMinutes } from "@/lib/planner/time";
 
@@ -29,8 +32,19 @@ type ProfileRow = {
   default_buffer_minutes: number;
   availability: PlannerProfile["availability"];
   energy_windows: PlannerProfile["energyWindows"];
+  sleep_schedule: PlannerProfile["sleepSchedule"];
+  assistant_setup_version: number;
   revision: string | number;
   onboarding_completed: boolean;
+};
+
+type SleepEventRow = {
+  wake_date: Date | string;
+  actual_start_at: Date | string;
+  projected_end_at: Date | string;
+  actual_end_at: Date | string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
 };
 
 type ItemRow = {
@@ -103,9 +117,22 @@ function profileFromRow(row: ProfileRow): PlannerProfile {
     defaultBufferMinutes: row.default_buffer_minutes,
     availability: row.availability,
     energyWindows: row.energy_windows,
+    sleepSchedule: row.sleep_schedule,
+    assistantSetupVersion: row.assistant_setup_version,
     revision: Number(row.revision),
     onboardingCompleted: row.onboarding_completed,
   });
+}
+
+function sleepEventFromRow(row: SleepEventRow): PlannerSleepEvent {
+  return {
+    wakeDate: row.wake_date instanceof Date ? row.wake_date.toISOString().slice(0, 10) : String(row.wake_date).slice(0, 10),
+    actualStartAt: toIso(row.actual_start_at)!,
+    projectedEndAt: toIso(row.projected_end_at)!,
+    actualEndAt: toIso(row.actual_end_at),
+    createdAt: toIso(row.created_at),
+    updatedAt: toIso(row.updated_at),
+  };
 }
 
 function itemFromRow(row: ItemRow): PlannerItem {
@@ -174,11 +201,11 @@ async function ensureProfile(executor: SqlExecutor, userId: string): Promise<Pla
   const { rows } = await executor.query<ProfileRow>(
     `insert into public.planner_profiles (
        app_user_id,timezone,horizon,reserve_ratio,default_buffer_minutes,
-       availability,energy_windows,onboarding_completed
-     ) values ($1::uuid,$2::text,$3::text,$4::numeric,$5::integer,$6::jsonb,$7::jsonb,false)
+       availability,energy_windows,sleep_schedule,assistant_setup_version,onboarding_completed
+     ) values ($1::uuid,$2::text,$3::text,$4::numeric,$5::integer,$6::jsonb,$7::jsonb,$8::jsonb,0,false)
      on conflict (app_user_id) do update set app_user_id = excluded.app_user_id
      returning app_user_id,timezone,horizon,reserve_ratio,default_buffer_minutes,
-       availability,energy_windows,revision,onboarding_completed`,
+       availability,energy_windows,sleep_schedule,assistant_setup_version,revision,onboarding_completed`,
     [
       userId,
       defaults.timezone,
@@ -187,9 +214,31 @@ async function ensureProfile(executor: SqlExecutor, userId: string): Promise<Pla
       defaults.defaultBufferMinutes,
       JSON.stringify(defaults.availability),
       JSON.stringify(defaults.energyWindows),
+      JSON.stringify(defaults.sleepSchedule),
     ]
   );
   return profileFromRow(rows[0]);
+}
+
+async function listSleepEvents(executor: SqlExecutor, userId: string): Promise<PlannerSleepEvent[]> {
+  const { rows } = await executor.query<SleepEventRow>(
+    `select wake_date,actual_start_at,projected_end_at,actual_end_at,created_at,updated_at
+     from public.planner_sleep_events where app_user_id=$1::uuid order by wake_date asc`,
+    [userId]
+  );
+  return rows.map(sleepEventFromRow);
+}
+
+async function insertSleepEvent(executor: SqlExecutor, userId: string, event: PlannerSleepEvent): Promise<void> {
+  await executor.query(
+    `insert into public.planner_sleep_events(
+       app_user_id,wake_date,actual_start_at,projected_end_at,actual_end_at
+     ) values($1::uuid,$2::date,$3::timestamptz,$4::timestamptz,$5::timestamptz)
+     on conflict(app_user_id,wake_date) do update set
+       actual_start_at=excluded.actual_start_at,projected_end_at=excluded.projected_end_at,
+       actual_end_at=excluded.actual_end_at`,
+    [userId,event.wakeDate,event.actualStartAt,event.projectedEndAt,event.actualEndAt ?? null]
+  );
 }
 
 async function listItems(executor: SqlExecutor, userId: string): Promise<PlannerItem[]> {
@@ -272,7 +321,7 @@ async function lockProfile(client: PoolClient, userId: string): Promise<PlannerP
   await ensureProfile(client, userId);
   const { rows } = await client.query<ProfileRow>(
     `select app_user_id,timezone,horizon,reserve_ratio,default_buffer_minutes,
-       availability,energy_windows,revision,onboarding_completed
+       availability,energy_windows,sleep_schedule,assistant_setup_version,revision,onboarding_completed
      from public.planner_profiles where app_user_id=$1::uuid for update`,
     [userId]
   );
@@ -302,17 +351,25 @@ export class PlannerConflictError extends Error {
   }
 }
 
+export class PlannerInvalidPasswordError extends Error {
+  constructor() {
+    super("Неверный пароль Item Key.");
+    this.name = "PlannerInvalidPasswordError";
+  }
+}
+
 export type PlannerStore = {
   getBootstrap(userId: string, from?: string, to?: string): Promise<PlannerBootstrap>;
   updateSettings(userId: string, patch: Partial<PlannerProfile>, expectedRevision: number): Promise<PlannerProfile>;
   saveItem(userId: string, item: PlannerItem, expectedRevision: number): Promise<{ item: PlannerItem; revision: number }>;
   archiveItem(userId: string, itemId: string, expectedRevision: number): Promise<number>;
-  createProposal(userId: string, input: { command?: string; draft?: PlannerDraft; trigger?: PlannerProposal["trigger"] }): Promise<PlannerProposal>;
+  createProposal(userId: string, input: PlannerProposalInput): Promise<PlannerProposal>;
   applyProposal(userId: string, proposalId: string): Promise<{ revision: number; changeSetId: string }>;
   actOnBlock(userId: string, blockId: string, action: string, expectedRevision: number, minutes?: number): Promise<{ block: PlannerBlock; revision: number }>;
   moveBlock(userId: string, blockId: string, startAt: string, endAt: string, expectedRevision: number): Promise<{ block: PlannerBlock; revision: number }>;
   undoChangeSet(userId: string, changeSetId: string): Promise<number>;
   importLegacy(userId: string, sources: Array<{ sourceKey: string; title: string; items: PlannerItem[]; blocks: PlannerBlock[] }>, expectedRevision: number): Promise<{ revision: number; importedSources: number; importedItems: number; importedBlocks: number }>;
+  resetPlanner(userId: string, password: unknown, expectedRevision: number): Promise<number>;
 };
 
 function createPlannerStore(): PlannerStore {
@@ -320,9 +377,10 @@ function createPlannerStore(): PlannerStore {
   return {
     async getBootstrap(userId, from, to) {
       const profile = await ensureProfile(pool, userId);
-      const [items, blocks, latest] = await Promise.all([
+      const [items, blocks, sleepEvents, latest] = await Promise.all([
         listItems(pool, userId),
         listBlocks(pool, userId, from, to),
+        listSleepEvents(pool, userId),
         pool.query<{ id: string }>(
           `select id from public.planner_change_sets
            where app_user_id=$1::uuid and undone_at is null
@@ -339,7 +397,11 @@ function createPlannerStore(): PlannerStore {
           suggestedMinutes,
         }];
       });
-      return { profile, items, blocks, latestChangeSetId: latest.rows[0]?.id, durationSuggestions };
+      const today = new Intl.DateTimeFormat("en-CA", {
+        timeZone: profile.timezone, year: "numeric", month: "2-digit", day: "2-digit",
+      }).format(new Date());
+      const sleepBlocks = buildPlannerSleepBlocks(profile, sleepEvents, today, new Date(Date.now() + 35 * 86_400_000).toISOString().slice(0, 10));
+      return { profile, items, blocks, sleepEvents, sleepBlocks, latestChangeSetId: latest.rows[0]?.id, durationSuggestions };
     },
     async updateSettings(userId, patch, expectedRevision) {
       return withTransaction(pool, async (client) => {
@@ -350,12 +412,14 @@ function createPlannerStore(): PlannerStore {
           `update public.planner_profiles set timezone=$2::text,horizon=$3::text,
              reserve_ratio=$4::numeric,default_buffer_minutes=$5::integer,
              availability=$6::jsonb,energy_windows=$7::jsonb,
-             onboarding_completed=$8::boolean,revision=revision+1
+             sleep_schedule=$8::jsonb,assistant_setup_version=$9::integer,
+             onboarding_completed=$10::boolean,revision=revision+1
            where app_user_id=$1::uuid
            returning app_user_id,timezone,horizon,reserve_ratio,default_buffer_minutes,
-             availability,energy_windows,revision,onboarding_completed`,
+             availability,energy_windows,sleep_schedule,assistant_setup_version,revision,onboarding_completed`,
           [userId,next.timezone,next.horizon,next.reserveRatio,next.defaultBufferMinutes,
-            JSON.stringify(next.availability),JSON.stringify(next.energyWindows),next.onboardingCompleted]
+            JSON.stringify(next.availability),JSON.stringify(next.energyWindows),JSON.stringify(next.sleepSchedule),
+            next.assistantSetupVersion,next.onboardingCompleted]
         );
         return profileFromRow(rows[0]);
       });
@@ -390,8 +454,8 @@ function createPlannerStore(): PlannerStore {
     },
     async createProposal(userId, input) {
       const profile = await ensureProfile(pool, userId);
-      const [items, blocks] = await Promise.all([listItems(pool, userId), listBlocks(pool, userId)]);
-      const proposal = buildPlannerProposal({ profile, items, blocks, ...input });
+      const [items, blocks, sleepEvents] = await Promise.all([listItems(pool, userId), listBlocks(pool, userId), listSleepEvents(pool, userId)]);
+      const proposal = buildPlannerProposal({ profile, items, blocks, sleepEvents, ...input });
       const id = randomUUID();
       const expiresAt = new Date(Date.now() + 30 * 60_000).toISOString();
       const stored = { ...proposal, id, expiresAt };
@@ -423,14 +487,31 @@ function createPlannerStore(): PlannerStore {
         if (Number(row.base_revision) !== current.revision) throw new PlannerRevisionError();
         const proposal = row.proposal_data;
         if (proposal.conflicts.length > 0) throw new PlannerConflictError();
-        const [beforeItems, beforeBlocks] = await Promise.all([
-          listItems(client, userId), listBlocks(client, userId),
+        const [beforeItems, beforeBlocks, beforeSleepEvents] = await Promise.all([
+          listItems(client, userId), listBlocks(client, userId), listSleepEvents(client, userId),
         ]);
         const applied = applyProposalChanges(beforeItems, beforeBlocks, proposal);
         await client.query(`delete from public.planner_blocks where app_user_id=$1::uuid`, [userId]);
         await client.query(`delete from public.planner_items where app_user_id=$1::uuid`, [userId]);
         for (const item of applied.items) await insertItem(client, userId, item);
         for (const block of applied.blocks) await insertBlock(client, userId, block);
+        const profileChange = proposal.changes.find((change) => change.kind === "update_profile");
+        if (profileChange?.kind === "update_profile") {
+          const next = normalizePlannerProfile({ ...profileChange.profile, revision: current.revision });
+          await client.query(
+            `update public.planner_profiles set timezone=$2::text,horizon=$3::text,
+               reserve_ratio=$4::numeric,default_buffer_minutes=$5::integer,
+               availability=$6::jsonb,energy_windows=$7::jsonb,sleep_schedule=$8::jsonb,
+               assistant_setup_version=$9::integer,onboarding_completed=$10::boolean
+             where app_user_id=$1::uuid`,
+            [userId,next.timezone,next.horizon,next.reserveRatio,next.defaultBufferMinutes,
+              JSON.stringify(next.availability),JSON.stringify(next.energyWindows),JSON.stringify(next.sleepSchedule),
+              next.assistantSetupVersion,next.onboardingCompleted]
+          );
+        }
+        for (const change of proposal.changes) {
+          if (change.kind === "upsert_sleep_event") await insertSleepEvent(client, userId, change.event);
+        }
         const revision = await bumpRevision(client, userId);
         const { rows: changeRows } = await client.query<{ id: string }>(
           `insert into public.planner_change_sets(
@@ -438,7 +519,7 @@ function createPlannerStore(): PlannerStore {
            ) values($1::uuid,$2::bigint,$3::bigint,$4::text,$5::jsonb,$6::jsonb)
            returning id`,
           [userId,current.revision,revision,proposal.trigger,JSON.stringify(proposal.changes),
-            JSON.stringify({ items: beforeItems, blocks: beforeBlocks })]
+            JSON.stringify({ profile: current, items: beforeItems, blocks: beforeBlocks, sleepEvents: beforeSleepEvents })]
         );
         await client.query(`update public.planner_proposals set applied_at=now() where id=$1::uuid`, [proposalId]);
         return { revision, changeSetId: changeRows[0].id };
@@ -556,7 +637,9 @@ function createPlannerStore(): PlannerStore {
       return withTransaction(pool, async (client) => {
         const current = await lockProfile(client, userId);
         const { rows } = await client.query<{
-          id: string; to_revision: string | number; inverse_snapshot: { items: PlannerItem[]; blocks: PlannerBlock[] };
+          id: string; to_revision: string | number; inverse_snapshot: {
+            profile?: PlannerProfile; items: PlannerItem[]; blocks: PlannerBlock[]; sleepEvents?: PlannerSleepEvent[];
+          };
         }>(
           `select id,to_revision,inverse_snapshot from public.planner_change_sets
            where id=$1::uuid and app_user_id=$2::uuid and undone_at is null for update`,
@@ -568,6 +651,23 @@ function createPlannerStore(): PlannerStore {
         await client.query(`delete from public.planner_items where app_user_id=$1::uuid`, [userId]);
         for (const item of change.inverse_snapshot.items) await insertItem(client, userId, item);
         for (const block of change.inverse_snapshot.blocks) await insertBlock(client, userId, block);
+        if (change.inverse_snapshot.sleepEvents) {
+          await client.query(`delete from public.planner_sleep_events where app_user_id=$1::uuid`, [userId]);
+          for (const event of change.inverse_snapshot.sleepEvents) await insertSleepEvent(client, userId, event);
+        }
+        if (change.inverse_snapshot.profile) {
+          const previous = normalizePlannerProfile(change.inverse_snapshot.profile);
+          await client.query(
+            `update public.planner_profiles set timezone=$2::text,horizon=$3::text,
+               reserve_ratio=$4::numeric,default_buffer_minutes=$5::integer,
+               availability=$6::jsonb,energy_windows=$7::jsonb,sleep_schedule=$8::jsonb,
+               assistant_setup_version=$9::integer,onboarding_completed=$10::boolean
+             where app_user_id=$1::uuid`,
+            [userId,previous.timezone,previous.horizon,previous.reserveRatio,previous.defaultBufferMinutes,
+              JSON.stringify(previous.availability),JSON.stringify(previous.energyWindows),JSON.stringify(previous.sleepSchedule),
+              previous.assistantSetupVersion,previous.onboardingCompleted]
+          );
+        }
         await client.query(`update public.planner_change_sets set undone_at=now() where id=$1::uuid`, [changeSetId]);
         return bumpRevision(client, userId);
       });
@@ -596,6 +696,36 @@ function createPlannerStore(): PlannerStore {
         }
         const revision = importedSources > 0 ? await bumpRevision(client, userId) : profile.revision;
         return { revision, importedSources, importedItems, importedBlocks };
+      });
+    },
+    async resetPlanner(userId, rawPassword, expectedRevision) {
+      const password = assertValidPasswordCandidate(rawPassword);
+      return withTransaction(pool, async (client) => {
+        const current = await lockProfile(client, userId);
+        if (current.revision !== expectedRevision) throw new PlannerRevisionError();
+        const { rows } = await client.query<{ password_hash: string }>(
+          `select password_hash from public.app_users where id=$1::uuid for update`,
+          [userId]
+        );
+        if (!rows[0] || !await verifyPassword(password, rows[0].password_hash)) {
+          throw new PlannerInvalidPasswordError();
+        }
+        await client.query(`delete from public.planner_blocks where app_user_id=$1::uuid`, [userId]);
+        await client.query(`delete from public.planner_items where app_user_id=$1::uuid`, [userId]);
+        await client.query(`delete from public.planner_sleep_events where app_user_id=$1::uuid`, [userId]);
+        await client.query(`delete from public.planner_proposals where app_user_id=$1::uuid`, [userId]);
+        await client.query(`delete from public.planner_change_sets where app_user_id=$1::uuid`, [userId]);
+        await client.query(`delete from public.planner_legacy_imports where app_user_id=$1::uuid`, [userId]);
+        const defaults = createDefaultPlannerProfile(current.timezone);
+        const { rows: updated } = await client.query<{ revision: string | number }>(
+          `update public.planner_profiles set horizon=$2::text,reserve_ratio=$3::numeric,
+             default_buffer_minutes=$4::integer,availability=$5::jsonb,energy_windows=$6::jsonb,
+             sleep_schedule=$7::jsonb,assistant_setup_version=0,onboarding_completed=false,
+             revision=revision+1 where app_user_id=$1::uuid returning revision`,
+          [userId,defaults.horizon,defaults.reserveRatio,defaults.defaultBufferMinutes,
+            JSON.stringify(defaults.availability),JSON.stringify(defaults.energyWindows),JSON.stringify(defaults.sleepSchedule)]
+        );
+        return Number(updated[0].revision);
       });
     },
   };
