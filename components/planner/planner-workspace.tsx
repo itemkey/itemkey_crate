@@ -15,9 +15,9 @@ import {
 import LocaleSwitcher from "@/components/locale-switcher";
 import { useI18n } from "@/components/i18n-provider";
 import AutoplannerModal from "@/components/planner/autoplanner-modal";
-import SleepChangedModal from "@/components/planner/sleep-changed-modal";
+import SleepChangedModal, { type SleepMode } from "@/components/planner/sleep-changed-modal";
 import type { Locale } from "@/lib/i18n";
-import { availabilityFromSleepSchedule, buildPlannerSleepBlocks, createPlannerSleepEvent } from "@/lib/planner/sleep";
+import { availabilityFromSleepSchedule, buildPlannerSleepBlocks, createPlannerSleepEvent, fixedScheduleView } from "@/lib/planner/sleep";
 import {
   createDefaultPlannerProfile,
   type PlannerAssistantParseResult,
@@ -36,6 +36,7 @@ import {
   type PlannerSleepBlock,
   type PlannerSleepEvent,
   type PlannerSleepParseResult,
+  type PlannerSleepRestedness,
 } from "@/lib/planner/types";
 import {
   addIsoMinutes,
@@ -317,6 +318,8 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
   const [selectedDate, setSelectedDate] = useState(() => todayIn(Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Minsk"));
   const [mobileTab, setMobileTab] = useState<"now" | "day" | "calendar" | "inbox">("calendar");
   const [modal, setModal] = useState<Modal>(initialLegacyImport ? "import" : null);
+  const [sleepModalMode, setSleepModalMode] = useState<SleepMode>("later");
+  const [sleepModalWakeDate, setSleepModalWakeDate] = useState<string | undefined>();
   const [quickCommand, setQuickCommand] = useState("");
   const [quickTrigger, setQuickTrigger] = useState<PlannerProposal["trigger"]>("quick_add");
   const [itemForm, setItemForm] = useState(() => defaultItemForm(selectedDate));
@@ -403,6 +406,7 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
   const profile = data?.profile ?? createDefaultPlannerProfile();
   const blocks = useMemo(() => data?.blocks ?? [], [data?.blocks]);
   const items = useMemo(() => data?.items ?? [], [data?.items]);
+  const tentativeSleepEvent = data?.sleepEvents.find((event) => event.state === "tentative");
   const visibleDates = useMemo(() => {
     if (view === "day") return [selectedDate];
     if (view === "week") {
@@ -479,7 +483,7 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
     if (!proposal?.id || proposal.conflicts.length > 0) return;
     await run(async () => {
       await api(`/api/planner/proposals/${proposal.id}/apply`, { method: "POST", body: "{}" });
-      try { window.localStorage.removeItem("itemkey.planner.autoplanner.v1"); } catch { /* optional draft storage */ }
+      try { window.localStorage.removeItem("itemkey.planner.autoplanner.v2"); } catch { /* optional draft storage */ }
       setModal(null); setProposal(null); setQuickCommand(""); await load(true);
     }, locale === "ru" ? "План применён." : "Plan applied.");
   }
@@ -557,6 +561,36 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
     }, locale === "ru" ? "Оценка длительности обновлена." : "Duration estimate updated.");
   }
 
+  async function acceptSleepDurationSuggestion(suggestedMinutes: number) {
+    if (profile.sleepSchedule.mode !== "adaptive") return;
+    const sleepSchedule = { ...profile.sleepSchedule, targetDurationMinutes: suggestedMinutes };
+    await run(() => createProposal({
+      profilePatch: {
+        sleepSchedule,
+        availability: availabilityFromSleepSchedule(sleepSchedule),
+      },
+      trigger: "assistant_update",
+      rebuildFuture: true,
+    }));
+  }
+
+  function openSleep(mode: SleepMode = "later", wakeDate?: string) {
+    setSleepModalMode(mode);
+    setSleepModalWakeDate(wakeDate);
+    setModal("sleep");
+  }
+
+  async function checkInSleep(wakeDate: string, restedness: PlannerSleepRestedness) {
+    await run(async () => {
+      await api("/api/planner/sleep/check-in", {
+        method: "POST",
+        body: JSON.stringify({ wakeDate, restedness, expectedRevision: profile.revision }),
+      });
+      setModal(null);
+      await load(true);
+    }, locale === "ru" ? "Оценка сна сохранена." : "Sleep rating saved.");
+  }
+
   function openQuick(trigger: PlannerProposal["trigger"]) {
     setQuickTrigger(trigger); setQuickCommand(""); setModal("quick");
   }
@@ -570,7 +604,7 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
   if (loading) return <div className={styles.loading}>Собираем ваш план…</div>;
   if (!data) return <div className={styles.fatal}><p>{error}</p><button onClick={() => void load()}>Повторить</button></div>;
 
-  const showAssistantSetup = profile.assistantSetupVersion < 1 && modal !== "proposal" && modal !== "import";
+  const showAssistantSetup = profile.assistantSetupVersion < 2 && modal !== "proposal" && modal !== "import";
 
   return (
     <main className={styles.root}>
@@ -597,7 +631,12 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
 
       {error && <div className={styles.errorBanner}>{error}<button onClick={() => setError(null)}>×</button></div>}
       {notice && <div className={styles.notice}>{notice}</div>}
+      {tentativeSleepEvent && <div className={styles.suggestionBanner}><span>{tentativeSleepEvent.actualStartAt
+        ? (locale === "ru" ? `Сон перед ${tentativeSleepEvent.wakeDate} рассчитан предварительно по середине указанного диапазона. Подтвердите фактическое засыпание.` : `Sleep before ${tentativeSleepEvent.wakeDate} is tentative and uses the midpoint of your range. Confirm the actual bedtime.`)
+        : (locale === "ru" ? `Время сна перед ${tentativeSleepEvent.wakeDate} пока неизвестно. Постоянный режим защищён, но задачи не перестраивались по выдуманному времени.` : `Bedtime before ${tentativeSleepEvent.wakeDate} is still unknown. The regular schedule remains protected and no speculative task moves were made.`)}</span><button onClick={() => openSleep("bedtime", tentativeSleepEvent.wakeDate)}>{locale === "ru" ? "Ложусь сейчас" : "Going to bed now"}</button></div>}
       {data.durationSuggestions?.[0] && <div className={styles.suggestionBanner}><span>{locale === "ru" ? `После трёх выполнений «${data.durationSuggestions[0].title}» обычно занимает ${formatDuration(data.durationSuggestions[0].suggestedMinutes, locale)} вместо ${formatDuration(data.durationSuggestions[0].currentMinutes, locale)}.` : `After three completions, “${data.durationSuggestions[0].title}” usually takes ${formatDuration(data.durationSuggestions[0].suggestedMinutes, locale)} instead of ${formatDuration(data.durationSuggestions[0].currentMinutes, locale)}.`}</span><button onClick={() => void acceptDurationSuggestion(data.durationSuggestions![0].itemId, data.durationSuggestions![0].suggestedMinutes)}>{locale === "ru" ? "Обновить оценку" : "Update estimate"}</button></div>}
+      {data.sleepDurationSuggestion && <div className={styles.suggestionBanner}><span>{locale === "ru" ? `${data.sleepDurationSuggestion.reason} Предлагаем увеличить цель сна с ${formatDuration(data.sleepDurationSuggestion.currentMinutes, locale)} до ${formatDuration(data.sleepDurationSuggestion.suggestedMinutes, locale)}.` : `Your last seven comparable nights suggest increasing the sleep target from ${formatDuration(data.sleepDurationSuggestion.currentMinutes, locale)} to ${formatDuration(data.sleepDurationSuggestion.suggestedMinutes, locale)}.`}</span><button onClick={() => void acceptSleepDurationSuggestion(data.sleepDurationSuggestion!.suggestedMinutes)}>{locale === "ru" ? "Посмотреть изменение" : "Review change"}</button></div>}
+      {data.sleepHealthNotice && <div className={styles.warningBanner}>{locale === "ru" ? data.sleepHealthNotice : "Your sleep schedule has shifted sharply several times in the last two weeks. The planner can protect recovery time, but persistent sleepiness or sleep problems are worth discussing with a professional."}</div>}
 
       <nav className={styles.mobileTabs} aria-label="Planner sections">
         <button className={mobileTab === "now" ? styles.mobileTabActive : ""} onClick={() => setMobileTab("now")}>{copy.now}</button>
@@ -681,7 +720,12 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
             <small>{locale === "ru" ? `свободно сегодня; цель резерва — ${Math.round(profile.reserveRatio * 100)}%` : `free today; reserve target is ${Math.round(profile.reserveRatio * 100)}%`}</small>
           </div>
           <button className={styles.changeWide} onClick={() => openQuick("plans_changed")}>⚡ {copy.changed}</button>
-          <button className={styles.sleepWide} onClick={() => setModal("sleep")}>■ {locale === "ru" ? "Сон изменился" : "Sleep changed"}</button>
+          <div className={styles.sleepQuickGrid}>
+            <button onClick={() => openSleep("later")}>≈ {locale === "ru" ? "Лягу позже" : "Sleeping later"}</button>
+            <button onClick={() => openSleep("bedtime")}>■ {locale === "ru" ? "Ложусь сейчас" : "Bedtime now"}</button>
+            <button onClick={() => openSleep("woke")}>↑ {locale === "ru" ? "Уже проснулся" : "Already woke"}</button>
+            <button onClick={() => openSleep("checkin")}>? {locale === "ru" ? "Как я выспался" : "How I slept"}</button>
+          </div>
         </aside>
       </div>
 
@@ -697,19 +741,35 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
         onParseTasks={(textValue) => api<PlannerAssistantParseResult>("/api/planner/assistant/parse", { method: "POST", body: JSON.stringify({ mode: "tasks", text: textValue }) })}
         onParseSleep={(textValue) => api<PlannerSleepParseResult>("/api/planner/assistant/parse", { method: "POST", body: JSON.stringify({ mode: "sleep", text: textValue }) })}
         onPrepare={(input) => run(() => createProposal(input))}
-        onOpenSleep={() => setModal("sleep")}
+        onOpenSleep={() => openSleep("later")}
         onReset={(password) => run(async () => {
           await api("/api/planner/reset", { method: "POST", body: JSON.stringify({ password, expectedRevision: profile.revision }) });
-          try { window.localStorage.removeItem("itemkey.planner.autoplanner.v1"); } catch { /* optional draft storage */ }
+          try { window.localStorage.removeItem("itemkey.planner.autoplanner.v2"); } catch { /* optional draft storage */ }
           setModal(null);
           await load(true);
         })}
       />}
-      {modal === "sleep" && <SleepChangedModal profile={profile} locale={locale} busy={busy} onClose={() => setModal(null)} onSubmit={(sleepEvent: PlannerSleepEvent) => run(() => createProposal({ sleepEvent, trigger: "sleep_changed", rebuildFuture: true }))} />}
+      {modal === "sleep" && <SleepChangedModal profile={profile} locale={locale} busy={busy} initialMode={sleepModalMode} initialWakeDate={sleepModalWakeDate} onClose={() => setModal(null)} onSubmit={(sleepEvent: PlannerSleepEvent) => run(() => createProposal({ sleepEvent, trigger: "sleep_changed", rebuildFuture: Boolean(sleepEvent.actualStartAt) }))} onCheckIn={checkInSleep} />}
       {modal === "quick" && <QuickModal command={quickCommand} setCommand={setQuickCommand} onSubmit={submitQuick} onClose={() => setModal(null)} trigger={quickTrigger} busy={busy} locale={locale} />}
       {modal === "item" && <ItemModal value={itemForm} setValue={setItemForm} onSubmit={submitItem} onClose={() => setModal(null)} busy={busy} locale={locale} />}
       {modal === "proposal" && proposal && <ProposalModal proposal={proposal} profile={profile} locale={locale} busy={busy}
         onClose={() => setModal(null)} onApply={applyProposal} onEdit={() => proposal.normalizedDraft ? openItem(proposal.normalizedDraft) : setModal(proposal.trigger === "sleep_changed" ? "sleep" : "settings")}
+        onAddRecoveryNap={async (nap) => {
+          const replay = replayProposalInput(proposal);
+          await run(() => createProposal({
+            ...replay,
+            drafts: [...(replay.drafts ?? []), {
+              title: locale === "ru" ? "Короткий восстановительный сон" : "Short recovery nap",
+              kind: "fixed_event",
+              date: formatDateInTimeZone(new Date(nap.startAt), profile.timezone),
+              start: formatTimeInTimeZone(new Date(nap.startAt), profile.timezone),
+              end: formatTimeInTimeZone(new Date(nap.endAt), profile.timezone),
+              estimateMinutes: 20,
+            }],
+            trigger: "sleep_changed",
+            rebuildFuture: true,
+          }));
+        }}
         onFinishFirst={async (blockId, protectedId) => {
           const block = blocks.find((candidate) => candidate.id === blockId);
           const draft = proposal.normalizedDraft;
@@ -816,8 +876,8 @@ function TimeGrid({ dates, blocks, sleepBlocks, profile, locale, selectedDate, s
               const size = Math.max(2.3, (duration / (dayEnd - dayStart)) * 100);
               return (
                 <article key={block.id} draggable={!sleep && !busy && block.status === "planned"} onDragStart={() => { if (!sleep) setDragId(block.id); }} onKeyDown={(event) => { if (!sleep) keyboard(event, block); }} tabIndex={0}
-                  className={`${styles.calendarBlock} ${sleep ? styles.sleepBlock : styles[block.fixed ? "fixedBlock" : "flexibleBlock"]} ${!sleep && block.status !== "planned" ? styles[block.status] ?? "" : ""}`} style={{ top: `${top}%`, height: `${size}%` }}>
-                  <strong>{sleep ? "■" : block.fixed ? "◆" : "↝"} {formatTimeInTimeZone(new Date(block.startAt), profile.timezone)} · {sleep ? (locale === "ru" ? "СОН · ЗАЩИЩЕНО" : "SLEEP · PROTECTED") : block.title}</strong>
+                  className={`${styles.calendarBlock} ${sleep ? styles.sleepBlock : styles[block.fixed ? "fixedBlock" : "flexibleBlock"]} ${sleep && block.tentative ? styles.sleepTentative : ""} ${sleep && block.recoveryNight ? styles.sleepRecovery : ""} ${!sleep && block.status !== "planned" ? styles[block.status] ?? "" : ""}`} style={{ top: `${top}%`, height: `${size}%` }}>
+                  <strong>{sleep ? "■" : block.fixed ? "◆" : "↝"} {formatTimeInTimeZone(new Date(block.startAt), profile.timezone)} · {sleep ? block.tentative ? (locale === "ru" ? "СОН · ПРЕДВАРИТЕЛЬНО" : "SLEEP · TENTATIVE") : block.recoveryNight ? (locale === "ru" ? "СОН · ВОССТАНОВЛЕНИЕ" : "SLEEP · RECOVERY") : (locale === "ru" ? "СОН · ЗАЩИЩЕНО" : "SLEEP · PROTECTED") : block.title}</strong>
                   <small>{formatDuration(duration, locale)}{sleep ? ` · ${locale === "ru" ? "не перемещается" : "locked"}` : ""}</small>
                   {!sleep && block.status === "planned" && <div className={styles.resizeActions}>
                     <button onClick={() => void onMove(block, block.startAt, addIsoMinutes(block.endAt, -15))} aria-label="Shorten 15 minutes">−</button>
@@ -938,9 +998,10 @@ function proposalChangeTitle(change: PlannerProposal["changes"][number], locale:
   return change.item.title;
 }
 
-function ProposalModal({ proposal, profile, locale, busy, onClose, onApply, onEdit, onPause, onFinishFirst }: {
+function ProposalModal({ proposal, profile, locale, busy, onClose, onApply, onEdit, onPause, onFinishFirst, onAddRecoveryNap }: {
   proposal: PlannerProposal; profile: PlannerProfile; locale: Locale; busy: boolean;
   onClose: () => void; onApply: () => Promise<void>; onEdit: () => void; onPause: (blockId: string) => Promise<void>; onFinishFirst: (blockId: string, protectedId: string) => Promise<void>;
+  onAddRecoveryNap: (nap: NonNullable<PlannerProposal["recoveryAdvice"]>["nap"] & {}) => Promise<void>;
 }) {
   return <ModalShell title={locale === "ru" ? "Предпросмотр нового плана" : "Plan preview"} onClose={onClose}>
     <div className={styles.proposal}>
@@ -948,15 +1009,17 @@ function ProposalModal({ proposal, profile, locale, busy, onClose, onApply, onEd
       {proposal.conflicts.length > 0 && <section className={styles.conflicts}><h3>{locale === "ru" ? "Нужно ваше решение" : "Your decision is needed"}</h3>{proposal.conflicts.map((conflict) => <article key={conflict.id}><strong>{conflict.title}</strong><p>{locale === "ru" ? conflict.message : conflict.kind === "active_overlap" ? "The protected time overlaps work already in progress. Pause it, finish first, or edit the new input." : conflict.blockIds.some((id) => id.startsWith("sleep-")) ? "A fixed event overlaps protected sleep. Edit the event or sleep input." : "Two fixed events overlap and cannot be moved automatically."}</p>{conflict.kind === "active_overlap" ? <div><button onClick={() => void onPause(conflict.blockIds[0])}>{locale === "ru" ? "Поставить текущее на паузу" : "Pause current"}</button><button onClick={() => void onFinishFirst(conflict.blockIds[0], conflict.blockIds[1])}>{locale === "ru" ? "Закончить текущее сначала" : "Finish current first"}</button><button onClick={onEdit}>{proposal.trigger === "sleep_changed" ? (locale === "ru" ? "Исправить сон" : "Edit sleep") : (locale === "ru" ? "Изменить вводные" : "Edit input")}</button></div> : <div><button onClick={onEdit}>{locale === "ru" ? "Исправить конфликт" : "Edit conflict"}</button></div>}</article>)}</section>}
       <section><h3>{locale === "ru" ? "Изменения" : "Changes"}</h3><div className={styles.changeList}>{proposal.changes.map((change) => <article key={change.id}>
         <span>{change.kind === "add_block" ? "+" : change.kind === "move_block" ? "→" : change.kind === "remove_block" ? "−" : change.kind === "upsert_sleep_event" ? "■" : "•"}</span>
-        <div><strong>{proposalChangeTitle(change, locale)}</strong><p>{proposalChangeReason(change, locale)}</p>{change.kind === "add_block" && <small>{formatDay(localDate(change.block, profile.timezone), locale)} · {formatTimeInTimeZone(new Date(change.block.startAt), profile.timezone)}–{formatTimeInTimeZone(new Date(change.block.endAt), profile.timezone)}</small>}{change.kind === "move_block" && <small>{formatTimeInTimeZone(new Date(change.fromStartAt), profile.timezone)} → {formatDay(formatDateInTimeZone(new Date(change.toStartAt), profile.timezone), locale)} {formatTimeInTimeZone(new Date(change.toStartAt), profile.timezone)}</small>}{change.kind === "upsert_sleep_event" && <small>{formatTimeInTimeZone(new Date(change.event.actualStartAt), profile.timezone)}–{formatTimeInTimeZone(new Date(change.event.actualEndAt ?? change.event.projectedEndAt), profile.timezone)}</small>}</div>
+        <div><strong>{proposalChangeTitle(change, locale)}</strong><p>{proposalChangeReason(change, locale)}</p>{change.kind === "add_block" && <small>{formatDay(localDate(change.block, profile.timezone), locale)} · {formatTimeInTimeZone(new Date(change.block.startAt), profile.timezone)}–{formatTimeInTimeZone(new Date(change.block.endAt), profile.timezone)}</small>}{change.kind === "move_block" && <small>{formatTimeInTimeZone(new Date(change.fromStartAt), profile.timezone)} → {formatDay(formatDateInTimeZone(new Date(change.toStartAt), profile.timezone), locale)} {formatTimeInTimeZone(new Date(change.toStartAt), profile.timezone)}</small>}{change.kind === "upsert_sleep_event" && <small>{change.event.actualStartAt && (change.event.actualEndAt ?? change.event.projectedEndAt) ? `${change.event.state === "tentative" ? (locale === "ru" ? "предварительно · " : "tentative · ") : ""}${formatTimeInTimeZone(new Date(change.event.actualStartAt), profile.timezone)}–${formatTimeInTimeZone(new Date(change.event.actualEndAt ?? change.event.projectedEndAt!), profile.timezone)}` : (locale === "ru" ? "Время неизвестно: расписание пока не перестраивается" : "Time unknown: schedule is not rebuilt yet")}</small>}</div>
       </article>)}</div></section>
       {proposal.unplaced.length > 0 && <section className={styles.unplaced}><h3>{locale === "ru" ? "Останется в очереди" : "Will stay in inbox"}</h3>{proposal.unplaced.map((item, index) => <article key={`${item.itemId}-${item.remainingMinutes}-${index}`}><strong>{item.title} · {formatDuration(item.remainingMinutes, locale)}</strong><p>{locale === "ru" ? item.reason : "No free slot satisfies availability, buffers and the protected reserve. The duration was not shortened."}</p></article>)}</section>}
+      {proposal.recoveryAdvice && <section className={styles.recoveryPanel}><h3>{locale === "ru" ? "Восстановление" : "Recovery"}</h3><p>{locale === "ru" ? `Недосып относительно цели: ${formatDuration(proposal.recoveryAdvice.deficitMinutes, locale)}. Дополнительное время распределяется максимум на ${proposal.recoveryAdvice.recoveryNights} ночи.` : `Sleep below target: ${formatDuration(proposal.recoveryAdvice.deficitMinutes, locale)}. Extra sleep opportunity is spread across up to ${proposal.recoveryAdvice.recoveryNights} nights.`}</p>{proposal.recoveryAdvice.nap ? <article><strong>{locale === "ru" ? "Можно добавить короткий сон" : "A short nap is available"}</strong><small>{formatDay(formatDateInTimeZone(new Date(proposal.recoveryAdvice.nap.startAt), profile.timezone), locale)} · {formatTimeInTimeZone(new Date(proposal.recoveryAdvice.nap.startAt), profile.timezone)}–{formatTimeInTimeZone(new Date(proposal.recoveryAdvice.nap.endAt), profile.timezone)}</small><p>{locale === "ru" ? proposal.recoveryAdvice.nap.reason : "The slot ends before 15:00 and stays at least six hours away from night sleep."}</p><button type="button" onClick={() => void onAddRecoveryNap(proposal.recoveryAdvice!.nap!)}>{locale === "ru" ? "Добавить в этот план" : "Add to this plan"}</button></article> : <p>{locale === "ru" ? "Безопасного окна для короткого дневного сна сейчас нет — оно не будет добавлено автоматически." : "There is no suitable short-nap window, so none will be added automatically."}</p>}</section>}
       <div className={styles.modalActions}><button onClick={onClose}>{locale === "ru" ? "Не применять" : "Cancel"}</button><button className={styles.primaryButton} disabled={busy || proposal.conflicts.length > 0} onClick={() => void onApply()}>{locale === "ru" ? "Применить весь план" : "Apply full plan"}</button></div>
     </div>
   </ModalShell>;
 }
 
 function SettingsModal({ profile, locale, busy, onClose, onSave }: { profile: PlannerProfile; locale: Locale; busy: boolean; onClose: () => void; onSave: (patch: Partial<PlannerProfile>) => Promise<void> }) {
+  const fixedSleep = fixedScheduleView(profile.sleepSchedule);
   const [sleepTouched, setSleepTouched] = useState(false);
   const [availabilityTouched, setAvailabilityTouched] = useState(false);
   const [form, setForm] = useState({
@@ -964,10 +1027,10 @@ function SettingsModal({ profile, locale, busy, onClose, onSave }: { profile: Pl
     horizon: profile.horizon,
     reserve: String(Math.round(profile.reserveRatio * 100)),
     buffer: String(profile.defaultBufferMinutes),
-    weekdayBedtime: profile.sleepSchedule.weekdays.bedtime,
-    weekdaySleep: String(profile.sleepSchedule.weekdays.durationMinutes),
-    weekendBedtime: profile.sleepSchedule.weekends.bedtime,
-    weekendSleep: String(profile.sleepSchedule.weekends.durationMinutes),
+    weekdayBedtime: fixedSleep.weekdays.bedtime,
+    weekdaySleep: String(fixedSleep.weekdays.durationMinutes),
+    weekendBedtime: fixedSleep.weekends.bedtime,
+    weekendSleep: String(fixedSleep.weekends.durationMinutes),
     availability: Object.fromEntries(Object.entries(profile.availability).map(([day, windows]) => [day, windows.map((window) => ({ ...window }))])),
     energyWindows: profile.energyWindows.map((window) => ({ ...window })),
   });
@@ -985,9 +1048,11 @@ function SettingsModal({ profile, locale, busy, onClose, onSave }: { profile: Pl
   }));
   return <ModalShell title={locale === "ru" ? "Настройки плана" : "Planner settings"} onClose={onClose}><form className={styles.form} onSubmit={(event) => {
     event.preventDefault();
-    const sleepSchedule = { weekdays: { bedtime: form.weekdayBedtime, durationMinutes: Number(form.weekdaySleep) }, weekends: { bedtime: form.weekendBedtime, durationMinutes: Number(form.weekendSleep) } };
+    const sleepSchedule = sleepTouched
+      ? { mode: "fixed" as const, weekdays: { bedtime: form.weekdayBedtime, durationMinutes: Number(form.weekdaySleep) }, weekends: { bedtime: form.weekendBedtime, durationMinutes: Number(form.weekendSleep) } }
+      : profile.sleepSchedule;
     void onSave({ timezone: form.timezone, horizon: form.horizon, reserveRatio: Number(form.reserve) / 100, defaultBufferMinutes: Number(form.buffer), availability: sleepTouched && !availabilityTouched ? availabilityFromSleepSchedule(sleepSchedule) : form.availability, energyWindows: form.energyWindows, sleepSchedule });
-  }}><div className={styles.formGrid}>
+  }}>{profile.sleepSchedule.mode === "adaptive" && <p className={styles.sleepHint}>{locale === "ru" ? "Сейчас включён адаптивный сон. Изменение точных полей ниже переключит режим на фиксированный; остальные настройки можно менять без переключения." : "Adaptive sleep is active. Editing the exact sleep fields below switches to fixed mode; other settings keep adaptive mode."}</p>}<div className={styles.formGrid}>
     <label>{locale === "ru" ? "Часовой пояс" : "Time zone"}<input value={form.timezone} onChange={(e) => setForm((v) => ({ ...v, timezone: e.target.value }))} /></label><label>{locale === "ru" ? "Горизонт" : "Horizon"}<select value={form.horizon} onChange={(e) => setForm((v) => ({ ...v, horizon: e.target.value as PlannerHorizon }))}><option value="week">7 days</option><option value="two_weeks">14 days</option><option value="month">30 days</option></select></label>
     <label>{locale === "ru" ? "Резерв, %" : "Reserve, %"}<input type="number" min="0" max="60" value={form.reserve} onChange={(e) => setForm((v) => ({ ...v, reserve: e.target.value }))} /></label><label>{locale === "ru" ? "Буфер, мин" : "Buffer, min"}<input type="number" min="0" max="120" value={form.buffer} onChange={(e) => setForm((v) => ({ ...v, buffer: e.target.value }))} /></label>
     <label>{locale === "ru" ? "Сон перед буднями" : "Weekday bedtime"}<input type="time" value={form.weekdayBedtime} onChange={(e) => { setSleepTouched(true); setForm((v) => ({ ...v, weekdayBedtime: e.target.value })); }} /></label><label>{locale === "ru" ? "Длительность, мин" : "Duration, min"}<input type="number" min="180" max="960" value={form.weekdaySleep} onChange={(e) => { setSleepTouched(true); setForm((v) => ({ ...v, weekdaySleep: e.target.value })); }} /></label>

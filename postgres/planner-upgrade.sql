@@ -10,7 +10,7 @@ create table if not exists public.planner_profiles (
   default_buffer_minutes integer not null default 15 check (default_buffer_minutes between 0 and 120),
   availability jsonb not null default '{}'::jsonb,
   energy_windows jsonb not null default '[]'::jsonb,
-  sleep_schedule jsonb not null default '{"weekdays":{"bedtime":"23:00","durationMinutes":480},"weekends":{"bedtime":"23:00","durationMinutes":480}}'::jsonb,
+  sleep_schedule jsonb not null default '{"mode":"fixed","weekdays":{"bedtime":"23:00","durationMinutes":480},"weekends":{"bedtime":"23:00","durationMinutes":480}}'::jsonb,
   assistant_setup_version integer not null default 0,
   revision bigint not null default 0,
   onboarding_completed boolean not null default false,
@@ -20,8 +20,11 @@ create table if not exists public.planner_profiles (
 
 alter table public.planner_profiles
   add column if not exists sleep_schedule jsonb not null
-    default '{"weekdays":{"bedtime":"23:00","durationMinutes":480},"weekends":{"bedtime":"23:00","durationMinutes":480}}'::jsonb,
+    default '{"mode":"fixed","weekdays":{"bedtime":"23:00","durationMinutes":480},"weekends":{"bedtime":"23:00","durationMinutes":480}}'::jsonb,
   add column if not exists assistant_setup_version integer not null default 0;
+
+alter table public.planner_profiles alter column sleep_schedule set default
+  '{"mode":"fixed","weekdays":{"bedtime":"23:00","durationMinutes":480},"weekends":{"bedtime":"23:00","durationMinutes":480}}'::jsonb;
 
 create table if not exists public.planner_items (
   app_user_id uuid not null references public.app_users(id) on delete cascade,
@@ -113,17 +116,62 @@ create table if not exists public.planner_legacy_imports (
 create table if not exists public.planner_sleep_events (
   app_user_id uuid not null references public.app_users(id) on delete cascade,
   wake_date date not null,
-  actual_start_at timestamptz not null,
-  projected_end_at timestamptz not null,
+  event_kind text not null default 'sleep_change' check (event_kind in ('sleep_change', 'check_in')),
+  state text not null default 'confirmed' check (state in ('tentative', 'confirmed', 'completed')),
+  actual_start_at timestamptz null,
+  projected_end_at timestamptz null,
   actual_end_at timestamptz null,
+  estimated_start_from_at timestamptz null,
+  estimated_start_to_at timestamptz null,
+  restedness text null check (restedness is null or restedness in ('not_rested', 'okay', 'well_rested')),
+  recovery_night boolean not null default false,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   primary key (app_user_id, wake_date),
   constraint planner_sleep_events_time_check check (
-    projected_end_at > actual_start_at
-    and (actual_end_at is null or actual_end_at > actual_start_at)
+    (projected_end_at is null or (actual_start_at is not null and projected_end_at > actual_start_at))
+    and (actual_end_at is null or (actual_start_at is not null and actual_end_at > actual_start_at))
+    and ((estimated_start_from_at is null and estimated_start_to_at is null)
+      or (estimated_start_from_at is not null and estimated_start_to_at is not null
+        and estimated_start_to_at >= estimated_start_from_at))
   )
 );
+
+alter table public.planner_sleep_events
+  add column if not exists event_kind text not null default 'sleep_change',
+  add column if not exists state text not null default 'confirmed',
+  add column if not exists estimated_start_from_at timestamptz null,
+  add column if not exists estimated_start_to_at timestamptz null,
+  add column if not exists restedness text null,
+  add column if not exists recovery_night boolean not null default false;
+
+alter table public.planner_sleep_events alter column actual_start_at drop not null;
+alter table public.planner_sleep_events alter column projected_end_at drop not null;
+alter table public.planner_sleep_events drop constraint if exists planner_sleep_events_time_check;
+alter table public.planner_sleep_events add constraint planner_sleep_events_time_check check (
+  (projected_end_at is null or (actual_start_at is not null and projected_end_at > actual_start_at))
+  and (actual_end_at is null or (actual_start_at is not null and actual_end_at > actual_start_at))
+  and ((estimated_start_from_at is null and estimated_start_to_at is null)
+    or (estimated_start_from_at is not null and estimated_start_to_at is not null
+      and estimated_start_to_at >= estimated_start_from_at))
+);
+
+do $$
+begin
+  if not exists (select 1 from pg_constraint where conname = 'planner_sleep_events_event_kind_check') then
+    alter table public.planner_sleep_events add constraint planner_sleep_events_event_kind_check
+      check (event_kind in ('sleep_change', 'check_in'));
+  end if;
+  if not exists (select 1 from pg_constraint where conname = 'planner_sleep_events_state_check') then
+    alter table public.planner_sleep_events add constraint planner_sleep_events_state_check
+      check (state in ('tentative', 'confirmed', 'completed'));
+  end if;
+  if not exists (select 1 from pg_constraint where conname = 'planner_sleep_events_restedness_check') then
+    alter table public.planner_sleep_events add constraint planner_sleep_events_restedness_check
+      check (restedness is null or restedness in ('not_rested', 'okay', 'well_rested'));
+  end if;
+end
+$$;
 create index if not exists planner_sleep_events_user_range_idx
   on public.planner_sleep_events(app_user_id, wake_date desc);
 

@@ -6,7 +6,7 @@ import {
   buildAuthRateLimitContext,
   recordAuthRateEvent,
 } from "@/lib/auth/rate-limit";
-import { assertPlannerRevision, plannerErrorResponse, plannerUnauthorizedResponse } from "@/lib/planner/api";
+import { assertPlannerCsrf, assertPlannerRevision, plannerErrorResponse, plannerUnauthorizedResponse } from "@/lib/planner/api";
 import { getPlannerStore, PlannerInvalidPasswordError } from "@/lib/planner/store";
 import { getRequestUser } from "@/lib/request-user";
 import { publishRealtimeEvent } from "@/lib/realtime";
@@ -15,6 +15,7 @@ import { getOriginClientId } from "@/lib/realtime-targets";
 export async function POST(request: NextRequest) {
   const user = await getRequestUser(request);
   if (!user) return plannerUnauthorizedResponse();
+  assertPlannerCsrf(request);
   const context = buildAuthRateLimitContext({ action: "planner_reset", request, email: user.email });
   try {
     await assertAuthRateLimit(context);

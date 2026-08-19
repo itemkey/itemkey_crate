@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 
-import { assertPlannerRevision, plannerErrorResponse, plannerUnauthorizedResponse } from "@/lib/planner/api";
+import { assertPlannerCsrf, assertPlannerRevision, plannerErrorResponse, plannerUnauthorizedResponse } from "@/lib/planner/api";
 import { getPlannerStore } from "@/lib/planner/store";
 import { getRequestUser } from "@/lib/request-user";
 import { publishRealtimeEvent } from "@/lib/realtime";
@@ -12,6 +12,7 @@ export async function POST(request: NextRequest, context: Context) {
   try {
     const user = await getRequestUser(request);
     if (!user) return plannerUnauthorizedResponse();
+    assertPlannerCsrf(request);
     const { id } = await context.params;
     const body = (await request.json()) as { action?: unknown; minutes?: unknown; expectedRevision?: unknown };
     if (typeof body.action !== "string") throw new Error("Не указано действие.");

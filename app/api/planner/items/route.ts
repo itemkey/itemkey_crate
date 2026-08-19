@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { randomUUID } from "node:crypto";
 
-import { assertPlannerRevision, plannerErrorResponse, plannerUnauthorizedResponse } from "@/lib/planner/api";
+import { assertPlannerCsrf, assertPlannerRevision, plannerErrorResponse, plannerUnauthorizedResponse } from "@/lib/planner/api";
 import { normalizePlannerItem } from "@/lib/planner/engine";
 import { getPlannerStore } from "@/lib/planner/store";
 import type { PlannerItem } from "@/lib/planner/types";
@@ -24,6 +24,7 @@ export async function POST(request: NextRequest) {
   try {
     const user = await getRequestUser(request);
     if (!user) return plannerUnauthorizedResponse();
+    assertPlannerCsrf(request);
     const body = (await request.json()) as { expectedRevision?: unknown; item?: Partial<PlannerItem> };
     if (!body.item || typeof body.item.title !== "string") {
       throw new Error("Укажите название дела.");

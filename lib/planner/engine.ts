@@ -16,7 +16,7 @@ import {
   type PlannerTimeWindow,
   type PlannerUnplaced,
 } from "./types.ts";
-import { buildPlannerSleepBlocks, normalizeSleepSchedule } from "./sleep.ts";
+import { buildPlannerSleepBlocks, buildSleepRecoveryAdvice, normalizePlannerSleepEvent, normalizeSleepSchedule } from "./sleep.ts";
 import {
   addIsoMinutes,
   addPlannerDays,
@@ -182,6 +182,15 @@ function parseDuration(text: string): number | undefined {
   return undefined;
 }
 
+function parseSleepDurationRange(text: string): { minMinutes: number; maxMinutes: number } | undefined {
+  const match = text.match(/(\d+(?:[.,]\d+)?)\s*(?:-|—|–|до|to)\s*(\d+(?:[.,]\d+)?)\s*(?:ч(?:ас(?:а|ов)?)?|h(?:ours?)?)/i);
+  if (!match) return undefined;
+  const first = Math.round(Number(match[1].replace(",", ".")) * 60);
+  const second = Math.round(Number(match[2].replace(",", ".")) * 60);
+  if (!Number.isFinite(first) || !Number.isFinite(second)) return undefined;
+  return { minMinutes: Math.min(first, second), maxMinutes: Math.max(first, second) };
+}
+
 function parseTimeRange(text: string): { start: string; end: string } | undefined {
   const match = text.match(/(?:с|from)?\s*(\d{1,2})(?::([0-5]\d))?\s*(?:-|—|–|до|to)\s*(\d{1,2})(?::([0-5]\d))?/i);
   if (!match) return undefined;
@@ -295,16 +304,47 @@ export function parsePlannerCommands(
 
 export function parseSleepCommand(command: string): PlannerSleepParseResult {
   const text = command.trim();
+  const lower = text.toLocaleLowerCase();
+  const durationRange = parseSleepDurationRange(text);
+  const adaptive = /(?:нет|без|не имею|нестабильн|шатк|плавающ).{0,24}(?:график|режим)|(?:no|without|irregular|unstable|flexible).{0,24}(?:schedule|sleep)/i.test(lower)
+    || Boolean(durationRange);
   const timeMatch = text.match(/(?:лож(?:усь|иться|усь спать)|спать|bed(?:time)?|sleep)\D{0,20}(\d{1,2})(?::([0-5]\d))?/i)
     ?? text.match(/\b(?:в|at)\s*(\d{1,2})(?::([0-5]\d))?/i);
   const bedtime = timeMatch
     ? normalizePlannerTime(`${String(Number(timeMatch[1])).padStart(2, "0")}:${timeMatch[2] ?? "00"}`)
     : undefined;
-  const durationMinutes = parseDuration(text);
+  const durationMinutes = durationRange ? undefined : parseDuration(text);
+  const wakeDayPart = /(?:ранн.{0,8}утр|early morning)/i.test(lower)
+    ? "early_morning" as const
+    : /(?:ближе к полуд|поздн.{0,8}утр|late morning|near noon)/i.test(lower)
+      ? "late_morning" as const
+      : /(?:утр|morning)/i.test(lower)
+        ? "morning" as const
+        : undefined;
+  const estimatedBedtimeRange = !durationRange && /(?:лягу|ложусь|усну|bed|sleep)/i.test(lower)
+    ? parseTimeRange(text)
+    : undefined;
+  const changeKind = /(?:ложусь сейчас|иду спать|going to bed now)/i.test(lower)
+    ? "bedtime_now" as const
+    : /(?:проснул|проснулась|уже проснулся|woke up|already awake)/i.test(lower)
+      ? "wake_now" as const
+      : /(?:лягу позже|поздно лягу|лягу примерно|время неизвестно|sleep later|rough bedtime|bedtime unknown)/i.test(lower) || Boolean(estimatedBedtimeRange)
+        ? "later_unknown" as const
+        : undefined;
   const ambiguities: string[] = [];
-  if (!bedtime) ambiguities.push("Не удалось определить время отхода ко сну.");
-  if (!durationMinutes) ambiguities.push("Не удалось определить обычную длительность сна.");
-  return { bedtime, durationMinutes, ambiguities };
+  if (!adaptive && !bedtime && !changeKind) ambiguities.push("Не удалось определить время отхода ко сну.");
+  if (!durationMinutes && !durationRange && !changeKind) ambiguities.push("Не удалось определить обычную длительность сна или её диапазон.");
+  if (adaptive && !wakeDayPart) ambiguities.push("Укажите удобную часть дня для подъёма: раннее утро, утро или ближе к полудню.");
+  return {
+    mode: changeKind ? undefined : adaptive ? "adaptive" : bedtime || durationMinutes ? "fixed" : undefined,
+    bedtime,
+    durationMinutes,
+    durationRange,
+    wakeDayPart,
+    changeKind,
+    estimatedBedtimeRange,
+    ambiguities,
+  };
 }
 
 function rangesOverlap(left: Interval, right: Interval): boolean {
@@ -570,6 +610,9 @@ export function buildPlannerProposal(input: PlannerEngineInput): PlannerProposal
     ...(input.profilePatch ?? {}),
     revision: baseProfile.revision,
   });
+  if (profile.sleepSchedule.mode === "adaptive" && profile.sleepSchedule.requiresHealthyMinimumConfirmation) {
+    throw new Error("Подтвердите пробную цель 7 часов или выберите ручной фиксированный режим.");
+  }
   const now = input.now ?? new Date();
   const startDate = formatDateInTimeZone(now, profile.timezone);
   const endDate = addPlannerDays(startDate, horizonDays(profile.horizon) - 1);
@@ -599,16 +642,35 @@ export function buildPlannerProposal(input: PlannerEngineInput): PlannerProposal
   }
 
   const sleepEvents = [...(input.sleepEvents ?? [])];
+  let normalizedSleepEvent: PlannerSleepEvent | undefined;
   if (input.sleepEvent) {
-    const index = sleepEvents.findIndex((event) => event.wakeDate === input.sleepEvent!.wakeDate);
-    if (index >= 0) sleepEvents[index] = input.sleepEvent;
-    else sleepEvents.push(input.sleepEvent);
+    const eventChange = normalizePlannerSleepEvent(input.sleepEvent);
+    normalizedSleepEvent = eventChange;
+    const index = sleepEvents.findIndex((event) => event.wakeDate === eventChange.wakeDate);
+    if (index >= 0) sleepEvents[index] = eventChange;
+    else sleepEvents.push(eventChange);
     changes.push({
-      id: uniqueId("change-sleep", input.sleepEvent.wakeDate),
+      id: uniqueId("change-sleep", eventChange.wakeDate),
       kind: "upsert_sleep_event",
-      event: input.sleepEvent,
-      reason: "Фактический сон учтён; обычный режим следующих ночей не меняется.",
+      event: eventChange,
+      reason: eventChange.state === "tentative"
+        ? "Сохранена предварительная оценка этой ночи; постоянный режим не меняется."
+        : "Фактический сон учтён; обычный режим следующих ночей не меняется.",
     });
+  }
+
+  if (input.sleepEvent?.state === "tentative" && !input.sleepEvent.actualStartAt) {
+    return {
+      baseRevision: baseProfile.revision,
+      trigger,
+      normalizedDraft,
+      normalizedDrafts: normalizedDrafts.length > 1 ? normalizedDrafts : undefined,
+      changes,
+      conflicts,
+      unplaced,
+      horizonStart: startDate,
+      horizonEnd: endDate,
+    };
   }
 
   const calculatedSleepBlocks = buildPlannerSleepBlocks(profile, sleepEvents, startDate, endDate);
@@ -628,6 +690,9 @@ export function buildPlannerProposal(input: PlannerEngineInput): PlannerProposal
     actualStartAt: block.actualStartAt,
     actualEndAt: block.actualEndAt,
   }));
+  const recoveryAdvice = normalizedSleepEvent
+    ? buildSleepRecoveryAdvice(profile, normalizedSleepEvent, [...workingBlocks, ...sleepBlocks])
+    : undefined;
 
   if (input.rebuildFuture) {
     const rebuilding = workingBlocks.filter((block) =>
@@ -851,6 +916,7 @@ export function buildPlannerProposal(input: PlannerEngineInput): PlannerProposal
     unplaced,
     horizonStart: startDate,
     horizonEnd: endDate,
+    recoveryAdvice,
   };
 }
 

@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 
-import { plannerErrorResponse, plannerUnauthorizedResponse } from "@/lib/planner/api";
+import { assertPlannerCsrf, plannerErrorResponse, plannerUnauthorizedResponse } from "@/lib/planner/api";
 import { getPlannerStore } from "@/lib/planner/store";
 import type { PlannerDraft, PlannerProfile, PlannerProposal, PlannerSleepEvent } from "@/lib/planner/types";
 import { getRequestUser } from "@/lib/request-user";
@@ -9,6 +9,7 @@ export async function POST(request: NextRequest) {
   try {
     const user = await getRequestUser(request);
     if (!user) return plannerUnauthorizedResponse();
+    assertPlannerCsrf(request);
     const body = (await request.json()) as {
       command?: unknown;
       draft?: PlannerDraft;

@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 
-import { assertPlannerRevision, plannerErrorResponse, plannerUnauthorizedResponse } from "@/lib/planner/api";
+import { assertPlannerCsrf, assertPlannerRevision, plannerErrorResponse, plannerUnauthorizedResponse } from "@/lib/planner/api";
 import { getPlannerLegacyImportData, listPlannerLegacySources } from "@/lib/planner/legacy";
 import { getPlannerStore } from "@/lib/planner/store";
 import { getRequestUser } from "@/lib/request-user";
@@ -23,6 +23,7 @@ export async function POST(request: NextRequest) {
   try {
     const user = await getRequestUser(request);
     if (!user) return plannerUnauthorizedResponse();
+    assertPlannerCsrf(request);
     const body = (await request.json()) as { sourceKeys?: unknown; expectedRevision?: unknown };
     if (!Array.isArray(body.sourceKeys) || !body.sourceKeys.every((key) => typeof key === "string")) {
       throw new Error("Выберите расписания для импорта.");

@@ -439,7 +439,7 @@ create table public.planner_profiles (
   default_buffer_minutes integer not null default 15 check (default_buffer_minutes between 0 and 120),
   availability jsonb not null default '{}'::jsonb,
   energy_windows jsonb not null default '[]'::jsonb,
-  sleep_schedule jsonb not null default '{"weekdays":{"bedtime":"23:00","durationMinutes":480},"weekends":{"bedtime":"23:00","durationMinutes":480}}'::jsonb,
+  sleep_schedule jsonb not null default '{"mode":"fixed","weekdays":{"bedtime":"23:00","durationMinutes":480},"weekends":{"bedtime":"23:00","durationMinutes":480}}'::jsonb,
   assistant_setup_version integer not null default 0,
   revision bigint not null default 0,
   onboarding_completed boolean not null default false,
@@ -550,15 +550,24 @@ create table public.planner_legacy_imports (
 create table public.planner_sleep_events (
   app_user_id uuid not null references public.app_users(id) on delete cascade,
   wake_date date not null,
-  actual_start_at timestamptz not null,
-  projected_end_at timestamptz not null,
+  event_kind text not null default 'sleep_change' check (event_kind in ('sleep_change', 'check_in')),
+  state text not null default 'confirmed' check (state in ('tentative', 'confirmed', 'completed')),
+  actual_start_at timestamptz null,
+  projected_end_at timestamptz null,
   actual_end_at timestamptz null,
+  estimated_start_from_at timestamptz null,
+  estimated_start_to_at timestamptz null,
+  restedness text null check (restedness is null or restedness in ('not_rested', 'okay', 'well_rested')),
+  recovery_night boolean not null default false,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   primary key (app_user_id, wake_date),
   constraint planner_sleep_events_time_check check (
-    projected_end_at > actual_start_at
-    and (actual_end_at is null or actual_end_at > actual_start_at)
+    (projected_end_at is null or (actual_start_at is not null and projected_end_at > actual_start_at))
+    and (actual_end_at is null or (actual_start_at is not null and actual_end_at > actual_start_at))
+    and ((estimated_start_from_at is null and estimated_start_to_at is null)
+      or (estimated_start_from_at is not null and estimated_start_to_at is not null
+        and estimated_start_to_at >= estimated_start_from_at))
   )
 );
 

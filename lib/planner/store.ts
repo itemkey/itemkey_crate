@@ -6,7 +6,7 @@ import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { getPostgresPool } from "@/lib/db/postgres";
 import { assertValidPasswordCandidate, verifyPassword } from "@/lib/auth/password";
 import { applyProposalChanges, buildPlannerProposal, normalizePlannerItem, normalizePlannerProfile, plannerCompletionSuggestion } from "@/lib/planner/engine";
-import { buildPlannerSleepBlocks } from "@/lib/planner/sleep";
+import { buildPlannerSleepBlocks, normalizePlannerSleepEvent, plannerSleepDurationSuggestion, plannerSleepHealthNotice, sleepWindowForWakeDate } from "@/lib/planner/sleep";
 import {
   createDefaultPlannerProfile,
   type PlannerBlock,
@@ -17,6 +17,8 @@ import {
   type PlannerProposal,
   type PlannerProposalInput,
   type PlannerSleepEvent,
+  type PlannerSleepCheckInInput,
+  type PlannerSleepCheckInResult,
 } from "@/lib/planner/types";
 import { addIsoMinutes, isoDurationMinutes } from "@/lib/planner/time";
 
@@ -40,9 +42,15 @@ type ProfileRow = {
 
 type SleepEventRow = {
   wake_date: Date | string;
-  actual_start_at: Date | string;
-  projected_end_at: Date | string;
+  event_kind: PlannerSleepEvent["eventKind"];
+  state: PlannerSleepEvent["state"];
+  actual_start_at: Date | string | null;
+  projected_end_at: Date | string | null;
   actual_end_at: Date | string | null;
+  estimated_start_from_at: Date | string | null;
+  estimated_start_to_at: Date | string | null;
+  restedness: PlannerSleepEvent["restedness"] | null;
+  recovery_night: boolean;
   created_at: Date | string;
   updated_at: Date | string;
 };
@@ -127,9 +135,15 @@ function profileFromRow(row: ProfileRow): PlannerProfile {
 function sleepEventFromRow(row: SleepEventRow): PlannerSleepEvent {
   return {
     wakeDate: row.wake_date instanceof Date ? row.wake_date.toISOString().slice(0, 10) : String(row.wake_date).slice(0, 10),
-    actualStartAt: toIso(row.actual_start_at)!,
-    projectedEndAt: toIso(row.projected_end_at)!,
+    eventKind: row.event_kind,
+    state: row.state,
+    actualStartAt: toIso(row.actual_start_at),
+    projectedEndAt: toIso(row.projected_end_at),
     actualEndAt: toIso(row.actual_end_at),
+    estimatedStartFromAt: toIso(row.estimated_start_from_at),
+    estimatedStartToAt: toIso(row.estimated_start_to_at),
+    restedness: row.restedness ?? undefined,
+    recoveryNight: row.recovery_night,
     createdAt: toIso(row.created_at),
     updatedAt: toIso(row.updated_at),
   };
@@ -222,7 +236,8 @@ async function ensureProfile(executor: SqlExecutor, userId: string): Promise<Pla
 
 async function listSleepEvents(executor: SqlExecutor, userId: string): Promise<PlannerSleepEvent[]> {
   const { rows } = await executor.query<SleepEventRow>(
-    `select wake_date,actual_start_at,projected_end_at,actual_end_at,created_at,updated_at
+    `select wake_date,event_kind,state,actual_start_at,projected_end_at,actual_end_at,
+       estimated_start_from_at,estimated_start_to_at,restedness,recovery_night,created_at,updated_at
      from public.planner_sleep_events where app_user_id=$1::uuid order by wake_date asc`,
     [userId]
   );
@@ -230,14 +245,22 @@ async function listSleepEvents(executor: SqlExecutor, userId: string): Promise<P
 }
 
 async function insertSleepEvent(executor: SqlExecutor, userId: string, event: PlannerSleepEvent): Promise<void> {
+  const normalized = normalizePlannerSleepEvent(event);
   await executor.query(
     `insert into public.planner_sleep_events(
-       app_user_id,wake_date,actual_start_at,projected_end_at,actual_end_at
-     ) values($1::uuid,$2::date,$3::timestamptz,$4::timestamptz,$5::timestamptz)
+       app_user_id,wake_date,event_kind,state,actual_start_at,projected_end_at,actual_end_at,
+       estimated_start_from_at,estimated_start_to_at,restedness,recovery_night
+     ) values($1::uuid,$2::date,$3::text,$4::text,$5::timestamptz,$6::timestamptz,$7::timestamptz,
+       $8::timestamptz,$9::timestamptz,$10::text,$11::boolean)
      on conflict(app_user_id,wake_date) do update set
-       actual_start_at=excluded.actual_start_at,projected_end_at=excluded.projected_end_at,
-       actual_end_at=excluded.actual_end_at`,
-    [userId,event.wakeDate,event.actualStartAt,event.projectedEndAt,event.actualEndAt ?? null]
+       event_kind=excluded.event_kind,state=excluded.state,actual_start_at=excluded.actual_start_at,
+       projected_end_at=excluded.projected_end_at,actual_end_at=excluded.actual_end_at,
+       estimated_start_from_at=excluded.estimated_start_from_at,
+       estimated_start_to_at=excluded.estimated_start_to_at,restedness=excluded.restedness,
+       recovery_night=excluded.recovery_night`,
+    [userId,normalized.wakeDate,normalized.eventKind,normalized.state,normalized.actualStartAt ?? null,normalized.projectedEndAt ?? null,
+      normalized.actualEndAt ?? null,normalized.estimatedStartFromAt ?? null,normalized.estimatedStartToAt ?? null,
+      normalized.restedness ?? null,Boolean(normalized.recoveryNight)]
   );
 }
 
@@ -369,6 +392,7 @@ export type PlannerStore = {
   moveBlock(userId: string, blockId: string, startAt: string, endAt: string, expectedRevision: number): Promise<{ block: PlannerBlock; revision: number }>;
   undoChangeSet(userId: string, changeSetId: string): Promise<number>;
   importLegacy(userId: string, sources: Array<{ sourceKey: string; title: string; items: PlannerItem[]; blocks: PlannerBlock[] }>, expectedRevision: number): Promise<{ revision: number; importedSources: number; importedItems: number; importedBlocks: number }>;
+  checkInSleep(userId: string, input: PlannerSleepCheckInInput): Promise<PlannerSleepCheckInResult>;
   resetPlanner(userId: string, password: unknown, expectedRevision: number): Promise<number>;
 };
 
@@ -401,13 +425,18 @@ function createPlannerStore(): PlannerStore {
         timeZone: profile.timezone, year: "numeric", month: "2-digit", day: "2-digit",
       }).format(new Date());
       const sleepBlocks = buildPlannerSleepBlocks(profile, sleepEvents, today, new Date(Date.now() + 35 * 86_400_000).toISOString().slice(0, 10));
-      return { profile, items, blocks, sleepEvents, sleepBlocks, latestChangeSetId: latest.rows[0]?.id, durationSuggestions };
+      const sleepDurationSuggestion = plannerSleepDurationSuggestion(profile.sleepSchedule, sleepEvents, today);
+      const sleepHealthNotice = plannerSleepHealthNotice(profile, sleepEvents, today);
+      return { profile, items, blocks, sleepEvents, sleepBlocks, latestChangeSetId: latest.rows[0]?.id, durationSuggestions, sleepDurationSuggestion, sleepHealthNotice };
     },
     async updateSettings(userId, patch, expectedRevision) {
       return withTransaction(pool, async (client) => {
         const current = await lockProfile(client, userId);
         if (current.revision !== expectedRevision) throw new PlannerRevisionError();
         const next = normalizePlannerProfile({ ...current, ...patch, userId, revision: current.revision + 1 });
+        if (next.sleepSchedule.mode === "adaptive" && next.sleepSchedule.requiresHealthyMinimumConfirmation) {
+          throw new Error("Подтвердите пробную цель 7 часов или выберите ручной фиксированный режим.");
+        }
         const { rows } = await client.query<ProfileRow>(
           `update public.planner_profiles set timezone=$2::text,horizon=$3::text,
              reserve_ratio=$4::numeric,default_buffer_minutes=$5::integer,
@@ -696,6 +725,47 @@ function createPlannerStore(): PlannerStore {
         }
         const revision = importedSources > 0 ? await bumpRevision(client, userId) : profile.revision;
         return { revision, importedSources, importedItems, importedBlocks };
+      });
+    },
+    async checkInSleep(userId, input) {
+      return withTransaction(pool, async (client) => {
+        const profile = await lockProfile(client, userId);
+        if (profile.revision !== input.expectedRevision) throw new PlannerRevisionError();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(input.wakeDate)) throw new Error("Некорректная дата пробуждения.");
+        if (!(["not_rested", "okay", "well_rested"] as const).includes(input.restedness)) {
+          throw new Error("Выберите, насколько удалось выспаться.");
+        }
+        const events = await listSleepEvents(client, userId);
+        const existing = events.find((event) => event.wakeDate === input.wakeDate);
+        if (existing?.state === "tentative") {
+          throw new Error("Сначала подтвердите фактическое засыпание и пробуждение через «Уже проснулся».");
+        }
+        const planned = sleepWindowForWakeDate(profile.sleepSchedule, input.wakeDate, profile.timezone);
+        const derivedBlock = buildPlannerSleepBlocks(profile, events, input.wakeDate, input.wakeDate)
+          .find((block) => block.wakeDate === input.wakeDate);
+        const actualStartAt = input.actualStartAt
+          ? new Date(input.actualStartAt).toISOString()
+          : existing?.actualStartAt ?? planned.startAt;
+        const actualEndAt = input.actualEndAt
+          ? new Date(input.actualEndAt).toISOString()
+          : existing?.actualEndAt ?? existing?.projectedEndAt ?? planned.endAt;
+        if (new Date(actualEndAt) <= new Date(actualStartAt)) throw new Error("Пробуждение должно быть позже засыпания.");
+        const event: PlannerSleepEvent = {
+          ...existing,
+          wakeDate: input.wakeDate,
+          eventKind: existing?.eventKind ?? "check_in",
+          state: "completed",
+          actualStartAt,
+          projectedEndAt: actualEndAt,
+          actualEndAt,
+          restedness: input.restedness,
+          recoveryNight: existing?.recoveryNight ?? derivedBlock?.recoveryNight,
+        };
+        await insertSleepEvent(client, userId, event);
+        const revision = await bumpRevision(client, userId);
+        const nextEvents = [...events.filter((candidate) => candidate.wakeDate !== event.wakeDate), event];
+        const suggestion = plannerSleepDurationSuggestion(profile.sleepSchedule, nextEvents, input.wakeDate);
+        return { event, revision, suggestion };
       });
     },
     async resetPlanner(userId, rawPassword, expectedRevision) {

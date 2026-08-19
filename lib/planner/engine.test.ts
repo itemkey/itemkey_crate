@@ -9,7 +9,18 @@ import {
   parseSleepCommand,
   plannerCompletionSuggestion,
 } from "./engine.ts";
-import { createPlannerSleepEvent } from "./sleep.ts";
+import {
+  buildPlannerSleepBlocks,
+  buildSleepRecoveryAdvice,
+  chooseAdaptiveSleepTarget,
+  createAdaptiveSleepSchedule,
+  createPlannerSleepEvent,
+  createTentativeSleepEvent,
+  deriveAdaptiveWakeAnchor,
+  plannerSleepDurationSuggestion,
+  plannerSleepHealthNotice,
+  sleepRuleForWakeDate,
+} from "./sleep.ts";
 import { createDefaultPlannerProfile, type PlannerBlock, type PlannerItem } from "./types.ts";
 import { formatDateInTimeZone, formatTimeInTimeZone, plannerTimeToMinutes, zonedPlannerDateTimeToUtc } from "./time.ts";
 
@@ -305,8 +316,8 @@ test("protected sleep excludes task placement", () => {
   const added = proposal.changes.find((change) => change.kind === "add_block");
   assert.ok(added && added.kind === "add_block");
   assert.ok(
-    new Date(added.block.endAt) <= new Date(sleepEvent.actualStartAt)
-      || new Date(added.block.startAt) >= new Date(sleepEvent.projectedEndAt)
+    new Date(added.block.endAt) <= new Date(sleepEvent.actualStartAt!)
+      || new Date(added.block.startAt) >= new Date(sleepEvent.projectedEndAt!)
   );
 });
 
@@ -318,8 +329,8 @@ test("late bedtime preserves sleep duration without changing the regular schedul
     actualStartAt: "2026-08-19T23:15:00.000Z",
   });
   assert.equal(
-    (new Date(event.projectedEndAt).getTime() - new Date(event.actualStartAt).getTime()) / 60_000,
-    profile.sleepSchedule.weekdays.durationMinutes
+    (new Date(event.projectedEndAt!).getTime() - new Date(event.actualStartAt!).getTime()) / 60_000,
+    sleepRuleForWakeDate(profile.sleepSchedule, "2026-08-20").durationMinutes
   );
   assert.deepEqual(profile.sleepSchedule, before);
 });
@@ -418,8 +429,13 @@ test("multiline RU and EN parsing marks only genuinely ambiguous rows", () => {
 
 test("sleep phrases parse deterministically and require missing fields", () => {
   assert.deepEqual(parseSleepCommand("Ложусь спать в 23:30, сплю 8 часов"), {
+    mode: "fixed",
     bedtime: "23:30",
     durationMinutes: 480,
+    durationRange: undefined,
+    wakeDayPart: undefined,
+    changeKind: undefined,
+    estimatedBedtimeRange: undefined,
     ambiguities: [],
   });
   assert.ok(parseSleepCommand("обычный сон").ambiguities.length >= 2);
@@ -463,4 +479,179 @@ test("identical input creates an identical proposal", () => {
     rebuildFuture: true,
   };
   assert.deepEqual(buildPlannerProposal(input), buildPlannerProposal(input));
+});
+
+test("adaptive sleep target follows the healthy deterministic range rules", () => {
+  assert.deepEqual(chooseAdaptiveSleepTarget(5 * 60, 10 * 60), {
+    minMinutes: 300, maxMinutes: 600, targetDurationMinutes: 480, requiresHealthyMinimumConfirmation: false,
+  });
+  assert.equal(chooseAdaptiveSleepTarget(6 * 60, 7 * 60).targetDurationMinutes, 420);
+  assert.equal(chooseAdaptiveSleepTarget(7 * 60, 9 * 60).targetDurationMinutes, 480);
+  assert.equal(chooseAdaptiveSleepTarget(9 * 60, 10 * 60).targetDurationMinutes, 540);
+  assert.equal(chooseAdaptiveSleepTarget(5 * 60, 6 * 60).requiresHealthyMinimumConfirmation, true);
+  assert.equal(chooseAdaptiveSleepTarget(5 * 60, 6 * 60).targetDurationMinutes, 420);
+  const unconfirmed = createAdaptiveSleepSchedule({ minMinutes: 5 * 60, maxMinutes: 6 * 60, dayPart: "morning" });
+  assert.throws(() => buildPlannerProposal({
+    profile,
+    profilePatch: { sleepSchedule: unconfirmed },
+    items: [],
+    blocks: [],
+    trigger: "assistant_setup",
+    now: new Date("2026-08-19T04:00:00.000Z"),
+  }), /Подтвердите/);
+});
+
+test("adaptive anchor uses a day part and moves earlier for a recurring morning commitment", () => {
+  assert.equal(deriveAdaptiveWakeAnchor("morning", 60), "09:00");
+  assert.equal(deriveAdaptiveWakeAnchor("late_morning", 60, [{
+    kind: "fixed_event",
+    recurrence: { frequency: "custom", weekdays: [1, 2, 3, 4, 5], startTime: "08:30" },
+  }]), "07:30");
+});
+
+test("adaptive RU and EN sleep phrases expose ranges, day parts and tentative changes", () => {
+  const adaptive = parseSleepCommand("Графика сна нет, обычно хватает 7–9 часов, хочу вставать утром");
+  assert.equal(adaptive.mode, "adaptive");
+  assert.deepEqual(adaptive.durationRange, { minMinutes: 420, maxMinutes: 540 });
+  assert.equal(adaptive.wakeDayPart, "morning");
+  assert.equal(adaptive.ambiguities.length, 0);
+
+  const english = parseSleepCommand("No regular sleep schedule, 7 to 9 hours, early morning");
+  assert.equal(english.mode, "adaptive");
+  assert.equal(english.wakeDayPart, "early_morning");
+
+  const late = parseSleepCommand("Сегодня лягу примерно с 3 до 6");
+  assert.equal(late.changeKind, "later_unknown");
+  assert.deepEqual(late.estimatedBedtimeRange, { start: "03:00", end: "06:00" });
+});
+
+test("tentative late bedtime uses the midpoint and stays explicitly tentative", () => {
+  const adaptiveProfile = {
+    ...profile,
+    sleepSchedule: createAdaptiveSleepSchedule({
+      minMinutes: 5 * 60,
+      maxMinutes: 10 * 60,
+      dayPart: "morning",
+    }),
+  };
+  const event = createTentativeSleepEvent({
+    profile: adaptiveProfile,
+    wakeDate: "2026-08-20",
+    estimatedStartFromAt: "2026-08-20T00:00:00.000Z",
+    estimatedStartToAt: "2026-08-20T03:00:00.000Z",
+  });
+  assert.equal(event.state, "tentative");
+  assert.equal(event.actualStartAt, "2026-08-20T01:30:00.000Z");
+  const block = buildPlannerSleepBlocks(adaptiveProfile, [event], "2026-08-20", "2026-08-20")
+    .find((candidate) => candidate.wakeDate === "2026-08-20");
+  assert.equal(block?.tentative, true);
+  assert.equal((new Date(block!.endAt).getTime() - new Date(block!.startAt).getTime()) / 60_000, 480);
+});
+
+test("late adaptive sleep returns to the wake anchor by no more than one hour per day", () => {
+  const adaptiveProfile = {
+    ...profile,
+    sleepSchedule: createAdaptiveSleepSchedule({
+      minMinutes: 7 * 60,
+      maxMinutes: 10 * 60,
+      dayPart: "morning",
+    }),
+  };
+  const disruption = createPlannerSleepEvent({
+    profile: adaptiveProfile,
+    wakeDate: "2026-08-20",
+    actualStartAt: "2026-08-20T03:00:00.000Z",
+    actualEndAt: "2026-08-20T11:00:00.000Z",
+  });
+  const blocks = buildPlannerSleepBlocks(adaptiveProfile, [disruption], "2026-08-20", "2026-08-23");
+  const wakeTimes = ["2026-08-20", "2026-08-21", "2026-08-22", "2026-08-23"].map((date) =>
+    new Date(blocks.find((block) => block.wakeDate === date)!.endAt).getTime()
+  );
+  const localWakeMinutes = wakeTimes.map((instant) => plannerTimeToMinutes(formatTimeInTimeZone(new Date(instant), adaptiveProfile.timezone)));
+  assert.deepEqual(localWakeMinutes, [14 * 60, 13 * 60, 12 * 60, 11 * 60]);
+  assert.deepEqual(adaptiveProfile.sleepSchedule.wakeAnchor.localTime, "09:00");
+});
+
+test("short adaptive sleep creates a bounded three-night recovery opportunity", () => {
+  const adaptiveProfile = {
+    ...profile,
+    sleepSchedule: createAdaptiveSleepSchedule({
+      minMinutes: 5 * 60,
+      maxMinutes: 10 * 60,
+      dayPart: "morning",
+    }),
+  };
+  const shortNight = createPlannerSleepEvent({
+    profile: adaptiveProfile,
+    wakeDate: "2026-08-20",
+    actualStartAt: "2026-08-20T03:00:00.000Z",
+    actualEndAt: "2026-08-20T07:00:00.000Z",
+  });
+  const blocks = buildPlannerSleepBlocks(adaptiveProfile, [shortNight], "2026-08-20", "2026-08-24");
+  const durations = ["2026-08-21", "2026-08-22", "2026-08-23", "2026-08-24"].map((date) => {
+    const block = blocks.find((candidate) => candidate.wakeDate === date)!;
+    return (new Date(block.endAt).getTime() - new Date(block.startAt).getTime()) / 60_000;
+  });
+  assert.deepEqual(durations, [540, 540, 540, 480]);
+});
+
+test("seven comparable check-ins only suggest a longer target", () => {
+  const schedule = createAdaptiveSleepSchedule({
+    minMinutes: 7 * 60,
+    maxMinutes: 10 * 60,
+    dayPart: "morning",
+  });
+  const events = Array.from({ length: 7 }, (_, index) => ({
+    wakeDate: `2026-08-${String(13 + index).padStart(2, "0")}`,
+    eventKind: "check_in" as const,
+    state: "completed" as const,
+    actualStartAt: `2026-08-${String(12 + index).padStart(2, "0")}T22:00:00.000Z`,
+    projectedEndAt: `2026-08-${String(13 + index).padStart(2, "0")}T06:00:00.000Z`,
+    actualEndAt: `2026-08-${String(13 + index).padStart(2, "0")}T06:00:00.000Z`,
+    restedness: index < 4 ? "not_rested" as const : "okay" as const,
+  }));
+  assert.equal(plannerSleepDurationSuggestion(schedule, events, "2026-08-19")?.suggestedMinutes, 510);
+  assert.equal(schedule.targetDurationMinutes, 480);
+});
+
+test("a short completed night offers at most a twenty minute early nap without adding it", () => {
+  const adaptiveProfile = {
+    ...profile,
+    availability: Object.fromEntries(Array.from({ length: 7 }, (_, index) => [String(index + 1), [{ start: "08:00", end: "22:00" }]])),
+    sleepSchedule: createAdaptiveSleepSchedule({ minMinutes: 5 * 60, maxMinutes: 10 * 60, dayPart: "morning" }),
+  };
+  const event = createPlannerSleepEvent({
+    profile: adaptiveProfile,
+    wakeDate: "2026-08-20",
+    actualStartAt: "2026-08-20T00:00:00.000Z",
+    actualEndAt: "2026-08-20T06:00:00.000Z",
+  });
+  const advice = buildSleepRecoveryAdvice(adaptiveProfile, event, []);
+  assert.equal(advice?.deficitMinutes, 120);
+  assert.ok(advice?.nap);
+  assert.equal((new Date(advice!.nap!.endAt).getTime() - new Date(advice!.nap!.startAt).getTime()) / 60_000, 20);
+  const proposal = buildPlannerProposal({
+    profile: adaptiveProfile,
+    items: [],
+    blocks: [],
+    sleepEvent: event,
+    trigger: "sleep_changed",
+    now: new Date("2026-08-20T06:01:00.000Z"),
+  });
+  assert.ok(proposal.recoveryAdvice?.nap);
+  assert.ok(!proposal.changes.some((change) => change.kind === "add_item" && /восстановитель/i.test(change.item.title)));
+});
+
+test("repeated extreme sleep changes produce a neutral health notice", () => {
+  const adaptiveProfile = {
+    ...profile,
+    sleepSchedule: createAdaptiveSleepSchedule({ minMinutes: 5 * 60, maxMinutes: 10 * 60, dayPart: "morning" }),
+  };
+  const events = [17, 18, 19].map((day) => createPlannerSleepEvent({
+    profile: adaptiveProfile,
+    wakeDate: `2026-08-${day}`,
+    actualStartAt: `2026-08-${String(day).padStart(2, "0")}T00:00:00.000Z`,
+    actualEndAt: `2026-08-${String(day).padStart(2, "0")}T04:00:00.000Z`,
+  }));
+  assert.match(plannerSleepHealthNotice(adaptiveProfile, events, "2026-08-19") ?? "", /специалист/i);
 });

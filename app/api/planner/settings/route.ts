@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 
-import { assertPlannerRevision, plannerErrorResponse, plannerUnauthorizedResponse } from "@/lib/planner/api";
+import { assertPlannerCsrf, assertPlannerRevision, plannerErrorResponse, plannerUnauthorizedResponse } from "@/lib/planner/api";
 import { getPlannerStore } from "@/lib/planner/store";
 import type { PlannerProfile } from "@/lib/planner/types";
 import { getRequestUser } from "@/lib/request-user";
@@ -11,6 +11,7 @@ export async function PATCH(request: NextRequest) {
   try {
     const user = await getRequestUser(request);
     if (!user) return plannerUnauthorizedResponse();
+    assertPlannerCsrf(request);
     const body = (await request.json()) as { expectedRevision?: unknown; patch?: Partial<PlannerProfile> };
     const data = await (await getPlannerStore()).updateSettings(
       user.id,

@@ -20,6 +20,7 @@ const mutationRoutes = [
   "app/api/planner/change-sets/[id]/undo/route.ts",
   "app/api/planner/legacy-import/route.ts",
   "app/api/planner/reset/route.ts",
+  "app/api/planner/sleep/check-in/route.ts",
 ];
 
 test("every planner mutation route authenticates the request and emits planner sync", () => {
@@ -29,6 +30,7 @@ test("every planner mutation route authenticates the request and emits planner s
     if (!route.endsWith("proposals/route.ts")) {
       assert.match(content, /kind:\s*"planner"/, `${route} must publish planner sync`);
     }
+    assert.match(content, /assertPlannerCsrf\(request\)/, `${route} must validate CSRF`);
   }
 });
 
@@ -41,6 +43,7 @@ test("direct mutations require a revision while proposal apply verifies its base
     "app/api/planner/blocks/[id]/action/route.ts",
     "app/api/planner/legacy-import/route.ts",
     "app/api/planner/reset/route.ts",
+    "app/api/planner/sleep/check-in/route.ts",
   ]) {
     assert.match(source(route), /assertPlannerRevision/, `${route} must validate expected revision`);
   }
@@ -52,6 +55,7 @@ test("assistant parsing stays private and reset verifies password, revision and 
   const assistant = source("app/api/planner/assistant/parse/route.ts");
   const reset = source("app/api/planner/reset/route.ts");
   assert.match(assistant, /getRequestUser\(request\)/);
+  assert.match(assistant, /assertPlannerCsrf\(request\)/);
   assert.match(reset, /assertPlannerRevision/);
   assert.match(reset, /assertAuthRateLimit/);
   assert.match(reset, /planner_reset/);
@@ -77,8 +81,11 @@ test("legacy import is idempotent and never mutates legacy category/message tabl
 test("planner upgrade is idempotent and fresh installs include protected sleep", () => {
   assert.match(plannerUpgrade, /add column if not exists sleep_schedule/);
   assert.match(plannerUpgrade, /create table if not exists public\.planner_sleep_events/);
+  assert.match(plannerUpgrade, /add column if not exists restedness/);
+  assert.match(plannerUpgrade, /add column if not exists estimated_start_from_at/);
   assert.match(plannerUpgrade, /planner_reset/);
   assert.doesNotMatch(plannerUpgrade, /drop table if exists public\.planner_(?:profiles|items|blocks|sleep_events)/);
   assert.match(freshSchema, /create table public\.planner_sleep_events/);
+  assert.match(freshSchema, /event_kind text not null default 'sleep_change'/);
   assert.match(freshSchema, /assistant_setup_version integer not null default 0/);
 });

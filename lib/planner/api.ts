@@ -1,6 +1,9 @@
 import "server-only";
 
+import type { NextRequest } from "next/server";
+
 import { API_ERROR_CODES } from "@/lib/api-errors";
+import { CSRF_COOKIE_NAME, isValidCsrfPair } from "@/lib/auth/csrf";
 import { toErrorMessage } from "@/lib/errors";
 import { PlannerConflictError, PlannerRevisionError } from "@/lib/planner/store";
 
@@ -36,4 +39,12 @@ export function assertPlannerRevision(value: unknown): number {
     throw new Error("Некорректная ревизия планировщика.");
   }
   return revision;
+}
+
+export function assertPlannerCsrf(request: NextRequest): void {
+  const cookieToken = request.cookies.get(CSRF_COOKIE_NAME)?.value?.trim() ?? "";
+  const headerToken = request.headers.get("x-csrf-token")?.trim() ?? "";
+  if (!cookieToken || !headerToken || !isValidCsrfPair(cookieToken, headerToken)) {
+    throw new Error("Некорректный CSRF-токен.");
+  }
 }

@@ -26,16 +26,52 @@ export type PlannerSleepRule = {
   durationMinutes: number;
 };
 
-export type PlannerSleepSchedule = {
+export type PlannerWakeDayPart = "early_morning" | "morning" | "late_morning";
+export type PlannerSleepRestedness = "not_rested" | "okay" | "well_rested";
+export type PlannerSleepEventKind = "sleep_change" | "check_in";
+export type PlannerSleepEventState = "tentative" | "confirmed" | "completed";
+
+export type PlannerFixedSleepSchedule = {
+  mode: "fixed";
   weekdays: PlannerSleepRule;
   weekends: PlannerSleepRule;
 };
 
+export type PlannerAdaptiveSleepSchedule = {
+  mode: "adaptive";
+  durationRange: {
+    minMinutes: number;
+    maxMinutes: number;
+  };
+  targetDurationMinutes: number;
+  wakeAnchor: {
+    dayPart: PlannerWakeDayPart;
+    localTime: string;
+    toleranceMinutes: number;
+  };
+  morningPreparationMinutes: number;
+  recovery: {
+    horizonNights: 3;
+    maxNightExtensionMinutes: 60;
+    maxDailyAnchorShiftMinutes: 60;
+    suggestShortNap: boolean;
+  };
+  requiresHealthyMinimumConfirmation?: boolean;
+};
+
+export type PlannerSleepSchedule = PlannerFixedSleepSchedule | PlannerAdaptiveSleepSchedule;
+
 export type PlannerSleepEvent = {
   wakeDate: string;
-  actualStartAt: string;
-  projectedEndAt: string;
+  eventKind: PlannerSleepEventKind;
+  state: PlannerSleepEventState;
+  actualStartAt?: string;
+  projectedEndAt?: string;
   actualEndAt?: string;
+  estimatedStartFromAt?: string;
+  estimatedStartToAt?: string;
+  restedness?: PlannerSleepRestedness;
+  recoveryNight?: boolean;
   createdAt?: string;
   updatedAt?: string;
 };
@@ -50,6 +86,8 @@ export type PlannerSleepBlock = {
   plannedEndAt: string;
   actualStartAt?: string;
   actualEndAt?: string;
+  tentative?: boolean;
+  recoveryNight?: boolean;
   fixed: true;
   locked: true;
   kind: "sleep";
@@ -209,6 +247,15 @@ export type PlannerProposal = {
   unplaced: PlannerUnplaced[];
   horizonStart: string;
   horizonEnd: string;
+  recoveryAdvice?: {
+    deficitMinutes: number;
+    recoveryNights: number;
+    nap?: {
+      startAt: string;
+      endAt: string;
+      reason: string;
+    };
+  };
   expiresAt?: string;
 };
 
@@ -225,6 +272,13 @@ export type PlannerBootstrap = {
     currentMinutes: number;
     suggestedMinutes: number;
   }>;
+  sleepDurationSuggestion?: {
+    currentMinutes: number;
+    suggestedMinutes: number;
+    sampleCount: number;
+    reason: string;
+  };
+  sleepHealthNotice?: string;
 };
 
 export type PlannerProposalInput = {
@@ -235,6 +289,20 @@ export type PlannerProposalInput = {
   sleepEvent?: PlannerSleepEvent;
   trigger?: PlannerProposal["trigger"];
   rebuildFuture?: boolean;
+};
+
+export type PlannerSleepCheckInInput = {
+  wakeDate: string;
+  restedness: PlannerSleepRestedness;
+  expectedRevision: number;
+  actualStartAt?: string;
+  actualEndAt?: string;
+};
+
+export type PlannerSleepCheckInResult = {
+  event: PlannerSleepEvent;
+  revision: number;
+  suggestion?: PlannerBootstrap["sleepDurationSuggestion"];
 };
 
 export type PlannerAssistantAmbiguity = {
@@ -249,8 +317,16 @@ export type PlannerAssistantParseResult = {
 };
 
 export type PlannerSleepParseResult = {
+  mode?: "fixed" | "adaptive";
   bedtime?: string;
   durationMinutes?: number;
+  durationRange?: {
+    minMinutes: number;
+    maxMinutes: number;
+  };
+  wakeDayPart?: PlannerWakeDayPart;
+  changeKind?: "later_unknown" | "bedtime_now" | "wake_now";
+  estimatedBedtimeRange?: PlannerTimeWindow;
   ambiguities: string[];
 };
 
@@ -270,7 +346,8 @@ export const DEFAULT_PLANNER_ENERGY_WINDOWS: PlannerEnergyWindow[] = [
   { start: "18:00", end: "22:00", energy: "low" },
 ];
 
-export const DEFAULT_PLANNER_SLEEP_SCHEDULE: PlannerSleepSchedule = {
+export const DEFAULT_PLANNER_SLEEP_SCHEDULE: PlannerFixedSleepSchedule = {
+  mode: "fixed",
   weekdays: { bedtime: "23:00", durationMinutes: 8 * 60 },
   weekends: { bedtime: "23:00", durationMinutes: 8 * 60 },
 };
