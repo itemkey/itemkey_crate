@@ -15,16 +15,25 @@ import {
   type PlannerSleepParseResult,
   type PlannerTimeWindow,
   type PlannerUnplaced,
+  type PlannerWakeAnchorReason,
 } from "./types.ts";
-import { buildPlannerSleepBlocks, buildSleepRecoveryAdvice, normalizePlannerSleepEvent, normalizeSleepSchedule } from "./sleep.ts";
+import {
+  availabilityFromSleepSchedule,
+  buildPlannerSleepBlocks,
+  buildSleepRecoveryAdvice,
+  normalizePlannerSleepEvent,
+  normalizeSleepSchedule,
+} from "./sleep.ts";
 import {
   addIsoMinutes,
   addPlannerDays,
   formatDateInTimeZone,
+  formatTimeInTimeZone,
   horizonDays,
   isoDurationMinutes,
   normalizePlannerDate,
   normalizePlannerTime,
+  plannerMinutesToTime,
   plannerTimeToMinutes,
   plannerWeekday,
   zonedPlannerDateTimeToUtc,
@@ -306,7 +315,9 @@ export function parseSleepCommand(command: string): PlannerSleepParseResult {
   const text = command.trim();
   const lower = text.toLocaleLowerCase();
   const durationRange = parseSleepDurationRange(text);
+  const automaticWake = /(?:без разниц|не\s*важно|неважно|выбери сам|выберите сами|любое время).{0,32}(?:встав|подъ[её]м)?|(?:any wake time|wake whenever|choose for me|no wake preference)/i.test(lower);
   const adaptive = /(?:нет|без|не имею|нестабильн|шатк|плавающ).{0,24}(?:график|режим)|(?:no|without|irregular|unstable|flexible).{0,24}(?:schedule|sleep)/i.test(lower)
+    || automaticWake
     || Boolean(durationRange);
   const timeMatch = text.match(/(?:лож(?:усь|иться|усь спать)|спать|bed(?:time)?|sleep)\D{0,20}(\d{1,2})(?::([0-5]\d))?/i)
     ?? text.match(/\b(?:в|at)\s*(\d{1,2})(?::([0-5]\d))?/i);
@@ -314,13 +325,15 @@ export function parseSleepCommand(command: string): PlannerSleepParseResult {
     ? normalizePlannerTime(`${String(Number(timeMatch[1])).padStart(2, "0")}:${timeMatch[2] ?? "00"}`)
     : undefined;
   const durationMinutes = durationRange ? undefined : parseDuration(text);
-  const wakeDayPart = /(?:ранн.{0,8}утр|early morning)/i.test(lower)
-    ? "early_morning" as const
-    : /(?:ближе к полуд|поздн.{0,8}утр|late morning|near noon)/i.test(lower)
-      ? "late_morning" as const
-      : /(?:утр|morning)/i.test(lower)
-        ? "morning" as const
-        : undefined;
+  const wakeDayPart = automaticWake
+    ? "auto" as const
+    : /(?:ранн.{0,8}утр|early morning)/i.test(lower)
+      ? "early_morning" as const
+      : /(?:ближе к полуд|поздн.{0,8}утр|late morning|near noon)/i.test(lower)
+        ? "late_morning" as const
+        : /(?:утр|morning)/i.test(lower)
+          ? "morning" as const
+          : undefined;
   const estimatedBedtimeRange = !durationRange && /(?:лягу|ложусь|усну|bed|sleep)/i.test(lower)
     ? parseTimeRange(text)
     : undefined;
@@ -334,7 +347,7 @@ export function parseSleepCommand(command: string): PlannerSleepParseResult {
   const ambiguities: string[] = [];
   if (!adaptive && !bedtime && !changeKind) ambiguities.push("Не удалось определить время отхода ко сну.");
   if (!durationMinutes && !durationRange && !changeKind) ambiguities.push("Не удалось определить обычную длительность сна или её диапазон.");
-  if (adaptive && !wakeDayPart) ambiguities.push("Укажите удобную часть дня для подъёма: раннее утро, утро или ближе к полудню.");
+  if (adaptive && !wakeDayPart) ambiguities.push("Укажите удобную часть дня для подъёма или выберите «Без разницы — выбери сам».");
   return {
     mode: changeKind ? undefined : adaptive ? "adaptive" : bedtime || durationMinutes ? "fixed" : undefined,
     bedtime,
@@ -516,6 +529,7 @@ function findPlacement(
         const candidateBefore = Math.max(profile.defaultBufferMinutes, request.item.bufferBeforeMinutes);
         const candidateAfter = Math.max(profile.defaultBufferMinutes, request.item.bufferAfterMinutes);
         if (candidate.start < nowMs) continue;
+        if (request.item.earliestAt && candidate.start < new Date(request.item.earliestAt).getTime()) continue;
         if (occupied.some((block) => {
           if (block.status === "cancelled" || block.status === "skipped") return false;
           const interval = blockInterval(block);
@@ -603,7 +617,7 @@ function recurringFixedBlocks(
     });
 }
 
-export function buildPlannerProposal(input: PlannerEngineInput): PlannerProposal {
+function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposal {
   const baseProfile = normalizePlannerProfile(input.profile);
   const profile = normalizePlannerProfile({
     ...baseProfile,
@@ -918,6 +932,252 @@ export function buildPlannerProposal(input: PlannerEngineInput): PlannerProposal
     horizonEnd: endDate,
     recoveryAdvice,
   };
+}
+
+type AutoWakeCandidate = {
+  minute: number;
+  profilePatch: Partial<PlannerProfile>;
+  proposal: PlannerProposal;
+  recurringConflictCount: number;
+  deadlineViolations: number;
+  unplacedMinutes: number;
+  peakLoadMinutes: number;
+  energyMismatchMinutes: number;
+  placedMinutes: number;
+};
+
+function shiftEnergyWindows(profile: PlannerProfile, deltaMinutes: number): PlannerProfile["energyWindows"] {
+  if (!deltaMinutes) return profile.energyWindows;
+  return profile.energyWindows.map((window) => ({
+    ...window,
+    start: plannerMinutesToTime(plannerTimeToMinutes(window.start) + deltaMinutes),
+    end: plannerMinutesToTime(plannerTimeToMinutes(window.end) + deltaMinutes),
+  }));
+}
+
+function sameAvailability(left: PlannerProfile["availability"], right: PlannerProfile["availability"]): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function draftsForProposal(input: PlannerEngineInput, profile: PlannerProfile, now: Date): PlannerDraft[] {
+  if (input.drafts?.length) return input.drafts;
+  if (input.draft) return [input.draft];
+  if (input.command) return [parsePlannerCommand(input.command, profile, now)];
+  return [];
+}
+
+function autoWakeRequirement(
+  items: PlannerItem[],
+  preparationMinutes: number
+): { minute: number; title: string; startTime: string } | undefined {
+  return items.flatMap((item) => {
+    if (item.status !== "active" || item.kind !== "fixed_event" || !item.recurrence?.startTime) return [];
+    const startMinute = plannerTimeToMinutes(item.recurrence.startTime);
+    if (startMinute < 4 * 60 || startMinute > 13 * 60) return [];
+    return [{
+      minute: Math.max(0, startMinute - preparationMinutes),
+      title: item.title,
+      startTime: item.recurrence.startTime,
+    }];
+  }).sort((left, right) => left.minute - right.minute)[0];
+}
+
+function candidateBlocks(proposal: PlannerProposal, input: PlannerEngineInput): PlannerBlock[] {
+  const moved = new Map(proposal.changes.flatMap((change) => change.kind === "move_block"
+    ? [[change.blockId, { startAt: change.toStartAt, endAt: change.toEndAt }] as const]
+    : []));
+  const removed = new Set(proposal.changes.flatMap((change) => change.kind === "remove_block" ? [change.blockId] : []));
+  const unchanged = input.blocks.flatMap((block) => {
+    if (removed.has(block.id)) return [];
+    const next = moved.get(block.id);
+    return [{ ...block, ...(next ?? {}) }];
+  });
+  const added = proposal.changes.flatMap((change) => change.kind === "add_block" ? [change.block] : []);
+  return [...unchanged, ...added];
+}
+
+function measureAutoWakeCandidate(
+  minute: number,
+  profilePatch: Partial<PlannerProfile>,
+  proposal: PlannerProposal,
+  input: PlannerEngineInput
+): AutoWakeCandidate {
+  const profile = normalizePlannerProfile({ ...input.profile, ...profilePatch, revision: input.profile.revision });
+  const itemById = new Map(input.items.map((item) => [item.id, normalizePlannerItem(item)]));
+  for (const change of proposal.changes) {
+    if (change.kind === "add_item" || change.kind === "update_item") itemById.set(change.item.id, change.item);
+  }
+  const blocks = candidateBlocks(proposal, input);
+  const blockById = new Map(blocks.map((block) => [block.id, block]));
+  const recurringItemIds = new Set([...itemById.values()]
+    .filter((item) => item.kind === "fixed_event" && item.recurrence?.startTime)
+    .map((item) => item.id));
+  const recurringConflictCount = proposal.conflicts.filter((conflict) => conflict.blockIds.some((blockId) => {
+    const itemId = blockById.get(blockId)?.itemId;
+    return Boolean(itemId && recurringItemIds.has(itemId));
+  })).length;
+  const nowMs = (input.now ?? new Date()).getTime();
+  const flexible = blocks.filter((block) => !block.fixed
+    && !["cancelled", "skipped", "done"].includes(block.status)
+    && new Date(block.startAt).getTime() >= nowMs);
+  let deadlineViolations = 0;
+  let energyMismatchMinutes = 0;
+  let placedMinutes = 0;
+  const loadByDate = new Map<string, number>();
+  for (const block of flexible) {
+    const duration = isoDurationMinutes(block.startAt, block.endAt);
+    const item = block.itemId ? itemById.get(block.itemId) : undefined;
+    if (item?.deadlineAt && new Date(block.endAt).getTime() > new Date(item.deadlineAt).getTime()) deadlineViolations += 1;
+    if (item) {
+      const startMinute = plannerTimeToMinutes(formatTimeInTimeZone(new Date(block.startAt), profile.timezone));
+      if (energyAt(profile, startMinute) !== item.energy) energyMismatchMinutes += duration;
+    }
+    const date = formatDateInTimeZone(new Date(block.startAt), profile.timezone);
+    loadByDate.set(date, (loadByDate.get(date) ?? 0) + duration);
+    placedMinutes += duration;
+  }
+  return {
+    minute,
+    profilePatch,
+    proposal,
+    recurringConflictCount,
+    deadlineViolations,
+    unplacedMinutes: proposal.unplaced.reduce((sum, item) => sum + item.remainingMinutes, 0),
+    peakLoadMinutes: Math.max(0, ...loadByDate.values()),
+    energyMismatchMinutes,
+    placedMinutes,
+  };
+}
+
+function compareAutoWakeCandidates(left: AutoWakeCandidate, right: AutoWakeCandidate): number {
+  const comparisons = [
+    left.recurringConflictCount - right.recurringConflictCount,
+    left.deadlineViolations - right.deadlineViolations,
+    left.unplacedMinutes - right.unplacedMinutes,
+    left.peakLoadMinutes - right.peakLoadMinutes,
+    left.energyMismatchMinutes - right.energyMismatchMinutes,
+    right.placedMinutes - left.placedMinutes,
+    Math.abs(left.minute - 9 * 60) - Math.abs(right.minute - 9 * 60),
+    left.minute - right.minute,
+  ];
+  return comparisons.find((value) => value !== 0) ?? 0;
+}
+
+function resolveAutomaticWake(input: PlannerEngineInput): PlannerProposal | null {
+  const now = input.now ?? new Date();
+  const baseProfile = normalizePlannerProfile(input.profile);
+  const requestedProfile = normalizePlannerProfile({
+    ...baseProfile,
+    ...(input.profilePatch ?? {}),
+    revision: baseProfile.revision,
+  });
+  const schedule = requestedProfile.sleepSchedule;
+  if (schedule.mode !== "adaptive" || schedule.wakeAnchor.dayPart !== "auto") return null;
+  const trigger = input.trigger ?? (input.command || input.draft || input.drafts?.length ? "quick_add" : "autoplan");
+  const shouldResolve = Boolean(input.profilePatch?.sleepSchedule)
+    || Boolean(input.rebuildFuture && ["autoplan", "assistant_setup", "assistant_update"].includes(trigger));
+  if (!shouldResolve) return null;
+
+  const drafts = draftsForProposal(input, requestedProfile, now);
+  const draftItems = drafts.map((draft, index) => normalizePlannerItem({
+    ...draft,
+    id: draft.id || uniqueId("item", index, draft.title, draft.date, draft.start),
+    title: draft.title,
+  }));
+  const planningItems = [...new Map([
+    ...input.items.map((item) => normalizePlannerItem(item)),
+    ...draftItems,
+  ].map((item) => [item.id, item])).values()];
+  const requirement = autoWakeRequirement(planningItems, schedule.morningPreparationMinutes);
+  const candidateMinutes = Array.from({ length: (12 * 60 - 6 * 60 - 30) / STEP_MINUTES + 1 }, (_, index) => 6 * 60 + 30 + index * STEP_MINUTES)
+    .filter((minute) => !requirement || minute <= requirement.minute);
+  if (requirement && requirement.minute < 6 * 60 + 30) candidateMinutes.splice(0, candidateMinutes.length, requirement.minute);
+  if (candidateMinutes.length === 0) candidateMinutes.push(requirement?.minute ?? 9 * 60);
+
+  const initialWakeMinute = plannerTimeToMinutes(schedule.wakeAnchor.localTime);
+  const derivedAvailability = availabilityFromSleepSchedule(schedule);
+  const availabilityFollowsSleep = Boolean(input.profilePatch?.availability)
+    || sameAvailability(requestedProfile.availability, derivedAvailability);
+  const candidates = candidateMinutes.map((minute) => {
+    const candidateSchedule = {
+      ...schedule,
+      wakeAnchor: {
+        ...schedule.wakeAnchor,
+        localTime: plannerMinutesToTime(minute),
+        selectionReason: { code: "auto_default" as const },
+      },
+    };
+    const profilePatch: Partial<PlannerProfile> = {
+      ...(input.profilePatch ?? {}),
+      sleepSchedule: candidateSchedule,
+      availability: availabilityFollowsSleep
+        ? availabilityFromSleepSchedule(candidateSchedule)
+        : requestedProfile.availability,
+      energyWindows: shiftEnergyWindows(requestedProfile, minute - initialWakeMinute),
+    };
+    const proposal = buildPlannerProposalResolved({ ...input, profilePatch });
+    return measureAutoWakeCandidate(minute, profilePatch, proposal, input);
+  }).sort(compareAutoWakeCandidates);
+  const selected = candidates[0];
+  const mostImportantFlexible = planningItems.filter((item) => item.kind !== "fixed_event" && item.status === "active")
+    .sort((left, right) => priorityWeight[right.priority] - priorityWeight[left.priority]
+      || (left.deadlineAt ?? "9999").localeCompare(right.deadlineAt ?? "9999")
+      || left.id.localeCompare(right.id))[0];
+  let reason: PlannerWakeAnchorReason;
+  if (selected.recurringConflictCount > 0) {
+    reason = {
+      code: "fixed_conflict",
+      relatedTitle: requirement?.title,
+      relatedTime: requirement?.startTime,
+      placedMinutes: selected.placedMinutes,
+      unplacedMinutes: selected.unplacedMinutes,
+    };
+  } else if (requirement && requirement.minute < 9 * 60 && selected.minute <= requirement.minute) {
+    reason = {
+      code: "recurring_commitment",
+      relatedTitle: requirement.title,
+      relatedTime: requirement.startTime,
+      placedMinutes: selected.placedMinutes,
+      unplacedMinutes: selected.unplacedMinutes,
+    };
+  } else if (selected.minute === 9 * 60) {
+    reason = {
+      code: "auto_default",
+      placedMinutes: selected.placedMinutes,
+      unplacedMinutes: selected.unplacedMinutes,
+    };
+  } else {
+    reason = {
+      code: "plan_fit",
+      relatedTitle: mostImportantFlexible?.title,
+      placedMinutes: selected.placedMinutes,
+      unplacedMinutes: selected.unplacedMinutes,
+    };
+  }
+  const selectedSchedule = selected.profilePatch.sleepSchedule;
+  if (!selectedSchedule || selectedSchedule.mode !== "adaptive") return selected.proposal;
+  const finalSchedule = {
+    ...selectedSchedule,
+    wakeAnchor: { ...selectedSchedule.wakeAnchor, selectionReason: reason },
+  };
+  const finalProfilePatch = { ...selected.profilePatch, sleepSchedule: finalSchedule };
+  const proposal = buildPlannerProposalResolved({ ...input, profilePatch: finalProfilePatch });
+  return {
+    ...proposal,
+    wakeAnchorDecision: {
+      preference: "auto",
+      wakeTime: finalSchedule.wakeAnchor.localTime,
+      bedtime: plannerMinutesToTime(selected.minute - finalSchedule.targetDurationMinutes),
+      targetDurationMinutes: finalSchedule.targetDurationMinutes,
+      durationRange: finalSchedule.durationRange,
+      reason,
+      candidatesEvaluated: candidates.length,
+    },
+  };
+}
+
+export function buildPlannerProposal(input: PlannerEngineInput): PlannerProposal {
+  return resolveAutomaticWake(input) ?? buildPlannerProposalResolved(input);
 }
 
 export function applyProposalChanges(

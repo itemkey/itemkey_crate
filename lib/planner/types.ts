@@ -26,7 +26,14 @@ export type PlannerSleepRule = {
   durationMinutes: number;
 };
 
-export type PlannerWakeDayPart = "early_morning" | "morning" | "late_morning";
+export type PlannerWakeDayPart = "early_morning" | "morning" | "late_morning" | "auto";
+export type PlannerWakeAnchorReason = {
+  code: "preferred_window" | "auto_default" | "recurring_commitment" | "plan_fit" | "fixed_conflict";
+  relatedTitle?: string;
+  relatedTime?: string;
+  placedMinutes?: number;
+  unplacedMinutes?: number;
+};
 export type PlannerSleepRestedness = "not_rested" | "okay" | "well_rested";
 export type PlannerSleepEventKind = "sleep_change" | "check_in";
 export type PlannerSleepEventState = "tentative" | "confirmed" | "completed";
@@ -48,6 +55,7 @@ export type PlannerAdaptiveSleepSchedule = {
     dayPart: PlannerWakeDayPart;
     localTime: string;
     toleranceMinutes: number;
+    selectionReason?: PlannerWakeAnchorReason;
   };
   morningPreparationMinutes: number;
   recovery: {
@@ -255,6 +263,18 @@ export type PlannerProposal = {
       endAt: string;
       reason: string;
     };
+  };
+  wakeAnchorDecision?: {
+    preference: "auto";
+    wakeTime: string;
+    bedtime: string;
+    targetDurationMinutes: number;
+    durationRange: {
+      minMinutes: number;
+      maxMinutes: number;
+    };
+    reason: PlannerWakeAnchorReason;
+    candidatesEvaluated: number;
   };
   expiresAt?: string;
 };

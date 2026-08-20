@@ -998,6 +998,24 @@ function proposalChangeTitle(change: PlannerProposal["changes"][number], locale:
   return change.item.title;
 }
 
+function wakeDecisionReason(proposal: PlannerProposal, locale: Locale): string {
+  const reason = proposal.wakeAnchorDecision?.reason;
+  if (!reason) return "";
+  const ru = locale === "ru";
+  if (reason.code === "recurring_commitment") return ru
+    ? `Подъём сдвинут раньше из-за постоянного дела${reason.relatedTitle ? ` «${reason.relatedTitle}»` : ""}${reason.relatedTime ? ` в ${reason.relatedTime}` : ""} и времени на подготовку.`
+    : `Wake-up moved earlier for the recurring commitment${reason.relatedTitle ? ` “${reason.relatedTitle}”` : ""}${reason.relatedTime ? ` at ${reason.relatedTime}` : ""} and preparation time.`;
+  if (reason.code === "plan_fit") return ru
+    ? `Этот устойчивый подъём оставляет более подходящие окна для нагрузки${reason.relatedTitle ? `, включая «${reason.relatedTitle}»` : ""}. Размещено ${formatDuration(reason.placedMinutes ?? 0, locale)}, останется в очереди ${formatDuration(reason.unplacedMinutes ?? 0, locale)}.`
+    : `This stable wake time leaves better workload slots${reason.relatedTitle ? `, including “${reason.relatedTitle}”` : ""}. ${formatDuration(reason.placedMinutes ?? 0, locale)} placed; ${formatDuration(reason.unplacedMinutes ?? 0, locale)} remains in the inbox.`;
+  if (reason.code === "fixed_conflict") return ru
+    ? "Защищённый сон конфликтует с постоянным обязательством. План нельзя применить, пока вы не измените вводные."
+    : "Protected sleep conflicts with a recurring commitment. The plan cannot be applied until the input is changed.";
+  return ru
+    ? "Условия не требуют более раннего или позднего подъёма, поэтому выбран нейтральный устойчивый ориентир 09:00."
+    : "Nothing requires an earlier or later wake time, so the neutral stable anchor of 09:00 was selected.";
+}
+
 function ProposalModal({ proposal, profile, locale, busy, onClose, onApply, onEdit, onPause, onFinishFirst, onAddRecoveryNap }: {
   proposal: PlannerProposal; profile: PlannerProfile; locale: Locale; busy: boolean;
   onClose: () => void; onApply: () => Promise<void>; onEdit: () => void; onPause: (blockId: string) => Promise<void>; onFinishFirst: (blockId: string, protectedId: string) => Promise<void>;
@@ -1006,6 +1024,7 @@ function ProposalModal({ proposal, profile, locale, busy, onClose, onApply, onEd
   return <ModalShell title={locale === "ru" ? "Предпросмотр нового плана" : "Plan preview"} onClose={onClose}>
     <div className={styles.proposal}>
       {proposal.normalizedDraft && <section className={styles.parsed}><span>{locale === "ru" ? "Распознано — проверьте перед созданием" : "Parsed — review before creating"}</span><strong>{proposal.normalizedDraft.title}</strong><p>{kindLabel[locale][proposal.normalizedDraft.kind ?? "flexible_task"]} · {formatDuration(proposal.normalizedDraft.estimateMinutes ?? 60, locale)}{proposal.normalizedDraft.date ? ` · ${formatDay(proposal.normalizedDraft.date, locale)}` : ""}{proposal.normalizedDraft.start ? ` · ${proposal.normalizedDraft.start}` : ""}{proposal.normalizedDraft.end ? `–${proposal.normalizedDraft.end}` : ""} · {locale === "ru" ? "приоритет" : "priority"}: {proposal.normalizedDraft.priority ?? "normal"}</p><button onClick={onEdit}>{locale === "ru" ? "Изменить поля" : "Edit fields"}</button></section>}
+      {proposal.wakeAnchorDecision && <section className={styles.wakeDecision}><span>{locale === "ru" ? "Автоматически выбран устойчивый режим" : "Stable schedule selected automatically"}</span><div><strong>{locale === "ru" ? "Подъём" : "Wake"} {proposal.wakeAnchorDecision.wakeTime}</strong><strong>{locale === "ru" ? "Сон с" : "Sleep from"} {proposal.wakeAnchorDecision.bedtime}</strong><strong>{formatDuration(proposal.wakeAnchorDecision.targetDurationMinutes, locale)}</strong></div><p>{wakeDecisionReason(proposal, locale)}</p><small>{locale === "ru" ? `Проверено вариантов: ${proposal.wakeAnchorDecision.candidatesEvaluated}. Диапазон сна: ${formatDuration(proposal.wakeAnchorDecision.durationRange.minMinutes, locale)}–${formatDuration(proposal.wakeAnchorDecision.durationRange.maxMinutes, locale)}. Это предложение ещё не применено.` : `${proposal.wakeAnchorDecision.candidatesEvaluated} options checked. Sleep range: ${formatDuration(proposal.wakeAnchorDecision.durationRange.minMinutes, locale)}–${formatDuration(proposal.wakeAnchorDecision.durationRange.maxMinutes, locale)}. This proposal has not been applied.`}</small></section>}
       {proposal.conflicts.length > 0 && <section className={styles.conflicts}><h3>{locale === "ru" ? "Нужно ваше решение" : "Your decision is needed"}</h3>{proposal.conflicts.map((conflict) => <article key={conflict.id}><strong>{conflict.title}</strong><p>{locale === "ru" ? conflict.message : conflict.kind === "active_overlap" ? "The protected time overlaps work already in progress. Pause it, finish first, or edit the new input." : conflict.blockIds.some((id) => id.startsWith("sleep-")) ? "A fixed event overlaps protected sleep. Edit the event or sleep input." : "Two fixed events overlap and cannot be moved automatically."}</p>{conflict.kind === "active_overlap" ? <div><button onClick={() => void onPause(conflict.blockIds[0])}>{locale === "ru" ? "Поставить текущее на паузу" : "Pause current"}</button><button onClick={() => void onFinishFirst(conflict.blockIds[0], conflict.blockIds[1])}>{locale === "ru" ? "Закончить текущее сначала" : "Finish current first"}</button><button onClick={onEdit}>{proposal.trigger === "sleep_changed" ? (locale === "ru" ? "Исправить сон" : "Edit sleep") : (locale === "ru" ? "Изменить вводные" : "Edit input")}</button></div> : <div><button onClick={onEdit}>{locale === "ru" ? "Исправить конфликт" : "Edit conflict"}</button></div>}</article>)}</section>}
       <section><h3>{locale === "ru" ? "Изменения" : "Changes"}</h3><div className={styles.changeList}>{proposal.changes.map((change) => <article key={change.id}>
         <span>{change.kind === "add_block" ? "+" : change.kind === "move_block" ? "→" : change.kind === "remove_block" ? "−" : change.kind === "upsert_sleep_event" ? "■" : "•"}</span>

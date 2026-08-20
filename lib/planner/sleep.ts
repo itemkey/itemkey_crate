@@ -10,6 +10,7 @@ import {
   type PlannerSleepEvent,
   type PlannerSleepRule,
   type PlannerSleepSchedule,
+  type PlannerWakeAnchorReason,
   type PlannerWakeDayPart,
 } from "./types.ts";
 import {
@@ -34,6 +35,7 @@ export const PLANNER_WAKE_DAY_PARTS: Record<PlannerWakeDayPart, {
   early_morning: { start: "06:30", end: "08:00", defaultTime: "07:30" },
   morning: { start: "08:00", end: "10:00", defaultTime: "09:00" },
   late_morning: { start: "10:00", end: "12:00", defaultTime: "11:00" },
+  auto: { start: "06:30", end: "12:00", defaultTime: "09:00" },
 };
 
 function clamp(value: number, min: number, max: number): number {
@@ -73,23 +75,62 @@ export function chooseAdaptiveSleepTarget(minMinutes: number, maxMinutes: number
 }
 
 function isWakeDayPart(value: unknown): value is PlannerWakeDayPart {
-  return value === "early_morning" || value === "morning" || value === "late_morning";
+  return value === "early_morning" || value === "morning" || value === "late_morning" || value === "auto";
+}
+
+function isWakeAnchorReason(value: unknown): value is PlannerWakeAnchorReason {
+  if (!value || typeof value !== "object") return false;
+  const code = (value as { code?: unknown }).code;
+  return code === "preferred_window" || code === "auto_default" || code === "recurring_commitment"
+    || code === "plan_fit" || code === "fixed_conflict";
+}
+
+function recurringWakeRequirement(
+  morningPreparationMinutes: number,
+  commitments: Array<Pick<PlannerDraft, "kind" | "recurrence"> & Partial<Pick<PlannerDraft, "title">>>
+): { minute: number; title?: string; startTime: string } | undefined {
+  const preparation = clamp(Math.round(Number(morningPreparationMinutes) || 60), 0, 240);
+  return commitments.flatMap((commitment) => {
+    if (commitment.kind !== "fixed_event" || !commitment.recurrence?.startTime) return [];
+    const startMinute = plannerTimeToMinutes(commitment.recurrence.startTime);
+    if (startMinute < 4 * 60 || startMinute > 13 * 60) return [];
+    return [{
+      minute: Math.max(0, startMinute - preparation),
+      title: commitment.title,
+      startTime: commitment.recurrence.startTime,
+    }];
+  }).sort((left, right) => left.minute - right.minute)[0];
+}
+
+export function deriveAdaptiveWakeAnchorSelection(
+  dayPart: PlannerWakeDayPart,
+  morningPreparationMinutes: number,
+  commitments: Array<Pick<PlannerDraft, "kind" | "recurrence"> & Partial<Pick<PlannerDraft, "title">>> = []
+): { localTime: string; reason: PlannerWakeAnchorReason } {
+  const defaultMinute = plannerTimeToMinutes(PLANNER_WAKE_DAY_PARTS[dayPart].defaultTime);
+  const requirement = recurringWakeRequirement(morningPreparationMinutes, commitments);
+  if (requirement && requirement.minute < defaultMinute) {
+    return {
+      localTime: plannerMinutesToTime(requirement.minute),
+      reason: {
+        code: "recurring_commitment",
+        relatedTitle: requirement.title,
+        relatedTime: requirement.startTime,
+      },
+    };
+  }
+  return {
+    localTime: plannerMinutesToTime(defaultMinute),
+    reason: { code: dayPart === "auto" ? "auto_default" : "preferred_window" },
+  };
 }
 
 export function deriveAdaptiveWakeAnchor(
   dayPart: PlannerWakeDayPart,
   morningPreparationMinutes: number,
-  commitments: Array<Pick<PlannerDraft, "kind" | "recurrence">> = []
+  commitments: Array<Pick<PlannerDraft, "kind" | "recurrence"> & Partial<Pick<PlannerDraft, "title">>> = []
 ): string {
-  const defaultMinute = plannerTimeToMinutes(PLANNER_WAKE_DAY_PARTS[dayPart].defaultTime);
-  const preparation = clamp(Math.round(Number(morningPreparationMinutes) || 60), 0, 240);
-  const commitmentDeadlines = commitments.flatMap((commitment) => {
-    if (commitment.kind !== "fixed_event" || !commitment.recurrence?.startTime) return [];
-    const startMinute = plannerTimeToMinutes(commitment.recurrence.startTime);
-    if (startMinute > 13 * 60) return [];
-    return [Math.max(0, startMinute - preparation)];
-  });
-  return plannerMinutesToTime(Math.min(defaultMinute, ...commitmentDeadlines));
+  return deriveAdaptiveWakeAnchorSelection(dayPart, morningPreparationMinutes, commitments).localTime;
 }
 
 export function createAdaptiveSleepSchedule(input: {
@@ -97,7 +138,7 @@ export function createAdaptiveSleepSchedule(input: {
   maxMinutes: number;
   dayPart: PlannerWakeDayPart;
   morningPreparationMinutes?: number;
-  commitments?: Array<Pick<PlannerDraft, "kind" | "recurrence">>;
+  commitments?: Array<Pick<PlannerDraft, "kind" | "recurrence"> & Partial<Pick<PlannerDraft, "title">>>;
   targetDurationMinutes?: number;
   healthyMinimumConfirmed?: boolean;
 }): PlannerAdaptiveSleepSchedule {
@@ -112,14 +153,16 @@ export function createAdaptiveSleepSchedule(input: {
     Math.max(Math.max(MIN_RECOMMENDED_SLEEP_MINUTES, selected.minMinutes), maxForTarget)
   );
   const preparation = clamp(Math.round(Number(input.morningPreparationMinutes ?? 60)), 0, 240);
+  const anchor = deriveAdaptiveWakeAnchorSelection(input.dayPart, preparation, input.commitments);
   return {
     mode: "adaptive",
     durationRange: { minMinutes: selected.minMinutes, maxMinutes: selected.maxMinutes },
     targetDurationMinutes,
     wakeAnchor: {
       dayPart: input.dayPart,
-      localTime: deriveAdaptiveWakeAnchor(input.dayPart, preparation, input.commitments),
+      localTime: anchor.localTime,
       toleranceMinutes: 60,
+      selectionReason: anchor.reason,
     },
     morningPreparationMinutes: preparation,
     recovery: {
@@ -156,6 +199,9 @@ export function normalizeSleepSchedule(value: unknown): PlannerSleepSchedule {
     schedule.wakeAnchor.localTime = normalizePlannerTime(rawAnchor.localTime)
       ?? PLANNER_WAKE_DAY_PARTS[dayPart].defaultTime;
     schedule.wakeAnchor.toleranceMinutes = clamp(Math.round(Number(rawAnchor.toleranceMinutes ?? 60)), 0, 180);
+    schedule.wakeAnchor.selectionReason = isWakeAnchorReason(rawAnchor.selectionReason)
+      ? rawAnchor.selectionReason
+      : { code: dayPart === "auto" ? "auto_default" : "preferred_window" };
     return schedule;
   }
   const weekdays = normalizeRule(raw.weekdays as Partial<PlannerSleepRule> | undefined

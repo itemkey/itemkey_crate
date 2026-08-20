@@ -10,6 +10,7 @@ import {
   plannerCompletionSuggestion,
 } from "./engine.ts";
 import {
+  availabilityFromSleepSchedule,
   buildPlannerSleepBlocks,
   buildSleepRecoveryAdvice,
   chooseAdaptiveSleepTarget,
@@ -509,6 +510,135 @@ test("adaptive anchor uses a day part and moves earlier for a recurring morning 
   }]), "07:30");
 });
 
+test("automatic wake uses a stable 09:00 anchor when nothing requires another time", () => {
+  const sleepSchedule = createAdaptiveSleepSchedule({ minMinutes: 7 * 60, maxMinutes: 9 * 60, dayPart: "auto" });
+  const input = {
+    profile,
+    profilePatch: {
+      sleepSchedule,
+      availability: availabilityFromSleepSchedule(sleepSchedule),
+    },
+    items: [] as PlannerItem[],
+    blocks: [] as PlannerBlock[],
+    trigger: "assistant_setup" as const,
+    rebuildFuture: true,
+    now: new Date("2026-08-19T04:00:00.000Z"),
+  };
+  const proposal = buildPlannerProposal(input);
+  assert.equal(proposal.wakeAnchorDecision?.wakeTime, "09:00");
+  assert.equal(proposal.wakeAnchorDecision?.bedtime, "01:00");
+  assert.equal(proposal.wakeAnchorDecision?.reason.code, "auto_default");
+  assert.equal(proposal.wakeAnchorDecision?.candidatesEvaluated, 23);
+  assert.deepEqual(proposal, buildPlannerProposal(input));
+});
+
+test("automatic wake moves exactly early enough for a recurring morning commitment", () => {
+  const sleepSchedule = createAdaptiveSleepSchedule({ minMinutes: 7 * 60, maxMinutes: 9 * 60, dayPart: "auto" });
+  const proposal = buildPlannerProposal({
+    profile,
+    profilePatch: { sleepSchedule, availability: availabilityFromSleepSchedule(sleepSchedule) },
+    items: [],
+    blocks: [],
+    drafts: [{
+      title: "Работа",
+      kind: "fixed_event",
+      estimateMinutes: 8 * 60,
+      recurrence: { frequency: "custom", weekdays: [1, 2, 3, 4, 5], startDate: "2026-08-19", startTime: "08:00", endTime: "16:00" },
+    }],
+    trigger: "assistant_setup",
+    rebuildFuture: true,
+    now: new Date("2026-08-19T04:00:00.000Z"),
+  });
+  assert.equal(proposal.wakeAnchorDecision?.wakeTime, "07:00");
+  assert.equal(proposal.wakeAnchorDecision?.reason.code, "recurring_commitment");
+  assert.equal(proposal.wakeAnchorDecision?.reason.relatedTitle, "Работа");
+});
+
+test("automatic wake can move before 06:30 only when a recurring commitment requires it", () => {
+  const sleepSchedule = createAdaptiveSleepSchedule({ minMinutes: 7 * 60, maxMinutes: 9 * 60, dayPart: "auto" });
+  const proposal = buildPlannerProposal({
+    profile,
+    profilePatch: { sleepSchedule, availability: availabilityFromSleepSchedule(sleepSchedule) },
+    items: [item({
+      id: "early-train",
+      title: "Ранний поезд",
+      kind: "fixed_event",
+      estimateMinutes: 60,
+      recurrence: { frequency: "weekly", weekdays: [1], startDate: "2026-08-19", startTime: "05:00", endTime: "06:00" },
+      autoPlan: false,
+    })],
+    blocks: [],
+    trigger: "assistant_setup",
+    rebuildFuture: true,
+    now: new Date("2026-08-19T04:00:00.000Z"),
+  });
+  assert.equal(proposal.wakeAnchorDecision?.wakeTime, "04:00");
+  assert.equal(proposal.wakeAnchorDecision?.reason.code, "recurring_commitment");
+});
+
+test("automatic wake uses workload fit while keeping a single stable anchor", () => {
+  const sleepSchedule = createAdaptiveSleepSchedule({ minMinutes: 7 * 60, maxMinutes: 9 * 60, dayPart: "auto" });
+  const urgent = item({
+    id: "early-deadline",
+    title: "Утренняя подача",
+    estimateMinutes: 60,
+    earliestAt: "2026-08-20T03:00:00.000Z",
+    deadlineAt: "2026-08-20T05:00:00.000Z",
+  });
+  const proposal = buildPlannerProposal({
+    profile,
+    profilePatch: { sleepSchedule, availability: availabilityFromSleepSchedule(sleepSchedule) },
+    items: [urgent],
+    blocks: [],
+    trigger: "assistant_setup",
+    rebuildFuture: true,
+    now: new Date("2026-08-19T04:00:00.000Z"),
+  });
+  assert.equal(proposal.wakeAnchorDecision?.wakeTime, "06:45");
+  assert.equal(proposal.wakeAnchorDecision?.reason.code, "plan_fit");
+  assert.equal(proposal.wakeAnchorDecision?.reason.relatedTitle, "Утренняя подача");
+});
+
+test("automatic wake reports a recurring fixed conflict instead of applying it", () => {
+  const sleepSchedule = createAdaptiveSleepSchedule({ minMinutes: 7 * 60, maxMinutes: 9 * 60, dayPart: "auto" });
+  const overnight = item({
+    id: "night-shift",
+    title: "Ночное обязательство",
+    kind: "fixed_event",
+    estimateMinutes: 180,
+    recurrence: { frequency: "daily", startDate: "2026-08-19", startTime: "02:00", endTime: "05:00" },
+    autoPlan: false,
+  });
+  const proposal = buildPlannerProposal({
+    profile,
+    profilePatch: { sleepSchedule, availability: availabilityFromSleepSchedule(sleepSchedule) },
+    items: [overnight],
+    blocks: [],
+    trigger: "assistant_setup",
+    rebuildFuture: true,
+    now: new Date("2026-08-19T04:00:00.000Z"),
+  });
+  assert.equal(proposal.wakeAnchorDecision?.reason.code, "fixed_conflict");
+  assert.ok(proposal.conflicts.some((conflict) => conflict.kind === "fixed_overlap"));
+  assert.throws(() => applyProposalChanges([overnight], [], proposal));
+});
+
+test("a one-off morning event does not silently replace the permanent automatic anchor", () => {
+  const sleepSchedule = createAdaptiveSleepSchedule({ minMinutes: 7 * 60, maxMinutes: 9 * 60, dayPart: "auto" });
+  const proposal = buildPlannerProposal({
+    profile,
+    profilePatch: { sleepSchedule, availability: availabilityFromSleepSchedule(sleepSchedule) },
+    items: [],
+    blocks: [],
+    draft: { title: "Разовая встреча", kind: "fixed_event", date: "2026-08-20", start: "08:00", end: "09:00", estimateMinutes: 60 },
+    trigger: "assistant_setup",
+    rebuildFuture: true,
+    now: new Date("2026-08-19T04:00:00.000Z"),
+  });
+  assert.equal(proposal.wakeAnchorDecision?.wakeTime, "09:00");
+  assert.ok(proposal.conflicts.some((conflict) => conflict.kind === "fixed_overlap"));
+});
+
 test("adaptive RU and EN sleep phrases expose ranges, day parts and tentative changes", () => {
   const adaptive = parseSleepCommand("Графика сна нет, обычно хватает 7–9 часов, хочу вставать утром");
   assert.equal(adaptive.mode, "adaptive");
@@ -519,6 +649,15 @@ test("adaptive RU and EN sleep phrases expose ranges, day parts and tentative ch
   const english = parseSleepCommand("No regular sleep schedule, 7 to 9 hours, early morning");
   assert.equal(english.mode, "adaptive");
   assert.equal(english.wakeDayPart, "early_morning");
+
+  const automaticRu = parseSleepCommand("Графика сна нет, хватает 7–9 часов, без разницы когда вставать");
+  assert.equal(automaticRu.mode, "adaptive");
+  assert.equal(automaticRu.wakeDayPart, "auto");
+  assert.equal(automaticRu.ambiguities.length, 0);
+
+  const automaticEn = parseSleepCommand("No sleep schedule, 7 to 9 hours, choose for me");
+  assert.equal(automaticEn.wakeDayPart, "auto");
+  assert.equal(automaticEn.ambiguities.length, 0);
 
   const late = parseSleepCommand("Сегодня лягу примерно с 3 до 6");
   assert.equal(late.changeKind, "later_unknown");
