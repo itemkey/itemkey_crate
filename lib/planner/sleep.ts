@@ -74,6 +74,41 @@ export function chooseAdaptiveSleepTarget(minMinutes: number, maxMinutes: number
   };
 }
 
+export function normalizeExactSleepDurations(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(value.flatMap((candidate) => {
+    const minutes = Math.round(Number(candidate) / 15) * 15;
+    return Number.isFinite(minutes) && minutes >= 3 * 60 && minutes <= 16 * 60 ? [minutes] : [];
+  }))).sort((left, right) => left - right).slice(0, 6);
+}
+
+export function sleepDurationBounds(scheduleValue: PlannerSleepSchedule): { minMinutes: number; maxMinutes: number } {
+  const schedule = normalizeSleepSchedule(scheduleValue);
+  if (schedule.mode === "fixed") {
+    const values = [schedule.weekdays.durationMinutes, schedule.weekends.durationMinutes];
+    return { minMinutes: Math.min(...values), maxMinutes: Math.max(...values) };
+  }
+  return schedule.durationPreference.mode === "exact"
+    ? {
+        minMinutes: schedule.durationPreference.optionsMinutes[0],
+        maxMinutes: schedule.durationPreference.optionsMinutes.at(-1)!,
+      }
+    : {
+        minMinutes: schedule.durationPreference.minMinutes,
+        maxMinutes: schedule.durationPreference.maxMinutes,
+      };
+}
+
+export function preferredSleepDurations(scheduleValue: PlannerSleepSchedule): number[] {
+  const schedule = normalizeSleepSchedule(scheduleValue);
+  if (schedule.mode === "fixed") return Array.from(new Set([
+    schedule.weekdays.durationMinutes,
+    schedule.weekends.durationMinutes,
+  ])).sort((left, right) => left - right);
+  if (schedule.durationPreference.mode === "exact") return [...schedule.durationPreference.optionsMinutes];
+  return [schedule.targetDurationMinutes];
+}
+
 function isWakeDayPart(value: unknown): value is PlannerWakeDayPart {
   return value === "early_morning" || value === "morning" || value === "late_morning" || value === "auto";
 }
@@ -136,17 +171,24 @@ export function deriveAdaptiveWakeAnchor(
 export function createAdaptiveSleepSchedule(input: {
   minMinutes: number;
   maxMinutes: number;
+  exactDurationsMinutes?: number[];
   dayPart: PlannerWakeDayPart;
   morningPreparationMinutes?: number;
   commitments?: Array<Pick<PlannerDraft, "kind" | "recurrence"> & Partial<Pick<PlannerDraft, "title">>>;
   targetDurationMinutes?: number;
   healthyMinimumConfirmed?: boolean;
 }): PlannerAdaptiveSleepSchedule {
-  const selected = chooseAdaptiveSleepTarget(input.minMinutes, input.maxMinutes);
+  let exact = normalizeExactSleepDurations(input.exactDurationsMinutes);
+  if (exact.length && exact.at(-1)! < MIN_RECOMMENDED_SLEEP_MINUTES && input.healthyMinimumConfirmed) {
+    exact = normalizeExactSleepDurations([...exact, MIN_RECOMMENDED_SLEEP_MINUTES]);
+  }
+  const selected = exact.length
+    ? chooseAdaptiveSleepTarget(exact[0], exact.at(-1)!)
+    : chooseAdaptiveSleepTarget(input.minMinutes, input.maxMinutes);
   const maxForTarget = selected.maxMinutes >= MIN_RECOMMENDED_SLEEP_MINUTES
     ? selected.maxMinutes
     : MIN_RECOMMENDED_SLEEP_MINUTES;
-  const requestedTarget = Number(input.targetDurationMinutes ?? selected.targetDurationMinutes);
+  const requestedTarget = Number(input.targetDurationMinutes ?? (exact.at(-1) ?? selected.targetDurationMinutes));
   const targetDurationMinutes = clamp(
     Math.round(requestedTarget),
     Math.max(MIN_RECOMMENDED_SLEEP_MINUTES, selected.minMinutes),
@@ -156,6 +198,9 @@ export function createAdaptiveSleepSchedule(input: {
   const anchor = deriveAdaptiveWakeAnchorSelection(input.dayPart, preparation, input.commitments);
   return {
     mode: "adaptive",
+    durationPreference: exact.length
+      ? { mode: "exact", optionsMinutes: exact }
+      : { mode: "range", minMinutes: selected.minMinutes, maxMinutes: selected.maxMinutes },
     durationRange: { minMinutes: selected.minMinutes, maxMinutes: selected.maxMinutes },
     targetDurationMinutes,
     wakeAnchor: {
@@ -186,11 +231,23 @@ export function normalizeSleepSchedule(value: unknown): PlannerSleepSchedule {
     const rawAnchor = raw.wakeAnchor && typeof raw.wakeAnchor === "object"
       ? raw.wakeAnchor as Record<string, unknown>
       : {};
-    const selected = chooseAdaptiveSleepTarget(Number(rawRange.minMinutes), Number(rawRange.maxMinutes));
+    const rawPreference = raw.durationPreference && typeof raw.durationPreference === "object"
+      ? raw.durationPreference as Record<string, unknown>
+      : undefined;
+    const exact = rawPreference?.mode === "exact"
+      ? normalizeExactSleepDurations(rawPreference.optionsMinutes)
+      : [];
+    const rangePreference = rawPreference?.mode === "range"
+      ? rawPreference
+      : rawRange;
+    const selected = exact.length
+      ? chooseAdaptiveSleepTarget(exact[0], exact.at(-1)!)
+      : chooseAdaptiveSleepTarget(Number(rangePreference.minMinutes), Number(rangePreference.maxMinutes));
     const dayPart = isWakeDayPart(rawAnchor.dayPart) ? rawAnchor.dayPart : "morning";
     const schedule = createAdaptiveSleepSchedule({
       minMinutes: selected.minMinutes,
       maxMinutes: selected.maxMinutes,
+      exactDurationsMinutes: exact,
       dayPart,
       morningPreparationMinutes: Number(raw.morningPreparationMinutes ?? 60),
       targetDurationMinutes: Number(raw.targetDurationMinutes ?? selected.targetDurationMinutes),
@@ -228,6 +285,16 @@ export function sleepRuleForWakeDate(scheduleValue: PlannerSleepSchedule, wakeDa
   }
   const weekday = plannerWeekday(wakeDate);
   return weekday >= 6 ? schedule.weekends : schedule.weekdays;
+}
+
+function preferredDurationMatches(schedule: PlannerSleepSchedule, durationMinutes: number): boolean {
+  const normalized = normalizeSleepSchedule(schedule);
+  if (normalized.mode === "fixed") return preferredSleepDurations(normalized).includes(durationMinutes);
+  if (normalized.durationPreference.mode === "exact") {
+    return normalized.durationPreference.optionsMinutes.includes(durationMinutes);
+  }
+  return durationMinutes >= normalized.durationPreference.minMinutes
+    && durationMinutes <= normalized.durationPreference.maxMinutes;
 }
 
 export function sleepWindowForWakeDate(
@@ -269,6 +336,11 @@ function concreteEventWindow(event: PlannerSleepEvent): { startAt: string; endAt
   return endAt ? { startAt: event.actualStartAt, endAt } : null;
 }
 
+function plannedEventWindow(event: PlannerSleepEvent): { startAt: string; endAt: string } | null {
+  if (!event.plannedStartAt || !event.plannedEndAt) return null;
+  return { startAt: event.plannedStartAt, endAt: event.plannedEndAt };
+}
+
 function latestRecoverySource(
   profile: PlannerProfile,
   events: PlannerSleepEvent[],
@@ -277,7 +349,7 @@ function latestRecoverySource(
   if (profile.sleepSchedule.mode !== "adaptive") return null;
   const schedule = profile.sleepSchedule;
   const candidates = events.flatMap((event) => {
-    if (event.eventKind !== "sleep_change" || event.state === "tentative" || event.wakeDate >= wakeDate) return [];
+    if (event.state === "tentative" || event.state === "planned" || event.wakeDate >= wakeDate) return [];
     const dayOffset = plannerDayDistance(event.wakeDate, wakeDate);
     if (dayOffset < 1 || dayOffset > 14) return [];
     const concrete = concreteEventWindow(event);
@@ -287,7 +359,10 @@ function latestRecoverySource(
       event,
       dayOffset,
       wakeShiftMinutes: Math.round((new Date(concrete.endAt).getTime() - new Date(planned.endAt).getTime()) / 60_000),
-      deficitMinutes: Math.max(0, schedule.targetDurationMinutes - isoDurationMinutes(concrete.startAt, concrete.endAt)),
+      deficitMinutes: Math.max(
+        0,
+        sleepDurationBounds(schedule).minMinutes - isoDurationMinutes(concrete.startAt, concrete.endAt)
+      ),
     }];
   }).sort((left, right) => right.event.wakeDate.localeCompare(left.event.wakeDate));
   return candidates[0] ?? null;
@@ -306,10 +381,19 @@ function recoveredWindowForWakeDate(
   const remainingShift = source.wakeShiftMinutes > 0
     ? Math.max(0, source.wakeShiftMinutes - shiftStep)
     : Math.min(0, source.wakeShiftMinutes + shiftStep);
-  const maxExtensionByRange = Math.max(0, schedule.durationRange.maxMinutes - schedule.targetDurationMinutes);
+  const bounds = sleepDurationBounds(schedule);
+  const severity = source.event.sleepinessLevel ?? (source.event.restedness === "not_rested" ? 2 : 0);
+  const subjectiveExtension = severity >= 3 ? 60 : severity >= 1 ? Math.max(0, bounds.maxMinutes - schedule.targetDurationMinutes) : 0;
+  const automaticMax = Math.max(bounds.maxMinutes, Math.min(10 * 60, bounds.maxMinutes + 60));
+  const maxExtensionByRange = Math.max(0, automaticMax - schedule.targetDurationMinutes);
   const remainingDeficit = Math.max(0, source.deficitMinutes - (source.dayOffset - 1) * schedule.recovery.maxNightExtensionMinutes);
+  const recoveryWindow = severity >= 3 ? 3 : severity >= 2 ? 2 : severity >= 1 ? 1 : schedule.recovery.horizonNights;
   const extension = source.dayOffset <= schedule.recovery.horizonNights
-    ? Math.min(schedule.recovery.maxNightExtensionMinutes, maxExtensionByRange, remainingDeficit)
+    ? Math.min(
+        schedule.recovery.maxNightExtensionMinutes,
+        maxExtensionByRange,
+        Math.max(remainingDeficit, source.dayOffset <= recoveryWindow ? subjectiveExtension : 0)
+      )
     : 0;
   const endAt = addIsoMinutes(planned.endAt, remainingShift);
   return {
@@ -332,9 +416,13 @@ export function buildPlannerSleepBlocks(
     const planned = sleepWindowForWakeDate(profile.sleepSchedule, wakeDate, profile.timezone);
     const event = byWakeDate.get(wakeDate);
     const eventWindow = event ? concreteEventWindow(event) : null;
+    const plannedOverride = event ? plannedEventWindow(event) : null;
     const recovery = eventWindow
       ? { ...eventWindow, recoveryNight: Boolean(event?.recoveryNight) }
-      : recoveredWindowForWakeDate(profile, events, wakeDate, planned);
+      : plannedOverride
+        ? { ...plannedOverride, recoveryNight: Boolean(event?.recoveryNight) }
+        : recoveredWindowForWakeDate(profile, events, wakeDate, planned);
+    const selectedDurationMinutes = isoDurationMinutes(recovery.startAt, recovery.endAt);
     blocks.push({
       id: `sleep-${wakeDate}`,
       wakeDate,
@@ -345,6 +433,10 @@ export function buildPlannerSleepBlocks(
       plannedEndAt: planned.endAt,
       actualStartAt: event?.actualStartAt,
       actualEndAt: event?.actualEndAt,
+      selectedDurationMinutes,
+      preferredDurationMatched: preferredDurationMatches(profile.sleepSchedule, selectedDurationMinutes),
+      borrowedMinutes: event?.borrowedMinutes ?? Math.max(0, sleepDurationBounds(profile.sleepSchedule).minMinutes - selectedDurationMinutes),
+      selectionReason: event?.selectionReason ?? (recovery.recoveryNight ? "recovery" : "preference"),
       tentative: event?.state === "tentative",
       recoveryNight: recovery.recoveryNight,
       fixed: true,
@@ -361,6 +453,8 @@ export function createPlannerSleepEvent(input: {
   actualStartAt: string;
   actualEndAt?: string;
   restedness?: PlannerSleepEvent["restedness"];
+  sleepinessLevel?: PlannerSleepEvent["sleepinessLevel"];
+  feedbackText?: string;
   eventKind?: PlannerSleepEvent["eventKind"];
   recoveryNight?: boolean;
 }): PlannerSleepEvent {
@@ -375,6 +469,8 @@ export function createPlannerSleepEvent(input: {
     projectedEndAt: actualEndAt ?? addIsoMinutes(actualStartAt, rule.durationMinutes),
     actualEndAt,
     restedness: input.restedness,
+    sleepinessLevel: input.sleepinessLevel,
+    feedbackText: input.feedbackText?.trim().slice(0, 500) || undefined,
     recoveryNight: input.recoveryNight,
   };
 }
@@ -421,13 +517,19 @@ function normalizeOptionalIso(value: unknown, field: string): string | undefined
 
 export function normalizePlannerSleepEvent(value: PlannerSleepEvent): PlannerSleepEvent {
   if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value.wakeDate)) throw new Error("Некорректная дата пробуждения.");
-  const eventKind = value.eventKind === "check_in" ? "check_in" : "sleep_change";
-  const state = value.state === "tentative" || value.state === "completed" ? value.state : "confirmed";
+  const eventKind = value.eventKind === "check_in" || value.eventKind === "planned_adjustment"
+    ? value.eventKind
+    : "sleep_change";
+  const state = value.state === "planned" || value.state === "tentative" || value.state === "completed"
+    ? value.state
+    : "confirmed";
   const actualStartAt = normalizeOptionalIso(value.actualStartAt, "actualStartAt");
   const projectedEndAt = normalizeOptionalIso(value.projectedEndAt, "projectedEndAt");
   const actualEndAt = normalizeOptionalIso(value.actualEndAt, "actualEndAt");
   const estimatedStartFromAt = normalizeOptionalIso(value.estimatedStartFromAt, "estimatedStartFromAt");
   const estimatedStartToAt = normalizeOptionalIso(value.estimatedStartToAt, "estimatedStartToAt");
+  const plannedStartAt = normalizeOptionalIso(value.plannedStartAt, "plannedStartAt");
+  const plannedEndAt = normalizeOptionalIso(value.plannedEndAt, "plannedEndAt");
   if ((estimatedStartFromAt && !estimatedStartToAt) || (!estimatedStartFromAt && estimatedStartToAt)) {
     throw new Error("Для предварительного сна нужны обе границы диапазона.");
   }
@@ -439,12 +541,33 @@ export function normalizePlannerSleepEvent(value: PlannerSleepEvent): PlannerSle
       throw new Error("Пробуждение должно быть позже засыпания.");
     }
   }
-  if (state !== "tentative" && (!actualStartAt || !projectedEndAt)) {
+  if ((plannedStartAt && !plannedEndAt) || (!plannedStartAt && plannedEndAt)) {
+    throw new Error("Для запланированного сна нужны начало и окончание.");
+  }
+  if (plannedStartAt && plannedEndAt && new Date(plannedEndAt) <= new Date(plannedStartAt)) {
+    throw new Error("Запланированное пробуждение должно быть позже засыпания.");
+  }
+  if (state === "planned" && (!plannedStartAt || !plannedEndAt)) {
+    throw new Error("Для плановой корректировки нужны начало и окончание сна.");
+  }
+  if (state !== "planned" && state !== "tentative" && (!actualStartAt || !projectedEndAt)) {
     throw new Error("Для подтверждённого сна нужны время засыпания и подъёма.");
   }
   const restedness = value.restedness === "not_rested" || value.restedness === "okay" || value.restedness === "well_rested"
     ? value.restedness
     : undefined;
+  const sleepinessLevel = Number.isInteger(value.sleepinessLevel) && Number(value.sleepinessLevel) >= 0 && Number(value.sleepinessLevel) <= 4
+    ? value.sleepinessLevel
+    : undefined;
+  const plannedDurationMinutes = plannedStartAt && plannedEndAt
+    ? isoDurationMinutes(plannedStartAt, plannedEndAt)
+    : value.plannedDurationMinutes === undefined
+      ? undefined
+      : clamp(Math.round(Number(value.plannedDurationMinutes)), 3 * 60, 16 * 60);
+  const selectionReason = value.selectionReason === "workload" || value.selectionReason === "hard_deadline"
+    || value.selectionReason === "recovery" || value.selectionReason === "manual"
+    ? value.selectionReason
+    : "preference";
   return {
     wakeDate: value.wakeDate,
     eventKind,
@@ -455,6 +578,13 @@ export function normalizePlannerSleepEvent(value: PlannerSleepEvent): PlannerSle
     estimatedStartFromAt,
     estimatedStartToAt,
     restedness,
+    sleepinessLevel,
+    feedbackText: value.feedbackText?.trim().slice(0, 500) || undefined,
+    plannedStartAt,
+    plannedEndAt,
+    plannedDurationMinutes,
+    selectionReason,
+    borrowedMinutes: clamp(Math.round(Number(value.borrowedMinutes ?? 0)), 0, 2 * 60),
     recoveryNight: Boolean(value.recoveryNight),
   };
 }
@@ -472,7 +602,10 @@ export function plannerSleepDurationSuggestion(
     .sort((left, right) => right.wakeDate.localeCompare(left.wakeDate))
     .slice(0, 7);
   if (comparable.length < 7 || comparable.filter((event) => event.restedness === "not_rested").length < 4) return undefined;
-  const suggestedMinutes = Math.min(schedule.durationRange.maxMinutes, schedule.targetDurationMinutes + 30);
+  const suggestedMinutes = schedule.durationPreference.mode === "exact"
+    ? schedule.durationPreference.optionsMinutes.find((minutes) => minutes > schedule.targetDurationMinutes)
+      ?? schedule.targetDurationMinutes
+    : Math.min(schedule.durationPreference.maxMinutes, schedule.targetDurationMinutes + 30);
   if (suggestedMinutes <= schedule.targetDurationMinutes) return undefined;
   return {
     currentMinutes: schedule.targetDurationMinutes,
@@ -490,8 +623,9 @@ export function buildSleepRecoveryAdvice(
   const schedule = normalizeSleepSchedule(profile.sleepSchedule);
   const window = concreteEventWindow(event);
   if (schedule.mode !== "adaptive" || event.state !== "completed" || !event.actualEndAt || !window) return undefined;
-  const deficitMinutes = Math.max(0, schedule.targetDurationMinutes - isoDurationMinutes(window.startAt, window.endAt));
-  if (deficitMinutes <= 0) return undefined;
+  const severity = event.sleepinessLevel ?? (event.restedness === "not_rested" ? 2 : 0);
+  const deficitMinutes = Math.max(0, sleepDurationBounds(schedule).minMinutes - isoDurationMinutes(window.startAt, window.endAt));
+  if (deficitMinutes <= 0 && severity <= 0) return undefined;
   const nextSleep = sleepWindowForWakeDate(schedule, addPlannerDays(event.wakeDate, 1), profile.timezone);
   const latestNapEnd = Math.min(
     new Date(zonedPlannerDateTimeToUtc(event.wakeDate, "15:00", profile.timezone)).getTime(),
@@ -524,7 +658,11 @@ export function buildSleepRecoveryAdvice(
     }
     candidate += 15 * 60_000;
   }
-  return { deficitMinutes, recoveryNights: schedule.recovery.horizonNights, nap };
+  return {
+    deficitMinutes,
+    recoveryNights: severity >= 3 ? 3 : severity >= 2 ? 2 : severity >= 1 ? 1 : schedule.recovery.horizonNights,
+    nap: severity >= 2 || deficitMinutes > 0 ? nap : undefined,
+  };
 }
 
 export function plannerSleepHealthNotice(
@@ -536,12 +674,12 @@ export function plannerSleepHealthNotice(
   if (schedule.mode !== "adaptive") return undefined;
   const since = addPlannerDays(today, -13);
   const extreme = events.filter((event) => {
-    if (event.eventKind !== "sleep_change" || event.state !== "completed" || event.wakeDate < since || event.wakeDate > today) return false;
+    if (event.state !== "completed" || event.wakeDate < since || event.wakeDate > today) return false;
     const window = concreteEventWindow(event);
     if (!window) return false;
     const planned = sleepWindowForWakeDate(schedule, event.wakeDate, profile.timezone);
     const wakeShift = Math.abs(new Date(window.endAt).getTime() - new Date(planned.endAt).getTime()) / 60_000;
-    return isoDurationMinutes(window.startAt, window.endAt) < 5 * 60 || wakeShift > 3 * 60;
+    return isoDurationMinutes(window.startAt, window.endAt) < 5 * 60 || wakeShift > 3 * 60 || (event.sleepinessLevel ?? 0) >= 4;
   });
   return extreme.length >= 3
     ? "За последние две недели режим сна сильно сбивался несколько раз. Планировщик поможет сохранить дела и время восстановления, но при постоянной сонливости или проблемах со сном стоит обсудить это со специалистом."

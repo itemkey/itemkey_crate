@@ -83,9 +83,18 @@ test("planner upgrade is idempotent and fresh installs include protected sleep",
   assert.match(plannerUpgrade, /create table if not exists public\.planner_sleep_events/);
   assert.match(plannerUpgrade, /add column if not exists restedness/);
   assert.match(plannerUpgrade, /add column if not exists estimated_start_from_at/);
+  assert.match(plannerUpgrade, /add column if not exists planning_policy/);
+  assert.match(plannerUpgrade, /add column if not exists deadline_type/);
+  assert.match(plannerUpgrade, /set deadline_type = 'target'/);
+  assert.match(plannerUpgrade, /add column if not exists milestones/);
+  assert.match(plannerUpgrade, /add column if not exists planned_duration_minutes/);
+  assert.match(plannerUpgrade, /add column if not exists sleepiness_level/);
   assert.match(plannerUpgrade, /planner_reset/);
   assert.doesNotMatch(plannerUpgrade, /drop table if exists public\.planner_(?:profiles|items|blocks|sleep_events)/);
   assert.match(freshSchema, /create table public\.planner_sleep_events/);
   assert.match(freshSchema, /event_kind text not null default 'sleep_change'/);
   assert.match(freshSchema, /assistant_setup_version integer not null default 0/);
+  assert.match(freshSchema, /planning_policy jsonb not null/);
+  assert.match(freshSchema, /deadline_type text not null default 'none'/);
+  assert.match(freshSchema, /sleepiness_level integer null/);
 });

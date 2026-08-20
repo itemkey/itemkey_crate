@@ -4,13 +4,13 @@ import { useState } from "react";
 
 import type { Locale } from "@/lib/i18n";
 import { createOpenSleepEvent, createPlannerSleepEvent, createTentativeSleepEvent } from "@/lib/planner/sleep";
-import type { PlannerProfile, PlannerSleepEvent, PlannerSleepRestedness } from "@/lib/planner/types";
+import type { PlannerProfile, PlannerSleepEvent, PlannerSleepinessLevel, PlannerSleepParseResult, PlannerSleepRestedness } from "@/lib/planner/types";
 import { addPlannerDays, formatDateInTimeZone, formatTimeInTimeZone, plannerTimeToMinutes, zonedPlannerDateTimeToUtc } from "@/lib/planner/time";
 import styles from "./planner-workspace.module.css";
 
 export type SleepMode = "later" | "bedtime" | "woke" | "checkin";
 
-export default function SleepChangedModal({ profile, locale, busy, initialMode = "later", initialWakeDate, onClose, onSubmit, onCheckIn }: {
+export default function SleepChangedModal({ profile, locale, busy, initialMode = "later", initialWakeDate, onClose, onSubmit, onCheckIn, onParseFeedback }: {
   profile: PlannerProfile;
   locale: Locale;
   busy: boolean;
@@ -18,7 +18,8 @@ export default function SleepChangedModal({ profile, locale, busy, initialMode =
   initialWakeDate?: string;
   onClose: () => void;
   onSubmit: (event: PlannerSleepEvent) => Promise<void>;
-  onCheckIn: (wakeDate: string, restedness: PlannerSleepRestedness) => Promise<void>;
+  onCheckIn: (wakeDate: string, level: PlannerSleepinessLevel, feedbackText?: string) => Promise<void>;
+  onParseFeedback: (text: string) => Promise<PlannerSleepParseResult>;
 }) {
   const ru = locale === "ru";
   const now = new Date();
@@ -32,6 +33,8 @@ export default function SleepChangedModal({ profile, locale, busy, initialMode =
   const [estimateTo, setEstimateTo] = useState("06:00");
   const [fullyUnknown, setFullyUnknown] = useState(false);
   const [restedness, setRestedness] = useState<PlannerSleepRestedness | "">("");
+  const [feedbackText, setFeedbackText] = useState("");
+  const [sleepinessLevel, setSleepinessLevel] = useState<PlannerSleepinessLevel | null>(null);
   const [error, setError] = useState("");
 
   function changeMode(next: SleepMode) {
@@ -53,8 +56,8 @@ export default function SleepChangedModal({ profile, locale, busy, initialMode =
     setError("");
     try {
       if (mode === "checkin") {
-        if (!restedness) throw new Error(ru ? "Выберите короткую оценку сна." : "Choose a short sleep rating.");
-        await onCheckIn(startDate, restedness);
+        if (sleepinessLevel === null) throw new Error(ru ? "Подтвердите распознанную степень сонливости от 0 до 4." : "Confirm the recognized sleepiness level from 0 to 4.");
+        await onCheckIn(startDate, sleepinessLevel, feedbackText.trim() || undefined);
         return;
       }
       if (mode === "later") {
@@ -127,13 +130,26 @@ export default function SleepChangedModal({ profile, locale, busy, initialMode =
 
       {mode === "checkin" && <>
         <label>{ru ? "Дата пробуждения" : "Wake date"}<input type="date" required value={startDate} onChange={(event) => setStartDate(event.target.value)} /></label>
-        <Restedness value={restedness} setValue={setRestedness} ru={ru} />
+        <label>{ru ? "Опишите своими словами, как вы себя чувствуете" : "Describe how you feel in your own words"}<textarea value={feedbackText} onChange={(event) => setFeedbackText(event.target.value)} placeholder={ru ? "Немного клонит в сон, но работать могу" : "A little sleepy, but I can work"} /></label>
+        <button type="button" disabled={!feedbackText.trim()} onClick={() => void onParseFeedback(feedbackText).then((result) => { if (result.sleepinessLevel !== undefined) setSleepinessLevel(result.sleepinessLevel); else setError(ru ? "Не удалось уверенно определить степень. Выберите её вручную." : "The level was unclear. Choose it manually."); }).catch((cause) => setError(cause instanceof Error ? cause.message : (ru ? "Не удалось распознать фразу." : "Could not parse the phrase.")))}>{ru ? "Распознать самочувствие" : "Parse how I feel"}</button>
+        <SleepinessScale value={sleepinessLevel} setValue={setSleepinessLevel} ru={ru} />
         <p className={styles.modalLead}>{ru ? "После семи сопоставимых ночей планировщик сможет предложить корректировку цели. Сам он её не применит." : "After seven comparable nights the planner may suggest a target adjustment, but never applies it automatically."}</p>
       </>}
 
       <div className={styles.modalActions}><button type="button" onClick={onClose}>{ru ? "Отмена" : "Cancel"}</button><button className={styles.primaryButton} disabled={busy}>{mode === "checkin" ? (ru ? "Сохранить оценку" : "Save rating") : fullyUnknown && mode === "later" ? (ru ? "Сохранить без перестройки" : "Save without rebuilding") : (ru ? "Показать новый план" : "Review new plan")}</button></div>
     </form>
   </section></div>;
+}
+
+function SleepinessScale({ value, setValue, ru }: {
+  value: PlannerSleepinessLevel | null;
+  setValue: (value: PlannerSleepinessLevel) => void;
+  ru: boolean;
+}) {
+  const labels = ru
+    ? ["Бодр", "Немного сонный", "Заметно сонный", "Очень сонный", "Еле держусь"]
+    : ["Alert", "A little sleepy", "Noticeably sleepy", "Very sleepy", "Barely staying awake"];
+  return <fieldset className={styles.ratingField}><legend>{ru ? "Подтвердите степень сонливости" : "Confirm sleepiness level"}</legend><div className={styles.sleepinessScale}>{labels.map((label, index) => <button type="button" key={label} className={value === index ? styles.segmentedActive : ""} onClick={() => setValue(index as PlannerSleepinessLevel)}><strong>{index}</strong><span>{label}</span></button>)}</div>{value === 4 && <p className={styles.warningBanner}>{ru ? "Если такое состояние повторяется или сейчас небезопасно заниматься обычными делами, стоит отложить рискованные действия и обсудить сон со специалистом. Планировщик не ставит диагнозов." : "If this repeats or normal activities feel unsafe now, postpone risky actions and consider discussing sleep with a professional. The planner does not diagnose."}</p>}</fieldset>;
 }
 
 function Restedness({ value, setValue, ru, optional = false }: {

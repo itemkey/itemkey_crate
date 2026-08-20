@@ -2,7 +2,7 @@ import { NextRequest } from "next/server";
 
 import { assertPlannerCsrf, assertPlannerRevision, plannerErrorResponse, plannerUnauthorizedResponse } from "@/lib/planner/api";
 import { getPlannerStore } from "@/lib/planner/store";
-import type { PlannerSleepRestedness } from "@/lib/planner/types";
+import type { PlannerSleepinessLevel, PlannerSleepRestedness } from "@/lib/planner/types";
 import { getRequestUser } from "@/lib/request-user";
 import { publishRealtimeEvent } from "@/lib/realtime";
 import { getOriginClientId } from "@/lib/realtime-targets";
@@ -15,6 +15,8 @@ export async function POST(request: NextRequest) {
     const body = (await request.json()) as {
       wakeDate?: unknown;
       restedness?: unknown;
+      sleepinessLevel?: unknown;
+      feedbackText?: unknown;
       actualStartAt?: unknown;
       actualEndAt?: unknown;
       expectedRevision?: unknown;
@@ -22,6 +24,8 @@ export async function POST(request: NextRequest) {
     const data = await (await getPlannerStore()).checkInSleep(user.id, {
       wakeDate: typeof body.wakeDate === "string" ? body.wakeDate : "",
       restedness: body.restedness as PlannerSleepRestedness,
+      sleepinessLevel: Number(body.sleepinessLevel) as PlannerSleepinessLevel,
+      feedbackText: typeof body.feedbackText === "string" ? body.feedbackText : undefined,
       actualStartAt: typeof body.actualStartAt === "string" ? body.actualStartAt : undefined,
       actualEndAt: typeof body.actualEndAt === "string" ? body.actualEndAt : undefined,
       expectedRevision: assertPlannerRevision(body.expectedRevision),

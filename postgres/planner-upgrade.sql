@@ -11,6 +11,7 @@ create table if not exists public.planner_profiles (
   availability jsonb not null default '{}'::jsonb,
   energy_windows jsonb not null default '[]'::jsonb,
   sleep_schedule jsonb not null default '{"mode":"fixed","weekdays":{"bedtime":"23:00","durationMinutes":480},"weekends":{"bedtime":"23:00","durationMinutes":480}}'::jsonb,
+  planning_policy jsonb not null default '{"focus":"sleep","minimumNightMinutes":360,"maxNightDeficitMinutes":120,"maxRollingSevenDayDeficitMinutes":180,"recoveryHorizonNights":3,"deadlineChainGapMinutes":5}'::jsonb,
   assistant_setup_version integer not null default 0,
   revision bigint not null default 0,
   onboarding_completed boolean not null default false,
@@ -21,6 +22,8 @@ create table if not exists public.planner_profiles (
 alter table public.planner_profiles
   add column if not exists sleep_schedule jsonb not null
     default '{"mode":"fixed","weekdays":{"bedtime":"23:00","durationMinutes":480},"weekends":{"bedtime":"23:00","durationMinutes":480}}'::jsonb,
+  add column if not exists planning_policy jsonb not null
+    default '{"focus":"sleep","minimumNightMinutes":360,"maxNightDeficitMinutes":120,"maxRollingSevenDayDeficitMinutes":180,"recoveryHorizonNights":3,"deadlineChainGapMinutes":5}'::jsonb,
   add column if not exists assistant_setup_version integer not null default 0;
 
 alter table public.planner_profiles alter column sleep_schedule set default
@@ -36,6 +39,12 @@ create table if not exists public.planner_items (
   energy text not null default 'normal' check (energy in ('low', 'normal', 'high')),
   estimate_minutes integer not null default 60 check (estimate_minutes between 5 and 1440),
   earliest_at timestamptz null, deadline_at timestamptz null,
+  deadline_type text not null default 'none' check (deadline_type in ('none', 'target', 'hard')),
+  target_finish_at timestamptz null,
+  target_finish_mode text not null default 'auto' check (target_finish_mode in ('auto', 'manual')),
+  estimate_confidence text not null default 'normal' check (estimate_confidence in ('high', 'normal', 'low')),
+  deadline_policy jsonb not null default '{"chainMode":"inherit"}'::jsonb,
+  milestones jsonb not null default '[]'::jsonb,
   preferred_windows jsonb not null default '[]'::jsonb,
   avoided_windows jsonb not null default '[]'::jsonb,
   can_split boolean not null default false,
@@ -50,7 +59,27 @@ create table if not exists public.planner_items (
 );
 
 alter table public.planner_items
-  add column if not exists unplaced_reason text not null default '';
+  add column if not exists unplaced_reason text not null default '',
+  add column if not exists deadline_type text not null default 'none',
+  add column if not exists target_finish_at timestamptz null,
+  add column if not exists target_finish_mode text not null default 'auto',
+  add column if not exists estimate_confidence text not null default 'normal',
+  add column if not exists deadline_policy jsonb not null default '{"chainMode":"inherit"}'::jsonb,
+  add column if not exists milestones jsonb not null default '[]'::jsonb;
+
+update public.planner_items
+set deadline_type = 'target'
+where deadline_at is not null and deadline_type = 'none';
+
+alter table public.planner_items drop constraint if exists planner_items_deadline_type_check;
+alter table public.planner_items add constraint planner_items_deadline_type_check
+  check (deadline_type in ('none', 'target', 'hard'));
+alter table public.planner_items drop constraint if exists planner_items_target_finish_mode_check;
+alter table public.planner_items add constraint planner_items_target_finish_mode_check
+  check (target_finish_mode in ('auto', 'manual'));
+alter table public.planner_items drop constraint if exists planner_items_estimate_confidence_check;
+alter table public.planner_items add constraint planner_items_estimate_confidence_check
+  check (estimate_confidence in ('high', 'normal', 'low'));
 
 create index if not exists planner_items_user_status_priority_idx
   on public.planner_items(app_user_id, status, priority, deadline_at, created_at);
@@ -116,14 +145,21 @@ create table if not exists public.planner_legacy_imports (
 create table if not exists public.planner_sleep_events (
   app_user_id uuid not null references public.app_users(id) on delete cascade,
   wake_date date not null,
-  event_kind text not null default 'sleep_change' check (event_kind in ('sleep_change', 'check_in')),
-  state text not null default 'confirmed' check (state in ('tentative', 'confirmed', 'completed')),
+  event_kind text not null default 'sleep_change' check (event_kind in ('sleep_change', 'check_in', 'planned_adjustment')),
+  state text not null default 'confirmed' check (state in ('tentative', 'confirmed', 'completed', 'planned')),
   actual_start_at timestamptz null,
   projected_end_at timestamptz null,
   actual_end_at timestamptz null,
   estimated_start_from_at timestamptz null,
   estimated_start_to_at timestamptz null,
+  planned_start_at timestamptz null,
+  planned_end_at timestamptz null,
+  planned_duration_minutes integer null check (planned_duration_minutes is null or planned_duration_minutes between 360 and 900),
+  selection_reason text null check (selection_reason is null or selection_reason in ('preference', 'workload', 'hard_deadline', 'recovery', 'manual')),
+  borrowed_minutes integer not null default 0 check (borrowed_minutes between 0 and 120),
   restedness text null check (restedness is null or restedness in ('not_rested', 'okay', 'well_rested')),
+  sleepiness_level integer null check (sleepiness_level is null or sleepiness_level between 0 and 4),
+  feedback_text text not null default '',
   recovery_night boolean not null default false,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
@@ -142,7 +178,14 @@ alter table public.planner_sleep_events
   add column if not exists state text not null default 'confirmed',
   add column if not exists estimated_start_from_at timestamptz null,
   add column if not exists estimated_start_to_at timestamptz null,
+  add column if not exists planned_start_at timestamptz null,
+  add column if not exists planned_end_at timestamptz null,
+  add column if not exists planned_duration_minutes integer null,
+  add column if not exists selection_reason text null,
+  add column if not exists borrowed_minutes integer not null default 0,
   add column if not exists restedness text null,
+  add column if not exists sleepiness_level integer null,
+  add column if not exists feedback_text text not null default '',
   add column if not exists recovery_night boolean not null default false;
 
 alter table public.planner_sleep_events alter column actual_start_at drop not null;
@@ -156,22 +199,27 @@ alter table public.planner_sleep_events add constraint planner_sleep_events_time
       and estimated_start_to_at >= estimated_start_from_at))
 );
 
-do $$
-begin
-  if not exists (select 1 from pg_constraint where conname = 'planner_sleep_events_event_kind_check') then
-    alter table public.planner_sleep_events add constraint planner_sleep_events_event_kind_check
-      check (event_kind in ('sleep_change', 'check_in'));
-  end if;
-  if not exists (select 1 from pg_constraint where conname = 'planner_sleep_events_state_check') then
-    alter table public.planner_sleep_events add constraint planner_sleep_events_state_check
-      check (state in ('tentative', 'confirmed', 'completed'));
-  end if;
-  if not exists (select 1 from pg_constraint where conname = 'planner_sleep_events_restedness_check') then
-    alter table public.planner_sleep_events add constraint planner_sleep_events_restedness_check
-      check (restedness is null or restedness in ('not_rested', 'okay', 'well_rested'));
-  end if;
-end
-$$;
+alter table public.planner_sleep_events drop constraint if exists planner_sleep_events_event_kind_check;
+alter table public.planner_sleep_events add constraint planner_sleep_events_event_kind_check
+  check (event_kind in ('sleep_change', 'check_in', 'planned_adjustment'));
+alter table public.planner_sleep_events drop constraint if exists planner_sleep_events_state_check;
+alter table public.planner_sleep_events add constraint planner_sleep_events_state_check
+  check (state in ('tentative', 'confirmed', 'completed', 'planned'));
+alter table public.planner_sleep_events drop constraint if exists planner_sleep_events_restedness_check;
+alter table public.planner_sleep_events add constraint planner_sleep_events_restedness_check
+  check (restedness is null or restedness in ('not_rested', 'okay', 'well_rested'));
+alter table public.planner_sleep_events drop constraint if exists planner_sleep_events_planned_duration_check;
+alter table public.planner_sleep_events add constraint planner_sleep_events_planned_duration_check
+  check (planned_duration_minutes is null or planned_duration_minutes between 360 and 900);
+alter table public.planner_sleep_events drop constraint if exists planner_sleep_events_selection_reason_check;
+alter table public.planner_sleep_events add constraint planner_sleep_events_selection_reason_check
+  check (selection_reason is null or selection_reason in ('preference', 'workload', 'hard_deadline', 'recovery', 'manual'));
+alter table public.planner_sleep_events drop constraint if exists planner_sleep_events_borrowed_minutes_check;
+alter table public.planner_sleep_events add constraint planner_sleep_events_borrowed_minutes_check
+  check (borrowed_minutes between 0 and 120);
+alter table public.planner_sleep_events drop constraint if exists planner_sleep_events_sleepiness_level_check;
+alter table public.planner_sleep_events add constraint planner_sleep_events_sleepiness_level_check
+  check (sleepiness_level is null or sleepiness_level between 0 and 4);
 create index if not exists planner_sleep_events_user_range_idx
   on public.planner_sleep_events(app_user_id, wake_date desc);
 

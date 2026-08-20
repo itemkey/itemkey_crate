@@ -235,11 +235,35 @@
 .fieldExplanation strong { font-size:.68rem;text-transform:uppercase; }
 .fieldExplanation p { margin:.2rem 0 0;color:#353535;font-size:.68rem;line-height:1.45; }
 .fieldExplanation small { margin-top:.28rem;color:#454545;font-size:.62rem;line-height:1.4; }
+.exactDurations { display:grid;gap:.4rem;border:1px solid #666;background:#bdbdbd;padding:.5rem; }
+.exactDurations > div { display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:end;gap:.35rem; }
+.exactDurations > div button { margin-bottom:0; }
+.exactDurations > small { color:#3f3f3f;font-size:.64rem;line-height:1.4; }
 .wakeChoices { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.3rem;margin-top:.4rem; }
 .wakeChoices button { min-height:4.7rem;border:1px solid #666;background:#c1c1c1;padding:.55rem;text-align:left; }
 .wakeChoices strong,.wakeChoices small { display:block; }
 .wakeChoices strong { font-size:.74rem;line-height:1.25; }
 .wakeChoices small { margin-top:.28rem;color:#3c3c3c;font-size:.62rem;line-height:1.35; }
+.focusOverride { border:2px solid #555;background:#bcbcbc;padding:.6rem; }
+.focusOverride p { margin:.2rem 0 .5rem;font-size:.68rem; }
+.sleepPlanList,.deadlineList { display:grid;gap:.35rem; }
+.sleepPlanList article,.deadlineList article { display:grid;gap:.18rem;border:1px solid #666;background:#c4c4c4;padding:.5rem; }
+.sleepPlanList span,.sleepPlanList small,.deadlineList p,.deadlineList small { margin:0;color:#383838;font-size:.64rem;line-height:1.4; }
+.deadlineList article > div { display:flex;align-items:center;justify-content:space-between;gap:.5rem; }
+.deadlineList article > div span { border:1px solid #555;padding:.15rem .3rem;font-size:.61rem;font-weight:900;text-transform:uppercase; }
+.deadlineList article[data-risk="at_risk"],.deadlineList article[data-risk="impossible"] { border-left:5px solid #8a3028; }
+.deadlineList article[data-risk="tight"] { border-left:5px solid #8a6b20; }
+.deadlineList article[data-risk="on_track"] { border-left:5px solid #526b37; }
+.sleepinessScale { display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:.25rem; }
+.sleepinessScale button { display:grid;gap:.2rem;min-height:4rem;align-content:center;text-align:center; }
+.sleepinessScale strong { font-size:1rem; }
+.sleepinessScale span { font-size:.6rem;line-height:1.2; }
+.nowDeadline { display:grid;gap:.2rem;border:1px solid #5f5f5f;background:#bcbcbc;padding:.4rem;margin:.45rem 0; }
+.nowDeadline span { font-size:.64rem;font-weight:900;text-transform:uppercase; }
+.nowDeadline small { font-size:.62rem;line-height:1.35; }
+.deadlinePreview { display:grid;gap:.15rem;border-left:5px solid #6b5b2d;background:#bdbdbd;padding:.45rem .55rem;margin:.45rem 0; }
+.deadlinePreview strong { font-size:.72rem;text-transform:uppercase; }
+.deadlinePreview span { font-size:.63rem;line-height:1.4; }
 .wakePreview,.wakeDecision { border:2px solid #5a5a5a;background:#b5b5b5;padding:.6rem; }
 .wakePreview span,.wakePreview strong,.wakePreview small,.wakeDecision > span,.wakeDecision small { display:block; }
 .wakePreview span,.wakeDecision > span { font-size:.62rem;font-weight:850;text-transform:uppercase; }
@@ -282,6 +306,9 @@
   .dateNav strong { margin-left:auto; } .timeGridShell { max-height:calc(100dvh - 18rem); } .monthGrid { min-width:630px; }
   .agenda article { grid-template-columns:1fr auto; } .agenda time { grid-column:1/-1; }
   .formGrid,.assistantSummary,.assistantChoices,.assistantRecap,.wakeChoices { grid-template-columns:1fr; } .wide { grid-column:auto; }
+  .exactDurations > div { grid-template-columns:1fr; }
+  .sleepinessScale { grid-template-columns:1fr; }
+  .sleepinessScale button { grid-template-columns:auto 1fr;min-height:2.7rem;align-items:center;text-align:left; }
   .statsGrid { grid-template-columns:repeat(2,minmax(0,1fr)); }
   .reviewTable article { grid-template-columns:1fr 1fr;min-width:0; } .reviewTable article > :first-child { grid-column:1/-1; }
   .assistantStep { min-height:18rem; } .modal { max-height:calc(100dvh - .6rem); }

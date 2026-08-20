@@ -35,6 +35,7 @@ type ProfileRow = {
   availability: PlannerProfile["availability"];
   energy_windows: PlannerProfile["energyWindows"];
   sleep_schedule: PlannerProfile["sleepSchedule"];
+  planning_policy: PlannerProfile["planningPolicy"];
   assistant_setup_version: number;
   revision: string | number;
   onboarding_completed: boolean;
@@ -49,7 +50,14 @@ type SleepEventRow = {
   actual_end_at: Date | string | null;
   estimated_start_from_at: Date | string | null;
   estimated_start_to_at: Date | string | null;
+  planned_start_at: Date | string | null;
+  planned_end_at: Date | string | null;
+  planned_duration_minutes: number | null;
+  selection_reason: PlannerSleepEvent["selectionReason"] | null;
+  borrowed_minutes: number;
   restedness: PlannerSleepEvent["restedness"] | null;
+  sleepiness_level: PlannerSleepEvent["sleepinessLevel"] | null;
+  feedback_text: string;
   recovery_night: boolean;
   created_at: Date | string;
   updated_at: Date | string;
@@ -67,6 +75,12 @@ type ItemRow = {
   estimate_minutes: number;
   earliest_at: Date | string | null;
   deadline_at: Date | string | null;
+  deadline_type: PlannerItem["deadlineType"];
+  target_finish_at: Date | string | null;
+  target_finish_mode: PlannerItem["targetFinishMode"];
+  estimate_confidence: PlannerItem["estimateConfidence"];
+  deadline_policy: PlannerItem["deadlinePolicy"];
+  milestones: PlannerItem["milestones"];
   preferred_windows: PlannerItem["preferredWindows"];
   avoided_windows: PlannerItem["avoidedWindows"];
   can_split: boolean;
@@ -106,7 +120,8 @@ type ProposalRow = {
 };
 
 const ITEM_COLUMNS = `id,kind,title,notes,area,location,priority,energy,estimate_minutes,
-  earliest_at,deadline_at,preferred_windows,avoided_windows,can_split,min_chunk_minutes,
+  earliest_at,deadline_at,deadline_type,target_finish_at,target_finish_mode,estimate_confidence,
+  deadline_policy,milestones,preferred_windows,avoided_windows,can_split,min_chunk_minutes,
   buffer_before_minutes,buffer_after_minutes,recurrence,auto_plan,status,unplaced_reason,created_at,updated_at`;
 const BLOCK_COLUMNS = `id,item_id,title,start_at,end_at,status,source,fixed,occurrence_key,
   actual_start_at,actual_end_at,created_at,updated_at`;
@@ -126,6 +141,7 @@ function profileFromRow(row: ProfileRow): PlannerProfile {
     availability: row.availability,
     energyWindows: row.energy_windows,
     sleepSchedule: row.sleep_schedule,
+    planningPolicy: row.planning_policy,
     assistantSetupVersion: row.assistant_setup_version,
     revision: Number(row.revision),
     onboardingCompleted: row.onboarding_completed,
@@ -142,7 +158,14 @@ function sleepEventFromRow(row: SleepEventRow): PlannerSleepEvent {
     actualEndAt: toIso(row.actual_end_at),
     estimatedStartFromAt: toIso(row.estimated_start_from_at),
     estimatedStartToAt: toIso(row.estimated_start_to_at),
+    plannedStartAt: toIso(row.planned_start_at),
+    plannedEndAt: toIso(row.planned_end_at),
+    plannedDurationMinutes: row.planned_duration_minutes ?? undefined,
+    selectionReason: row.selection_reason ?? undefined,
+    borrowedMinutes: row.borrowed_minutes,
     restedness: row.restedness ?? undefined,
+    sleepinessLevel: row.sleepiness_level ?? undefined,
+    feedbackText: row.feedback_text || undefined,
     recoveryNight: row.recovery_night,
     createdAt: toIso(row.created_at),
     updatedAt: toIso(row.updated_at),
@@ -162,6 +185,12 @@ function itemFromRow(row: ItemRow): PlannerItem {
     estimateMinutes: row.estimate_minutes,
     earliestAt: toIso(row.earliest_at),
     deadlineAt: toIso(row.deadline_at),
+    deadlineType: row.deadline_type,
+    targetFinishAt: toIso(row.target_finish_at),
+    targetFinishMode: row.target_finish_mode,
+    estimateConfidence: row.estimate_confidence,
+    deadlinePolicy: row.deadline_policy,
+    milestones: row.milestones,
     preferredWindows: row.preferred_windows,
     avoidedWindows: row.avoided_windows,
     canSplit: row.can_split,
@@ -215,11 +244,11 @@ async function ensureProfile(executor: SqlExecutor, userId: string): Promise<Pla
   const { rows } = await executor.query<ProfileRow>(
     `insert into public.planner_profiles (
        app_user_id,timezone,horizon,reserve_ratio,default_buffer_minutes,
-       availability,energy_windows,sleep_schedule,assistant_setup_version,onboarding_completed
-     ) values ($1::uuid,$2::text,$3::text,$4::numeric,$5::integer,$6::jsonb,$7::jsonb,$8::jsonb,0,false)
+       availability,energy_windows,sleep_schedule,planning_policy,assistant_setup_version,onboarding_completed
+     ) values ($1::uuid,$2::text,$3::text,$4::numeric,$5::integer,$6::jsonb,$7::jsonb,$8::jsonb,$9::jsonb,0,false)
      on conflict (app_user_id) do update set app_user_id = excluded.app_user_id
      returning app_user_id,timezone,horizon,reserve_ratio,default_buffer_minutes,
-       availability,energy_windows,sleep_schedule,assistant_setup_version,revision,onboarding_completed`,
+       availability,energy_windows,sleep_schedule,planning_policy,assistant_setup_version,revision,onboarding_completed`,
     [
       userId,
       defaults.timezone,
@@ -229,6 +258,7 @@ async function ensureProfile(executor: SqlExecutor, userId: string): Promise<Pla
       JSON.stringify(defaults.availability),
       JSON.stringify(defaults.energyWindows),
       JSON.stringify(defaults.sleepSchedule),
+      JSON.stringify(defaults.planningPolicy),
     ]
   );
   return profileFromRow(rows[0]);
@@ -237,7 +267,9 @@ async function ensureProfile(executor: SqlExecutor, userId: string): Promise<Pla
 async function listSleepEvents(executor: SqlExecutor, userId: string): Promise<PlannerSleepEvent[]> {
   const { rows } = await executor.query<SleepEventRow>(
     `select wake_date,event_kind,state,actual_start_at,projected_end_at,actual_end_at,
-       estimated_start_from_at,estimated_start_to_at,restedness,recovery_night,created_at,updated_at
+       estimated_start_from_at,estimated_start_to_at,planned_start_at,planned_end_at,
+       planned_duration_minutes,selection_reason,borrowed_minutes,restedness,sleepiness_level,
+       feedback_text,recovery_night,created_at,updated_at
      from public.planner_sleep_events where app_user_id=$1::uuid order by wake_date asc`,
     [userId]
   );
@@ -249,18 +281,27 @@ async function insertSleepEvent(executor: SqlExecutor, userId: string, event: Pl
   await executor.query(
     `insert into public.planner_sleep_events(
        app_user_id,wake_date,event_kind,state,actual_start_at,projected_end_at,actual_end_at,
-       estimated_start_from_at,estimated_start_to_at,restedness,recovery_night
+       estimated_start_from_at,estimated_start_to_at,planned_start_at,planned_end_at,
+       planned_duration_minutes,selection_reason,borrowed_minutes,restedness,sleepiness_level,
+       feedback_text,recovery_night
      ) values($1::uuid,$2::date,$3::text,$4::text,$5::timestamptz,$6::timestamptz,$7::timestamptz,
-       $8::timestamptz,$9::timestamptz,$10::text,$11::boolean)
+       $8::timestamptz,$9::timestamptz,$10::timestamptz,$11::timestamptz,$12::integer,$13::text,
+       $14::integer,$15::text,$16::integer,$17::text,$18::boolean)
      on conflict(app_user_id,wake_date) do update set
        event_kind=excluded.event_kind,state=excluded.state,actual_start_at=excluded.actual_start_at,
        projected_end_at=excluded.projected_end_at,actual_end_at=excluded.actual_end_at,
        estimated_start_from_at=excluded.estimated_start_from_at,
-       estimated_start_to_at=excluded.estimated_start_to_at,restedness=excluded.restedness,
+       estimated_start_to_at=excluded.estimated_start_to_at,planned_start_at=excluded.planned_start_at,
+       planned_end_at=excluded.planned_end_at,planned_duration_minutes=excluded.planned_duration_minutes,
+       selection_reason=excluded.selection_reason,borrowed_minutes=excluded.borrowed_minutes,
+       restedness=excluded.restedness,sleepiness_level=excluded.sleepiness_level,
+       feedback_text=excluded.feedback_text,
        recovery_night=excluded.recovery_night`,
     [userId,normalized.wakeDate,normalized.eventKind,normalized.state,normalized.actualStartAt ?? null,normalized.projectedEndAt ?? null,
       normalized.actualEndAt ?? null,normalized.estimatedStartFromAt ?? null,normalized.estimatedStartToAt ?? null,
-      normalized.restedness ?? null,Boolean(normalized.recoveryNight)]
+      normalized.plannedStartAt ?? null,normalized.plannedEndAt ?? null,normalized.plannedDurationMinutes ?? null,
+      normalized.selectionReason ?? null,normalized.borrowedMinutes ?? 0,normalized.restedness ?? null,
+      normalized.sleepinessLevel ?? null,normalized.feedbackText ?? "",Boolean(normalized.recoveryNight)]
   );
 }
 
@@ -295,17 +336,22 @@ async function insertItem(executor: SqlExecutor, userId: string, value: PlannerI
   await executor.query(
     `insert into public.planner_items (
        app_user_id,id,kind,title,notes,area,location,priority,energy,estimate_minutes,
-       earliest_at,deadline_at,preferred_windows,avoided_windows,can_split,min_chunk_minutes,
+       earliest_at,deadline_at,deadline_type,target_finish_at,target_finish_mode,estimate_confidence,
+       deadline_policy,milestones,preferred_windows,avoided_windows,can_split,min_chunk_minutes,
        buffer_before_minutes,buffer_after_minutes,recurrence,auto_plan,status,unplaced_reason
      ) values (
        $1::uuid,$2::text,$3::text,$4::text,$5::text,$6::text,$7::text,$8::text,$9::text,$10::integer,
-       $11::timestamptz,$12::timestamptz,$13::jsonb,$14::jsonb,$15::boolean,$16::integer,
-       $17::integer,$18::integer,$19::jsonb,$20::boolean,$21::text,$22::text
+       $11::timestamptz,$12::timestamptz,$13::text,$14::timestamptz,$15::text,$16::text,
+       $17::jsonb,$18::jsonb,$19::jsonb,$20::jsonb,$21::boolean,$22::integer,
+       $23::integer,$24::integer,$25::jsonb,$26::boolean,$27::text,$28::text
      ) on conflict (app_user_id,id) do update set
        kind=excluded.kind,title=excluded.title,notes=excluded.notes,area=excluded.area,
        location=excluded.location,priority=excluded.priority,energy=excluded.energy,
        estimate_minutes=excluded.estimate_minutes,earliest_at=excluded.earliest_at,
-       deadline_at=excluded.deadline_at,preferred_windows=excluded.preferred_windows,
+       deadline_at=excluded.deadline_at,deadline_type=excluded.deadline_type,
+       target_finish_at=excluded.target_finish_at,target_finish_mode=excluded.target_finish_mode,
+       estimate_confidence=excluded.estimate_confidence,deadline_policy=excluded.deadline_policy,
+       milestones=excluded.milestones,preferred_windows=excluded.preferred_windows,
        avoided_windows=excluded.avoided_windows,can_split=excluded.can_split,
        min_chunk_minutes=excluded.min_chunk_minutes,buffer_before_minutes=excluded.buffer_before_minutes,
        buffer_after_minutes=excluded.buffer_after_minutes,recurrence=excluded.recurrence,
@@ -313,6 +359,8 @@ async function insertItem(executor: SqlExecutor, userId: string, value: PlannerI
     [
       userId, item.id, item.kind, item.title, item.notes ?? "", item.area ?? "", item.location ?? "",
       item.priority, item.energy, item.estimateMinutes, item.earliestAt ?? null, item.deadlineAt ?? null,
+      item.deadlineType,item.targetFinishAt ?? null,item.targetFinishMode,item.estimateConfidence,
+      JSON.stringify(item.deadlinePolicy),JSON.stringify(item.milestones),
       JSON.stringify(item.preferredWindows), JSON.stringify(item.avoidedWindows), item.canSplit,
       item.minChunkMinutes, item.bufferBeforeMinutes, item.bufferAfterMinutes,
       item.recurrence ? JSON.stringify(item.recurrence) : null, item.autoPlan, item.status, item.unplacedReason ?? "",
@@ -344,7 +392,7 @@ async function lockProfile(client: PoolClient, userId: string): Promise<PlannerP
   await ensureProfile(client, userId);
   const { rows } = await client.query<ProfileRow>(
     `select app_user_id,timezone,horizon,reserve_ratio,default_buffer_minutes,
-       availability,energy_windows,sleep_schedule,assistant_setup_version,revision,onboarding_completed
+       availability,energy_windows,sleep_schedule,planning_policy,assistant_setup_version,revision,onboarding_completed
      from public.planner_profiles where app_user_id=$1::uuid for update`,
     [userId]
   );
@@ -441,13 +489,13 @@ function createPlannerStore(): PlannerStore {
           `update public.planner_profiles set timezone=$2::text,horizon=$3::text,
              reserve_ratio=$4::numeric,default_buffer_minutes=$5::integer,
              availability=$6::jsonb,energy_windows=$7::jsonb,
-             sleep_schedule=$8::jsonb,assistant_setup_version=$9::integer,
-             onboarding_completed=$10::boolean,revision=revision+1
+             sleep_schedule=$8::jsonb,planning_policy=$9::jsonb,assistant_setup_version=$10::integer,
+             onboarding_completed=$11::boolean,revision=revision+1
            where app_user_id=$1::uuid
            returning app_user_id,timezone,horizon,reserve_ratio,default_buffer_minutes,
-             availability,energy_windows,sleep_schedule,assistant_setup_version,revision,onboarding_completed`,
+             availability,energy_windows,sleep_schedule,planning_policy,assistant_setup_version,revision,onboarding_completed`,
           [userId,next.timezone,next.horizon,next.reserveRatio,next.defaultBufferMinutes,
-            JSON.stringify(next.availability),JSON.stringify(next.energyWindows),JSON.stringify(next.sleepSchedule),
+            JSON.stringify(next.availability),JSON.stringify(next.energyWindows),JSON.stringify(next.sleepSchedule),JSON.stringify(next.planningPolicy),
             next.assistantSetupVersion,next.onboardingCompleted]
         );
         return profileFromRow(rows[0]);
@@ -531,10 +579,10 @@ function createPlannerStore(): PlannerStore {
             `update public.planner_profiles set timezone=$2::text,horizon=$3::text,
                reserve_ratio=$4::numeric,default_buffer_minutes=$5::integer,
                availability=$6::jsonb,energy_windows=$7::jsonb,sleep_schedule=$8::jsonb,
-               assistant_setup_version=$9::integer,onboarding_completed=$10::boolean
+               planning_policy=$9::jsonb,assistant_setup_version=$10::integer,onboarding_completed=$11::boolean
              where app_user_id=$1::uuid`,
             [userId,next.timezone,next.horizon,next.reserveRatio,next.defaultBufferMinutes,
-              JSON.stringify(next.availability),JSON.stringify(next.energyWindows),JSON.stringify(next.sleepSchedule),
+              JSON.stringify(next.availability),JSON.stringify(next.energyWindows),JSON.stringify(next.sleepSchedule),JSON.stringify(next.planningPolicy),
               next.assistantSetupVersion,next.onboardingCompleted]
           );
         }
@@ -690,10 +738,10 @@ function createPlannerStore(): PlannerStore {
             `update public.planner_profiles set timezone=$2::text,horizon=$3::text,
                reserve_ratio=$4::numeric,default_buffer_minutes=$5::integer,
                availability=$6::jsonb,energy_windows=$7::jsonb,sleep_schedule=$8::jsonb,
-               assistant_setup_version=$9::integer,onboarding_completed=$10::boolean
+               planning_policy=$9::jsonb,assistant_setup_version=$10::integer,onboarding_completed=$11::boolean
              where app_user_id=$1::uuid`,
             [userId,previous.timezone,previous.horizon,previous.reserveRatio,previous.defaultBufferMinutes,
-              JSON.stringify(previous.availability),JSON.stringify(previous.energyWindows),JSON.stringify(previous.sleepSchedule),
+              JSON.stringify(previous.availability),JSON.stringify(previous.energyWindows),JSON.stringify(previous.sleepSchedule),JSON.stringify(previous.planningPolicy),
               previous.assistantSetupVersion,previous.onboardingCompleted]
           );
         }
@@ -732,8 +780,8 @@ function createPlannerStore(): PlannerStore {
         const profile = await lockProfile(client, userId);
         if (profile.revision !== input.expectedRevision) throw new PlannerRevisionError();
         if (!/^\d{4}-\d{2}-\d{2}$/.test(input.wakeDate)) throw new Error("Некорректная дата пробуждения.");
-        if (!(["not_rested", "okay", "well_rested"] as const).includes(input.restedness)) {
-          throw new Error("Выберите, насколько удалось выспаться.");
+        if (![0, 1, 2, 3, 4].includes(input.sleepinessLevel)) {
+          throw new Error("Подтвердите степень сонливости по шкале от 0 до 4.");
         }
         const events = await listSleepEvents(client, userId);
         const existing = events.find((event) => event.wakeDate === input.wakeDate);
@@ -753,12 +801,18 @@ function createPlannerStore(): PlannerStore {
         const event: PlannerSleepEvent = {
           ...existing,
           wakeDate: input.wakeDate,
-          eventKind: existing?.eventKind ?? "check_in",
+          eventKind: "check_in",
           state: "completed",
           actualStartAt,
           projectedEndAt: actualEndAt,
           actualEndAt,
-          restedness: input.restedness,
+          restedness: input.restedness ?? (input.sleepinessLevel === 0
+            ? "well_rested"
+            : input.sleepinessLevel === 1
+              ? "okay"
+              : "not_rested"),
+          sleepinessLevel: input.sleepinessLevel,
+          feedbackText: input.feedbackText?.trim().slice(0, 1000),
           recoveryNight: existing?.recoveryNight ?? derivedBlock?.recoveryNight,
         };
         await insertSleepEvent(client, userId, event);
@@ -790,10 +844,11 @@ function createPlannerStore(): PlannerStore {
         const { rows: updated } = await client.query<{ revision: string | number }>(
           `update public.planner_profiles set horizon=$2::text,reserve_ratio=$3::numeric,
              default_buffer_minutes=$4::integer,availability=$5::jsonb,energy_windows=$6::jsonb,
-             sleep_schedule=$7::jsonb,assistant_setup_version=0,onboarding_completed=false,
+             sleep_schedule=$7::jsonb,planning_policy=$8::jsonb,assistant_setup_version=0,onboarding_completed=false,
              revision=revision+1 where app_user_id=$1::uuid returning revision`,
           [userId,defaults.horizon,defaults.reserveRatio,defaults.defaultBufferMinutes,
-            JSON.stringify(defaults.availability),JSON.stringify(defaults.energyWindows),JSON.stringify(defaults.sleepSchedule)]
+            JSON.stringify(defaults.availability),JSON.stringify(defaults.energyWindows),JSON.stringify(defaults.sleepSchedule),
+            JSON.stringify(defaults.planningPolicy)]
         );
         return Number(updated[0].revision);
       });

@@ -35,8 +35,30 @@ export type PlannerWakeAnchorReason = {
   unplacedMinutes?: number;
 };
 export type PlannerSleepRestedness = "not_rested" | "okay" | "well_rested";
-export type PlannerSleepEventKind = "sleep_change" | "check_in";
-export type PlannerSleepEventState = "tentative" | "confirmed" | "completed";
+export type PlannerSleepinessLevel = 0 | 1 | 2 | 3 | 4;
+export type PlannerSleepEventKind = "sleep_change" | "check_in" | "planned_adjustment";
+export type PlannerSleepEventState = "planned" | "tentative" | "confirmed" | "completed";
+export type PlannerPlanningFocus = "sleep" | "work";
+
+export type PlannerSleepDurationPreference =
+  | {
+      mode: "range";
+      minMinutes: number;
+      maxMinutes: number;
+    }
+  | {
+      mode: "exact";
+      optionsMinutes: number[];
+    };
+
+export type PlannerPlanningPolicy = {
+  focus: PlannerPlanningFocus;
+  minimumNightMinutes: 360;
+  maxNightDeficitMinutes: 120;
+  maxRollingSevenDayDeficitMinutes: 180;
+  recoveryHorizonNights: 3;
+  deadlineChainGapMinutes: 0 | 5 | 15;
+};
 
 export type PlannerFixedSleepSchedule = {
   mode: "fixed";
@@ -46,6 +68,8 @@ export type PlannerFixedSleepSchedule = {
 
 export type PlannerAdaptiveSleepSchedule = {
   mode: "adaptive";
+  durationPreference: PlannerSleepDurationPreference;
+  /** Kept in normalized output for compatibility with older clients. */
   durationRange: {
     minMinutes: number;
     maxMinutes: number;
@@ -79,6 +103,13 @@ export type PlannerSleepEvent = {
   estimatedStartFromAt?: string;
   estimatedStartToAt?: string;
   restedness?: PlannerSleepRestedness;
+  sleepinessLevel?: PlannerSleepinessLevel;
+  feedbackText?: string;
+  plannedStartAt?: string;
+  plannedEndAt?: string;
+  plannedDurationMinutes?: number;
+  selectionReason?: "preference" | "workload" | "hard_deadline" | "recovery" | "manual";
+  borrowedMinutes?: number;
   recoveryNight?: boolean;
   createdAt?: string;
   updatedAt?: string;
@@ -94,6 +125,10 @@ export type PlannerSleepBlock = {
   plannedEndAt: string;
   actualStartAt?: string;
   actualEndAt?: string;
+  selectedDurationMinutes: number;
+  preferredDurationMatched: boolean;
+  borrowedMinutes: number;
+  selectionReason: "preference" | "workload" | "hard_deadline" | "recovery" | "manual";
   tentative?: boolean;
   recoveryNight?: boolean;
   fixed: true;
@@ -110,6 +145,7 @@ export type PlannerProfile = {
   availability: PlannerAvailability;
   energyWindows: PlannerEnergyWindow[];
   sleepSchedule: PlannerSleepSchedule;
+  planningPolicy: PlannerPlanningPolicy;
   assistantSetupVersion: number;
   revision: number;
   onboardingCompleted: boolean;
@@ -121,6 +157,25 @@ export type PlannerRecurrence = {
   startDate?: string;
   startTime?: string;
   endTime?: string;
+};
+
+export type PlannerDeadlineType = "none" | "target" | "hard";
+export type PlannerEstimateConfidence = "high" | "normal" | "low";
+export type PlannerTargetFinishMode = "auto" | "manual";
+export type PlannerDeadlineChainMode = "inherit" | "off" | "auto" | "pinned";
+
+export type PlannerDeadlinePolicy = {
+  chainMode: PlannerDeadlineChainMode;
+  gapMinutes?: 0 | 5 | 15;
+  nextItemId?: string;
+};
+
+export type PlannerMilestone = {
+  id: string;
+  title: string;
+  estimateMinutes: number;
+  targetAt: string;
+  order: number;
 };
 
 export type PlannerItem = {
@@ -135,6 +190,12 @@ export type PlannerItem = {
   estimateMinutes: number;
   earliestAt?: string;
   deadlineAt?: string;
+  deadlineType: PlannerDeadlineType;
+  targetFinishAt?: string;
+  targetFinishMode: PlannerTargetFinishMode;
+  estimateConfidence: PlannerEstimateConfidence;
+  deadlinePolicy: PlannerDeadlinePolicy;
+  milestones: PlannerMilestone[];
   preferredWindows: PlannerTimeWindow[];
   avoidedWindows: PlannerTimeWindow[];
   canSplit: boolean;
@@ -237,6 +298,33 @@ export type PlannerUnplaced = {
   reason: string;
 };
 
+export type PlannerDeadlineRisk = "on_track" | "tight" | "at_risk" | "impossible";
+
+export type PlannerDeadlineAnalysis = {
+  itemId: string;
+  title: string;
+  deadlineType: Exclude<PlannerDeadlineType, "none">;
+  deadlineAt: string;
+  targetFinishAt: string;
+  remainingMinutes: number;
+  availableMinutes: number;
+  slackMinutes: number;
+  latestSafeStartAt?: string;
+  risk: PlannerDeadlineRisk;
+  nextItemId?: string;
+  nextItemTitle?: string;
+};
+
+export type PlannerSleepPlanSummary = {
+  wakeDate: string;
+  startAt: string;
+  endAt: string;
+  durationMinutes: number;
+  preferredDurationMatched: boolean;
+  borrowedMinutes: number;
+  reason: PlannerSleepEvent["selectionReason"];
+};
+
 export type PlannerProposal = {
   id?: string;
   baseRevision: number;
@@ -250,9 +338,13 @@ export type PlannerProposal = {
     | "sleep_changed";
   normalizedDraft?: PlannerDraft;
   normalizedDrafts?: PlannerDraft[];
+  blockExtension?: PlannerProposalInput["blockExtension"];
   changes: PlannerProposalChange[];
   conflicts: PlannerConflict[];
   unplaced: PlannerUnplaced[];
+  effectiveFocus?: PlannerPlanningFocus;
+  deadlineAnalysis?: PlannerDeadlineAnalysis[];
+  sleepPlan?: PlannerSleepPlanSummary[];
   horizonStart: string;
   horizonEnd: string;
   recoveryAdvice?: {
@@ -309,11 +401,19 @@ export type PlannerProposalInput = {
   sleepEvent?: PlannerSleepEvent;
   trigger?: PlannerProposal["trigger"];
   rebuildFuture?: boolean;
+  planningFocusOverride?: PlannerPlanningFocus;
+  blockExtension?: {
+    blockId: string;
+    minutes: 15;
+  };
 };
 
 export type PlannerSleepCheckInInput = {
   wakeDate: string;
-  restedness: PlannerSleepRestedness;
+  /** Compatibility summary derived from sleepinessLevel by the server. */
+  restedness?: PlannerSleepRestedness;
+  sleepinessLevel: PlannerSleepinessLevel;
+  feedbackText?: string;
   expectedRevision: number;
   actualStartAt?: string;
   actualEndAt?: string;
@@ -344,6 +444,9 @@ export type PlannerSleepParseResult = {
     minMinutes: number;
     maxMinutes: number;
   };
+  exactDurationsMinutes?: number[];
+  planningFocus?: PlannerPlanningFocus;
+  sleepinessLevel?: PlannerSleepinessLevel;
   wakeDayPart?: PlannerWakeDayPart;
   changeKind?: "later_unknown" | "bedtime_now" | "wake_now";
   estimatedBedtimeRange?: PlannerTimeWindow;
@@ -372,6 +475,15 @@ export const DEFAULT_PLANNER_SLEEP_SCHEDULE: PlannerFixedSleepSchedule = {
   weekends: { bedtime: "23:00", durationMinutes: 8 * 60 },
 };
 
+export const DEFAULT_PLANNER_PLANNING_POLICY: PlannerPlanningPolicy = {
+  focus: "sleep",
+  minimumNightMinutes: 360,
+  maxNightDeficitMinutes: 120,
+  maxRollingSevenDayDeficitMinutes: 180,
+  recoveryHorizonNights: 3,
+  deadlineChainGapMinutes: 5,
+};
+
 export function createDefaultPlannerProfile(timezone = "Europe/Minsk"): PlannerProfile {
   return {
     timezone,
@@ -381,6 +493,7 @@ export function createDefaultPlannerProfile(timezone = "Europe/Minsk"): PlannerP
     availability: DEFAULT_PLANNER_AVAILABILITY,
     energyWindows: DEFAULT_PLANNER_ENERGY_WINDOWS,
     sleepSchedule: DEFAULT_PLANNER_SLEEP_SCHEDULE,
+    planningPolicy: DEFAULT_PLANNER_PLANNING_POLICY,
     assistantSetupVersion: 0,
     revision: 0,
     onboardingCompleted: false,

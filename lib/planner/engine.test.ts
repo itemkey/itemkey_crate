@@ -3,11 +3,15 @@ import test from "node:test";
 
 import {
   applyProposalChanges,
+  analyzePlannerDeadlines,
   buildPlannerProposal,
+  normalizePlannerItem,
   parsePlannerCommand,
   parsePlannerCommands,
   parseSleepCommand,
   plannerCompletionSuggestion,
+  resolvePlannerTargetFinish,
+  suggestPlannerMilestones,
 } from "./engine.ts";
 import {
   availabilityFromSleepSchedule,
@@ -21,6 +25,7 @@ import {
   plannerSleepDurationSuggestion,
   plannerSleepHealthNotice,
   sleepRuleForWakeDate,
+  normalizeSleepSchedule,
 } from "./sleep.ts";
 import { createDefaultPlannerProfile, type PlannerBlock, type PlannerItem } from "./types.ts";
 import { formatDateInTimeZone, formatTimeInTimeZone, plannerTimeToMinutes, zonedPlannerDateTimeToUtc } from "./time.ts";
@@ -39,6 +44,11 @@ function item(overrides: Partial<PlannerItem> = {}): PlannerItem {
     priority: "high",
     energy: "high",
     estimateMinutes: 60,
+    deadlineType: "none",
+    targetFinishMode: "auto",
+    estimateConfidence: "normal",
+    deadlinePolicy: { chainMode: "inherit" },
+    milestones: [],
     preferredWindows: [],
     avoidedWindows: [],
     canSplit: false,
@@ -434,6 +444,9 @@ test("sleep phrases parse deterministically and require missing fields", () => {
     bedtime: "23:30",
     durationMinutes: 480,
     durationRange: undefined,
+    exactDurationsMinutes: undefined,
+    planningFocus: undefined,
+    sleepinessLevel: undefined,
     wakeDayPart: undefined,
     changeKind: undefined,
     estimatedBedtimeRange: undefined,
@@ -731,7 +744,7 @@ test("short adaptive sleep creates a bounded three-night recovery opportunity", 
     const block = blocks.find((candidate) => candidate.wakeDate === date)!;
     return (new Date(block.endAt).getTime() - new Date(block.startAt).getTime()) / 60_000;
   });
-  assert.deepEqual(durations, [540, 540, 540, 480]);
+  assert.deepEqual(durations, [540, 480, 480, 480]);
 });
 
 test("seven comparable check-ins only suggest a longer target", () => {
@@ -762,11 +775,11 @@ test("a short completed night offers at most a twenty minute early nap without a
   const event = createPlannerSleepEvent({
     profile: adaptiveProfile,
     wakeDate: "2026-08-20",
-    actualStartAt: "2026-08-20T00:00:00.000Z",
+    actualStartAt: "2026-08-20T02:00:00.000Z",
     actualEndAt: "2026-08-20T06:00:00.000Z",
   });
   const advice = buildSleepRecoveryAdvice(adaptiveProfile, event, []);
-  assert.equal(advice?.deficitMinutes, 120);
+  assert.equal(advice?.deficitMinutes, 60);
   assert.ok(advice?.nap);
   assert.equal((new Date(advice!.nap!.endAt).getTime() - new Date(advice!.nap!.startAt).getTime()) / 60_000, 20);
   const proposal = buildPlannerProposal({
@@ -779,6 +792,127 @@ test("a short completed night offers at most a twenty minute early nap without a
   });
   assert.ok(proposal.recoveryAdvice?.nap);
   assert.ok(!proposal.changes.some((change) => change.kind === "add_item" && /восстановитель/i.test(change.item.title)));
+});
+
+test("exact sleep options are unique, sorted and old ranges remain compatible", () => {
+  const exact = createAdaptiveSleepSchedule({
+    minMinutes: 7 * 60,
+    maxMinutes: 9 * 60,
+    exactDurationsMinutes: [9 * 60, 7 * 60, 9 * 60],
+    dayPart: "morning",
+  });
+  assert.deepEqual(exact.durationPreference, { mode: "exact", optionsMinutes: [420, 540] });
+  assert.equal(exact.targetDurationMinutes, 540);
+  const confirmedShort = createAdaptiveSleepSchedule({
+    minMinutes: 300, maxMinutes: 360, exactDurationsMinutes: [300, 360], dayPart: "morning", healthyMinimumConfirmed: true,
+  });
+  assert.ok(confirmedShort.durationPreference.mode === "exact" && confirmedShort.durationPreference.optionsMinutes.includes(420));
+  const old = normalizeSleepSchedule({
+    mode: "adaptive",
+    durationRange: { minMinutes: 420, maxMinutes: 540 },
+    targetDurationMinutes: 480,
+    wakeAnchor: { dayPart: "morning", localTime: "09:00", toleranceMinutes: 60 },
+    morningPreparationMinutes: 60,
+    recovery: { horizonNights: 3, maxNightExtensionMinutes: 60, maxDailyAnchorShiftMinutes: 60, suggestShortNap: true },
+  });
+  assert.equal(old.mode, "adaptive");
+  assert.deepEqual(old.mode === "adaptive" ? old.durationPreference : undefined, { mode: "range", minMinutes: 420, maxMinutes: 540 });
+});
+
+test("sleep priority keeps 9 hours while work priority chooses 7 only when it fits more work", () => {
+  const schedule = createAdaptiveSleepSchedule({
+    minMinutes: 420,
+    maxMinutes: 540,
+    exactDurationsMinutes: [420, 540],
+    dayPart: "morning",
+  });
+  const base = {
+    ...profile,
+    reserveRatio: 0.2,
+    defaultBufferMinutes: 0,
+    sleepSchedule: schedule,
+    availability: availabilityFromSleepSchedule(schedule),
+  };
+  const longTask = item({ id: "long-exact", estimateMinutes: 13 * 60, energy: "normal" });
+  const strict = buildPlannerProposal({
+    profile: { ...base, planningPolicy: { ...base.planningPolicy, focus: "sleep" } },
+    items: [longTask], blocks: [], now: new Date("2026-08-19T03:00:00.000Z"),
+  });
+  assert.ok(strict.sleepPlan?.every((night) => night.durationMinutes >= 540));
+  assert.ok(strict.unplaced.some((entry) => entry.itemId === longTask.id));
+  const work = buildPlannerProposal({
+    profile: { ...base, planningPolicy: { ...base.planningPolicy, focus: "work" } },
+    items: [longTask], blocks: [], now: new Date("2026-08-19T03:00:00.000Z"),
+  });
+  assert.ok(work.sleepPlan?.some((night) => night.durationMinutes === 420));
+  assert.ok(!work.unplaced.some((entry) => entry.itemId === longTask.id));
+});
+
+test("only a hard deadline can borrow below the minimum and creates recovery nights", () => {
+  const schedule = createAdaptiveSleepSchedule({
+    minMinutes: 420,
+    maxMinutes: 420,
+    exactDurationsMinutes: [420],
+    dayPart: "morning",
+  });
+  const workProfile = {
+    ...profile,
+    reserveRatio: 0,
+    defaultBufferMinutes: 15,
+    sleepSchedule: schedule,
+    availability: availabilityFromSleepSchedule(schedule),
+    planningPolicy: { ...profile.planningPolicy, focus: "work" as const },
+  };
+  const hard = item({
+    id: "hard-borrow",
+    estimateMinutes: 17 * 60,
+    energy: "normal",
+    deadlineType: "hard",
+    deadlineAt: "2026-08-20T05:00:00.000Z",
+  });
+  const proposal = buildPlannerProposal({ profile: workProfile, items: [hard], blocks: [], now: new Date("2026-08-19T03:00:00.000Z") });
+  const borrowed = proposal.sleepPlan?.find((night) => night.borrowedMinutes > 0);
+  assert.ok(borrowed);
+  assert.ok(borrowed!.durationMinutes >= 360);
+  assert.ok(borrowed!.borrowedMinutes <= 120);
+  assert.ok(proposal.sleepPlan?.some((night) => night.reason === "recovery"));
+  assert.ok(!proposal.unplaced.some((entry) => entry.itemId === hard.id));
+});
+
+test("deadline buffer, milestones, risk and parser use deterministic deadline rules", () => {
+  const hard = normalizePlannerItem({
+    ...item({ id: "deadline-core", estimateMinutes: 500 }),
+    deadlineType: "hard",
+    deadlineAt: "2026-08-21T18:00:00.000Z",
+    estimateConfidence: "low",
+  });
+  const target = resolvePlannerTargetFinish(hard, profile, [], new Date("2026-08-19T04:00:00.000Z"));
+  assert.ok(target && target < hard.deadlineAt!);
+  assert.equal(suggestPlannerMilestones(hard, target, new Date("2026-08-19T04:00:00.000Z")).length, 5);
+  assert.equal(analyzePlannerDeadlines([hard], [], profile, new Date("2026-08-19T04:00:00.000Z"))[0].deadlineType, "hard");
+  const parsedTask = parsePlannerCommand("жёсткий дедлайн завтра к 18:00, отчёт 2 часа", profile, new Date("2026-08-19T04:00:00.000Z"));
+  assert.equal(parsedTask.deadlineType, "hard");
+  assert.equal(formatTimeInTimeZone(new Date(parsedTask.deadlineAt!), profile.timezone), "18:00");
+  const parsedSleep = parseSleepCommand("Мне подходит 7 или 9 часов, работа важнее сна");
+  assert.deepEqual(parsedSleep.exactDurationsMinutes, [420, 540]);
+  assert.equal(parsedSleep.planningFocus, "work");
+  assert.equal(parseSleepCommand("Еле держусь и засыпаю на ходу").sleepinessLevel, 4);
+});
+
+test("sleepiness levels create bounded recovery without treating an exact 8-hour fact as debt", () => {
+  const schedule = createAdaptiveSleepSchedule({ minMinutes: 420, maxMinutes: 540, exactDurationsMinutes: [420, 540], dayPart: "morning" });
+  const adaptiveProfile = { ...profile, sleepSchedule: schedule };
+  const eightHours = createPlannerSleepEvent({
+    profile: adaptiveProfile,
+    wakeDate: "2026-08-20",
+    actualStartAt: "2026-08-19T22:00:00.000Z",
+    actualEndAt: "2026-08-20T06:00:00.000Z",
+    sleepinessLevel: 0,
+  });
+  assert.equal(buildSleepRecoveryAdvice(adaptiveProfile, eightHours, []), undefined);
+  const sleepy = { ...eightHours, sleepinessLevel: 3 as const };
+  const recovered = buildPlannerSleepBlocks(adaptiveProfile, [sleepy], "2026-08-20", "2026-08-23");
+  assert.equal(recovered.filter((block) => block.wakeDate > sleepy.wakeDate && block.recoveryNight).length, 3);
 });
 
 test("repeated extreme sleep changes produce a neutral health notice", () => {

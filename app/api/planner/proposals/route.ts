@@ -2,7 +2,7 @@ import { NextRequest } from "next/server";
 
 import { assertPlannerCsrf, plannerErrorResponse, plannerUnauthorizedResponse } from "@/lib/planner/api";
 import { getPlannerStore } from "@/lib/planner/store";
-import type { PlannerDraft, PlannerProfile, PlannerProposal, PlannerSleepEvent } from "@/lib/planner/types";
+import type { PlannerDraft, PlannerPlanningFocus, PlannerProfile, PlannerProposal, PlannerSleepEvent } from "@/lib/planner/types";
 import { getRequestUser } from "@/lib/request-user";
 
 export async function POST(request: NextRequest) {
@@ -18,10 +18,12 @@ export async function POST(request: NextRequest) {
       sleepEvent?: PlannerSleepEvent;
       trigger?: PlannerProposal["trigger"];
       rebuildFuture?: unknown;
+      planningFocusOverride?: unknown;
+      blockExtension?: { blockId?: unknown; minutes?: unknown };
     };
     const command = typeof body.command === "string" ? body.command.slice(0, 12_000) : undefined;
     const drafts = Array.isArray(body.drafts) ? body.drafts.slice(0, 100) : undefined;
-    if (!command && !body.draft && !drafts?.length && !body.profilePatch && !body.sleepEvent
+    if (!command && !body.draft && !drafts?.length && !body.profilePatch && !body.sleepEvent && !body.blockExtension
       && body.trigger !== "autoplan" && body.trigger !== "day_refresh" && body.trigger !== "assistant_update") {
       throw new Error("Опишите новое дело или запустите автоплан.");
     }
@@ -33,6 +35,12 @@ export async function POST(request: NextRequest) {
       sleepEvent: body.sleepEvent,
       trigger: body.trigger,
       rebuildFuture: Boolean(body.rebuildFuture),
+      planningFocusOverride: body.planningFocusOverride === "sleep" || body.planningFocusOverride === "work"
+        ? body.planningFocusOverride as PlannerPlanningFocus
+        : undefined,
+      blockExtension: typeof body.blockExtension?.blockId === "string" && Number(body.blockExtension.minutes) === 15
+        ? { blockId: body.blockExtension.blockId.slice(0, 160), minutes: 15 }
+        : undefined,
     });
     return Response.json({ data }, { status: 201 });
   } catch (error) {

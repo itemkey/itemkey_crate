@@ -35,6 +35,9 @@ type AssistantDraft = {
   weekendDuration: string;
   adaptiveMinDuration: string;
   adaptiveMaxDuration: string;
+  adaptiveDurationMode: "range" | "exact";
+  adaptiveExactDurations: number[];
+  planningFocus: "sleep" | "work";
   wakeDayPart: PlannerWakeDayPart;
   morningPreparationMinutes: string;
   healthyMinimumConfirmed: boolean;
@@ -61,6 +64,11 @@ function initialDraft(profile: PlannerProfile): AssistantDraft {
     weekendDuration: String(fixed.weekends.durationMinutes),
     adaptiveMinDuration: String(adaptive?.durationRange.minMinutes ?? 7 * 60),
     adaptiveMaxDuration: String(adaptive?.durationRange.maxMinutes ?? 9 * 60),
+    adaptiveDurationMode: adaptive?.durationPreference.mode ?? "range",
+    adaptiveExactDurations: adaptive?.durationPreference.mode === "exact"
+      ? adaptive.durationPreference.optionsMinutes
+      : [7 * 60, 9 * 60],
+    planningFocus: profile.planningPolicy.focus,
     wakeDayPart: adaptive?.wakeAnchor.dayPart ?? "morning",
     morningPreparationMinutes: String(adaptive?.morningPreparationMinutes ?? 60),
     healthyMinimumConfirmed: !adaptive?.requiresHealthyMinimumConfirmation,
@@ -76,6 +84,7 @@ function scheduleFromDraft(value: AssistantDraft, commitments: PlannerDraft[] = 
     return createAdaptiveSleepSchedule({
       minMinutes: Number(value.adaptiveMinDuration) || 7 * 60,
       maxMinutes: Number(value.adaptiveMaxDuration) || 9 * 60,
+      exactDurationsMinutes: value.adaptiveDurationMode === "exact" ? value.adaptiveExactDurations : undefined,
       dayPart: value.wakeDayPart,
       morningPreparationMinutes: Number(value.morningPreparationMinutes) || 60,
       commitments,
@@ -152,6 +161,7 @@ export default function AutoplannerModal({
   sleepEventsCount,
   locale,
   firstRun,
+  upgradeOnly,
   busy,
   onClose,
   onParseTasks,
@@ -166,6 +176,7 @@ export default function AutoplannerModal({
   sleepEventsCount: number;
   locale: Locale;
   firstRun: boolean;
+  upgradeOnly?: boolean;
   busy: boolean;
   onClose?: () => void;
   onParseTasks: (text: string) => Promise<PlannerAssistantParseResult>;
@@ -175,7 +186,7 @@ export default function AutoplannerModal({
   onReset: (password: string) => Promise<void>;
 }) {
   const ru = locale === "ru";
-  const [step, setStep] = useState(firstRun ? 1 : 0);
+  const [step, setStep] = useState(upgradeOnly ? 2 : firstRun ? 1 : 0);
   const [value, setValue] = useState<AssistantDraft>(() => initialDraft(profile));
   const [parsed, setParsed] = useState<PlannerAssistantParseResult>({ drafts: [], ambiguities: [] });
   const [localError, setLocalError] = useState("");
@@ -213,10 +224,11 @@ export default function AutoplannerModal({
       availability: availabilityFromSleepSchedule(sleepSchedule),
       energyWindows: energyWindows(value, parsed.drafts),
       reserveRatio: Math.min(0.6, Math.max(0, Number(value.reserve) / 100 || 0.2)),
-      assistantSetupVersion: 2,
+      planningPolicy: { ...profile.planningPolicy, focus: value.planningFocus },
+      assistantSetupVersion: 3,
       onboardingCompleted: true,
     };
-  }, [parsed.drafts, value]);
+  }, [parsed.drafts, profile.planningPolicy, value]);
 
   const update = <K extends keyof AssistantDraft>(key: K, next: AssistantDraft[K]) => setValue((current) => ({ ...current, [key]: next }));
 
@@ -228,10 +240,17 @@ export default function AutoplannerModal({
       if (result.bedtime) update("weekdayBedtime", result.bedtime);
       if (result.durationMinutes) update("weekdayDuration", String(result.durationMinutes));
       if (result.durationRange) {
+        update("adaptiveDurationMode", "range");
         update("adaptiveMinDuration", String(result.durationRange.minMinutes));
         update("adaptiveMaxDuration", String(result.durationRange.maxMinutes));
         update("healthyMinimumConfirmed", false);
       }
+      if (result.exactDurationsMinutes?.length) {
+        update("adaptiveDurationMode", "exact");
+        update("adaptiveExactDurations", result.exactDurationsMinutes);
+        update("healthyMinimumConfirmed", result.exactDurationsMinutes.some((minutes) => minutes >= 7 * 60));
+      }
+      if (result.planningFocus) update("planningFocus", result.planningFocus);
       if (result.wakeDayPart) update("wakeDayPart", result.wakeDayPart);
       if (result.ambiguities.length) setLocalError(ru
         ? result.ambiguities.join(" ")
@@ -317,11 +336,13 @@ export default function AutoplannerModal({
   const draftSleepRule = sleepRuleForWakeDate(draftSleepSchedule, "2026-08-17");
   const draftWakeTime = plannerMinutesToTime(plannerTimeToMinutes(draftSleepRule.bedtime) + draftSleepRule.durationMinutes);
   const healthyMinimumNeedsConfirmation = value.sleepMode === "adaptive"
-    && Math.max(Number(value.adaptiveMinDuration), Number(value.adaptiveMaxDuration)) < 7 * 60
+    && (value.adaptiveDurationMode === "exact"
+      ? !value.adaptiveExactDurations.some((minutes) => minutes >= 7 * 60)
+      : Math.max(Number(value.adaptiveMinDuration), Number(value.adaptiveMaxDuration)) < 7 * 60)
     && !value.healthyMinimumConfirmed;
 
   return <ModalFrame title={ru ? "Автопланировщик" : "Autoplanner"} onClose={firstRun ? undefined : onClose} locale={locale}>
-    <div className={styles.assistantProgress}><span>{step}/8</span><strong>{currentLabel}</strong><i style={{ width: `${step / 8 * 100}%` }} /></div>
+    <div className={styles.assistantProgress}><span>{upgradeOnly ? (step === 2 ? "1/2" : "2/2") : `${step}/8`}</span><strong>{upgradeOnly ? (ru ? "Новые правила сна и дедлайнов" : "New sleep and deadline rules") : currentLabel}</strong><i style={{ width: upgradeOnly ? `${step === 2 ? 50 : 100}%` : `${step / 8 * 100}%` }} /></div>
     <div className={styles.assistantBody}>
       {localError && <p className={styles.inlineError}>{localError}</p>}
       {step === 1 && <section className={styles.assistantStep}><h3>{ru ? "Где считать ваше время?" : "Which time zone should be used?"}</h3><p>{ru ? "Он определён автоматически. Проверьте значение." : "It was detected automatically. Confirm it."}</p><label>{ru ? "Часовой пояс" : "Time zone"}<input value={value.timezone} onChange={(event) => { update("timezone", event.target.value); setProfileChanged(true); }} /></label></section>}
@@ -338,18 +359,34 @@ export default function AutoplannerModal({
           <label>{ru ? "Перед буднями, отбой" : "Before weekdays"}<input type="time" value={value.weekdayBedtime} onChange={(event) => { update("weekdayBedtime", event.target.value); setProfileChanged(true); }} /></label>
           <label>{ru ? "Сон, минут" : "Sleep minutes"}<input type="number" min="180" max="960" step="15" value={value.weekdayDuration} onChange={(event) => { update("weekdayDuration", event.target.value); setProfileChanged(true); }} /></label>
         </div> : <>
-          <div className={styles.fieldExplanation}><strong>{ru ? "Диапазон длительности сна" : "Sleep duration range"}</strong><p>{ru ? "Укажите, сколько сна вам обычно бывает достаточно: не план на каждую ночь, а нижнюю и верхнюю границу. Внутри них планировщик сначала предложит устойчивую цель." : "Enter the lower and upper amount that is usually enough for you. This is not a nightly target; the planner chooses a stable starting goal inside it."}</p></div>
-          <div className={styles.formGrid}>
+          <div className={styles.fieldExplanation}><strong>{ru ? "Предпочтительная длительность сна" : "Preferred sleep duration"}</strong><p>{ru ? "Выберите диапазон или перечислите точные варианты, например 7 и 9 часов. Это желательные значения: фактические 6, 8 или 10 часов сохраняются как факт и не считаются ошибкой сами по себе." : "Choose a range or list exact options, such as 7 and 9 hours. These are preferences; an actual 6, 8 or 10 hours is still stored as a normal fact."}</p></div>
+          <div className={styles.segmented} role="group" aria-label={ru ? "Способ задания длительности" : "Duration input mode"}>
+            <button type="button" className={value.adaptiveDurationMode === "range" ? styles.segmentedActive : ""} onClick={() => { update("adaptiveDurationMode", "range"); setProfileChanged(true); }}>{ru ? "Диапазон" : "Range"}</button>
+            <button type="button" className={value.adaptiveDurationMode === "exact" ? styles.segmentedActive : ""} onClick={() => { update("adaptiveDurationMode", "exact"); setProfileChanged(true); }}>{ru ? "Точные варианты" : "Exact options"}</button>
+          </div>
+          {value.adaptiveDurationMode === "range" ? <div className={styles.formGrid}>
             <label>{ru ? "Обычно хватает, от (часов)" : "Usually enough, from (hours)"}<input type="number" min="3" max="16" step="0.25" value={Number(value.adaptiveMinDuration) / 60} onChange={(event) => { update("adaptiveMinDuration", String(Math.round(Number(event.target.value) * 60))); update("healthyMinimumConfirmed", false); setProfileChanged(true); }} /></label>
             <label>{ru ? "До (часов)" : "To (hours)"}<input type="number" min="3" max="16" step="0.25" value={Number(value.adaptiveMaxDuration) / 60} onChange={(event) => { update("adaptiveMaxDuration", String(Math.round(Number(event.target.value) * 60))); update("healthyMinimumConfirmed", false); setProfileChanged(true); }} /></label>
-            <label>{ru ? "После подъёма до первого дела, минут" : "Wake-up preparation, minutes"}<input type="number" min="0" max="240" step="15" value={value.morningPreparationMinutes} onChange={(event) => { update("morningPreparationMinutes", event.target.value); setProfileChanged(true); }} /><small>{ru ? "Душ, еда, дорога и другое время, когда ещё нельзя ставить дела." : "Shower, food, travel and any other time before work can begin."}</small></label>
+          </div> : <div className={styles.exactDurations}>
+            {value.adaptiveExactDurations.map((minutes, index) => <div key={`${minutes}-${index}`}>
+              <label>{ru ? `Вариант ${index + 1}, часов` : `Option ${index + 1}, hours`}<input type="number" min="3" max="16" step="0.25" value={minutes / 60} onChange={(event) => { const next = [...value.adaptiveExactDurations]; next[index] = Math.round(Number(event.target.value) * 4) * 15; update("adaptiveExactDurations", Array.from(new Set(next)).sort((left, right) => left - right).slice(0, 6)); setProfileChanged(true); }} /></label>
+              {value.adaptiveExactDurations.length > 1 && <button type="button" onClick={() => { update("adaptiveExactDurations", value.adaptiveExactDurations.filter((_, candidate) => candidate !== index)); setProfileChanged(true); }}>{ru ? "Удалить" : "Remove"}</button>}
+            </div>)}
+            <button type="button" disabled={value.adaptiveExactDurations.length >= 6} onClick={() => { const last = value.adaptiveExactDurations.at(-1) ?? 7 * 60; update("adaptiveExactDurations", Array.from(new Set([...value.adaptiveExactDurations, Math.min(16 * 60, last + 60)])).sort((left, right) => left - right)); setProfileChanged(true); }}>+ {ru ? "Добавить длительность" : "Add duration"}</button>
+            <small>{ru ? "До шести уникальных вариантов с шагом 15 минут. Хотя бы один вариант должен быть не короче 7 часов." : "Up to six unique 15-minute options. At least one option must be 7 hours or longer."}</small>
+          </div>}
+          <div className={styles.formGrid}><label>{ru ? "После подъёма до первого дела, минут" : "Wake-up preparation, minutes"}<input type="number" min="0" max="240" step="15" value={value.morningPreparationMinutes} onChange={(event) => { update("morningPreparationMinutes", event.target.value); setProfileChanged(true); }} /><small>{ru ? "Душ, еда, дорога и другое время, когда ещё нельзя ставить дела." : "Shower, food, travel and any other time before work can begin."}</small></label></div>
+          <div className={styles.fieldExplanation}><strong>{ru ? "Что важнее при реальном конфликте?" : "What wins in a real conflict?"}</strong><p>{ru ? "«Сон важнее» всегда выбирает самый длинный точный вариант и не двигает сон ради задач. «Дедлайны важнее» сначала переносит дела и использует резерв, затем может выбрать более короткий допустимый вариант; сон короче 7 часов рассматривается только ради жёсткого срока и всегда с восстановительным предпросмотром." : "Sleep priority always uses the longest exact option. Deadline priority first moves work and uses reserve, then may choose a shorter allowed option; going below 7 hours is only considered for a hard deadline with a recovery preview."}</p></div>
+          <div className={styles.assistantChoices}>
+            <button type="button" className={value.planningFocus === "sleep" ? styles.segmentedActive : ""} onClick={() => { update("planningFocus", "sleep"); setProfileChanged(true); }}>{ru ? "Сон важнее" : "Sleep first"}<small>{ru ? "Сон — абсолютное ограничение" : "Sleep is an absolute constraint"}</small></button>
+            <button type="button" className={value.planningFocus === "work" ? styles.segmentedActive : ""} onClick={() => { update("planningFocus", "work"); setProfileChanged(true); }}>{ru ? "Дедлайны важнее" : "Deadlines first"}<small>{ru ? "Иногда короче, затем восстановление" : "Sometimes shorter, followed by recovery"}</small></button>
           </div>
           <div><p className={styles.fieldTitle}>{ru ? "Когда удобнее вставать?" : "When is waking up most comfortable?"}</p><p className={styles.fieldHelp}>{ru ? "Это предпочтительный диапазон, а не жёсткий будильник. Конкретный подъём будет показан и объяснён перед применением." : "This is a preferred range, not a strict alarm. The exact wake time will be shown and explained before anything is applied."}</p><div className={styles.wakeChoices}>{WAKE_OPTIONS.map((option) => {
             const copy = ru ? option.ru : option.en;
             return <button type="button" key={option.value} className={value.wakeDayPart === option.value ? styles.segmentedActive : ""} aria-pressed={value.wakeDayPart === option.value} onClick={() => { update("wakeDayPart", option.value); setProfileChanged(true); }}><strong>{copy.title}</strong><small>{copy.detail}</small></button>;
           })}</div></div>
           <div className={styles.wakePreview} aria-live="polite"><span>{ru ? "Предварительный режим" : "Preliminary schedule"}</span><strong>{ru ? "Подъём" : "Wake"} {draftWakeTime} · {ru ? "сон с" : "sleep from"} {draftSleepRule.bedtime}</strong><p>{wakeReasonText(draftSleepSchedule.mode === "adaptive" ? draftSleepSchedule.wakeAnchor.selectionReason : undefined, ru)}</p>{value.wakeDayPart === "auto" && <small>{ru ? "Окончательный автовыбор появится после анализа постоянных обязательств и списка дел." : "The final automatic choice appears after recurring commitments and tasks are analyzed."}</small>}</div>
-          {Math.max(Number(value.adaptiveMinDuration), Number(value.adaptiveMaxDuration)) < 7 * 60 && <label className={styles.choiceCheck}><input type="checkbox" checked={value.healthyMinimumConfirmed} onChange={(event) => update("healthyMinimumConfirmed", event.target.checked)} />{ru ? "Мой диапазон короче 7 часов. Я согласен использовать 7 часов как пробную цель, а не сокращать сон автоматически." : "My range is below 7 hours. Use 7 hours as the trial target instead of shortening sleep automatically."}</label>}
+          {healthyMinimumNeedsConfirmation && <label className={styles.choiceCheck}><input type="checkbox" checked={value.healthyMinimumConfirmed} onChange={(event) => update("healthyMinimumConfirmed", event.target.checked)} />{ru ? "Все указанные варианты короче 7 часов. Я согласен использовать 7 часов как пробную цель; для регулярного более короткого сна перейду в ручной режим." : "All options are below 7 hours. Use 7 hours as a trial target; regular shorter sleep requires manual mode."}</label>}
         </>}
       </section>}
       {step === 3 && <section className={styles.assistantStep}>{value.sleepMode === "fixed" ? <>
@@ -362,7 +399,8 @@ export default function AutoplannerModal({
           <div><dt>{ru ? "Подъём-якорь" : "Wake anchor"}</dt><dd>{draftSleepSchedule.wakeAnchor.localTime}</dd></div>
           <div><dt>{ru ? "Отход ко сну" : "Bedtime"}</dt><dd>{draftSleepRule.bedtime}</dd></div>
           <div><dt>{ru ? "Цель сна" : "Sleep target"}</dt><dd>{Math.round(draftSleepSchedule.targetDurationMinutes / 6) / 10} {ru ? "ч" : "h"}</dd></div>
-          <div><dt>{ru ? "Ваш диапазон" : "Your range"}</dt><dd>{Math.round(draftSleepSchedule.durationRange.minMinutes / 6) / 10}–{Math.round(draftSleepSchedule.durationRange.maxMinutes / 6) / 10} {ru ? "ч" : "h"}</dd></div>
+          <div><dt>{draftSleepSchedule.durationPreference.mode === "exact" ? (ru ? "Точные варианты" : "Exact options") : (ru ? "Ваш диапазон" : "Your range")}</dt><dd>{draftSleepSchedule.durationPreference.mode === "exact" ? draftSleepSchedule.durationPreference.optionsMinutes.map((minutes) => `${Math.round(minutes / 6) / 10} ${ru ? "ч" : "h"}`).join(" · ") : `${Math.round(draftSleepSchedule.durationRange.minMinutes / 6) / 10}–${Math.round(draftSleepSchedule.durationRange.maxMinutes / 6) / 10} ${ru ? "ч" : "h"}`}</dd></div>
+          <div><dt>{ru ? "Основной приоритет" : "Planning priority"}</dt><dd>{value.planningFocus === "sleep" ? (ru ? "Сон важнее" : "Sleep first") : (ru ? "Дедлайны важнее" : "Deadlines first")}</dd></div>
           <div><dt>{ru ? "Возврат после сбоя" : "Return after disruption"}</dt><dd>{ru ? "не быстрее 60 мин/день" : "up to 60 min/day"}</dd></div>
         </dl>}
         {draftSleepSchedule.mode === "adaptive" && <div className={styles.fieldExplanation}><strong>{ru ? "Почему так" : "Why this time"}</strong><p>{wakeReasonText(draftSleepSchedule.wakeAnchor.selectionReason, ru)}</p></div>}
@@ -374,8 +412,8 @@ export default function AutoplannerModal({
       {step === 7 && <section className={styles.assistantStep}><h3>{ru ? "Проверьте распознанные дела" : "Review parsed items"}</h3>{parsed.ambiguities.length > 0 && <div className={styles.ambiguities}>{parsed.ambiguities.map((entry, index) => <p key={`${entry.index}-${entry.field}-${index}`}>#{entry.index + 1}: {ru ? entry.message : entry.field === "duration" ? "Duration was not specified; 1 hour is shown for confirmation." : entry.field === "date" ? "Date was not specified; today is shown for confirmation." : entry.field === "time" ? "A fixed event needs both start and end time." : "Review this field before continuing."}</p>)}<label className={styles.choiceCheck}><input type="checkbox" checked={ambiguitiesConfirmed} onChange={(event) => setAmbiguitiesConfirmed(event.target.checked)} />{ru ? "Я проверил отмеченные поля и подтверждаю их" : "I reviewed and confirm the marked fields"}</label></div>}<div className={styles.reviewTable}>{parsed.drafts.map((draft, index) => <article key={index}><input aria-label={ru ? "Название" : "Title"} value={draft.title} onChange={(event) => updateParsed(index, { title: event.target.value })} /><select aria-label={ru ? "Вид" : "Kind"} value={draft.kind} onChange={(event) => updateParsed(index, { kind: event.target.value as PlannerDraft["kind"] })}><option value="flexible_task">{ru ? "Гибкая задача" : "Flexible"}</option><option value="fixed_event">{ru ? "Фиксированное" : "Fixed"}</option><option value="routine">{ru ? "Регулярное дело" : "Routine"}</option></select><input aria-label={ru ? "Длительность" : "Duration"} type="number" min="5" value={draft.estimateMinutes ?? 60} onChange={(event) => updateParsed(index, { estimateMinutes: Number(event.target.value) })} /><input aria-label={ru ? "Дата" : "Date"} type="date" value={draft.date ?? ""} onChange={(event) => updateParsed(index, { date: event.target.value })} /><input aria-label={ru ? "Начало" : "Start"} type="time" value={draft.start ?? ""} onChange={(event) => updateParsed(index, { start: event.target.value || undefined })} /><input aria-label={ru ? "Конец" : "End"} type="time" value={draft.end ?? ""} onChange={(event) => updateParsed(index, { end: event.target.value || undefined })} /><select aria-label={ru ? "Приоритет" : "Priority"} value={draft.priority ?? "normal"} onChange={(event) => updateParsed(index, { priority: event.target.value as PlannerDraft["priority"] })}><option value="low">{ru ? "Низкий" : "Low"}</option><option value="normal">{ru ? "Обычный" : "Normal"}</option><option value="high">{ru ? "Высокий" : "High"}</option><option value="critical">{ru ? "Критический" : "Critical"}</option></select><button type="button" aria-label={ru ? "Удалить строку" : "Remove row"} onClick={() => setParsed((current) => ({ ...current, drafts: current.drafts.filter((_, candidate) => candidate !== index) }))}>×</button></article>)}</div>{parsed.drafts.length === 0 && <p>{ru ? "Новых дел нет — можно обновить только настройки." : "There are no new items; settings can still be updated."}</p>}</section>}
       {step === 8 && <section className={styles.assistantStep}><h3>{ru ? "Готово к предпросмотру" : "Ready for preview"}</h3><dl className={styles.assistantRecap}><div><dt>{ru ? "Часовой пояс" : "Time zone"}</dt><dd>{value.timezone}</dd></div><div><dt>{ru ? "Сон" : "Sleep"}</dt><dd>{draftSleepSchedule.mode === "adaptive" ? `${ru ? "адаптивный" : "adaptive"} · ${draftWakeTime} · ${Math.round(draftSleepSchedule.targetDurationMinutes / 6) / 10} ${ru ? "ч" : "h"}` : `${draftSleepSchedule.weekdays.bedtime} · ${draftSleepSchedule.weekdays.durationMinutes} ${ru ? "мин" : "min"}`}</dd></div>{draftSleepSchedule.mode === "adaptive" && <div><dt>{ru ? "Отход ко сну" : "Bedtime"}</dt><dd>{draftSleepRule.bedtime}</dd></div>}<div><dt>{ru ? "Новых дел" : "New items"}</dt><dd>{parsed.drafts.length}</dd></div><div><dt>{ru ? "Резерв" : "Reserve"}</dt><dd>{value.reserve}%</dd></div></dl>{draftSleepSchedule.mode === "adaptive" && <div className={styles.fieldExplanation}><strong>{ru ? "Предварительная причина" : "Preliminary reason"}</strong><p>{wakeReasonText(draftSleepSchedule.wakeAnchor.selectionReason, ru)}</p>{value.wakeDayPart === "auto" && <small>{ru ? "На следующем экране движок сравнит допустимые варианты с шагом 15 минут и покажет окончательный выбор." : "On the next screen the engine compares safe options in 15-minute steps and shows the final choice."}</small>}</div>}<p>{ru ? "Следующий экран покажет каждый перенос, защищённый сон и конфликт. Ничего ещё не будет применено." : "The next screen shows every move, protected sleep block and conflict. Nothing is applied yet."}</p></section>}
       <div className={styles.assistantFooter}>
-        <button type="button" disabled={busy} onClick={() => step > 1 ? setStep(step - 1) : firstRun ? undefined : setStep(0)}>{ru ? "Назад" : "Back"}</button>
-        {step < 6 && <button type="button" className={styles.primaryButton} disabled={busy || healthyMinimumNeedsConfirmation} onClick={() => setStep(step + 1)}>{ru ? "Дальше" : "Next"}</button>}
+        <button type="button" disabled={busy} onClick={() => upgradeOnly && step === 8 ? setStep(2) : step > 1 ? setStep(step - 1) : firstRun ? undefined : setStep(0)}>{ru ? "Назад" : "Back"}</button>
+        {step < 6 && <button type="button" className={styles.primaryButton} disabled={busy || healthyMinimumNeedsConfirmation} onClick={() => setStep(upgradeOnly && step === 2 ? 8 : step + 1)}>{ru ? "Дальше" : "Next"}</button>}
         {step === 6 && <button type="button" className={styles.primaryButton} disabled={busy} onClick={() => void recognizeTasks()}>{ru ? "Распознать список" : "Parse list"}</button>}
         {step === 7 && <button type="button" className={styles.primaryButton} disabled={busy || (parsed.ambiguities.length > 0 && !ambiguitiesConfirmed)} onClick={() => setStep(8)}>{ru ? "К итогу" : "Continue"}</button>}
         {step === 8 && <button type="button" className={styles.primaryButton} disabled={busy} onClick={() => void prepare()}>{ru ? "Показать изменения" : "Review changes"}</button>}
