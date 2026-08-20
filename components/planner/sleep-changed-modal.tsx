@@ -98,7 +98,7 @@ export default function SleepChangedModal({ profile, locale, busy, initialMode =
   ];
 
   return <div className={styles.modalBackdrop} role="presentation"><section className={styles.modal} role="dialog" aria-modal="true" aria-label={ru ? "Сон изменился" : "Sleep changed"}>
-    <header><h2>{ru ? "Сон и восстановление" : "Sleep and recovery"}</h2><button type="button" onClick={onClose}>×</button></header>
+    <header><h2>{ru ? "Сон и восстановление" : "Sleep and recovery"}</h2><button type="button" onClick={onClose} aria-label={ru ? "Закрыть" : "Close"}>×</button></header>
     <form className={styles.form} onSubmit={(event) => void submit(event)}>
       <p className={styles.modalLead}>{ru ? "Разовое изменение не переписывает постоянный режим. Перед переносом дел вы увидите единый предпросмотр." : "A one-off change never rewrites your regular schedule. You will review all task moves first."}</p>
       <div className={styles.segmented}>{modes.map((entry) => <button type="button" key={entry.id} className={mode === entry.id ? styles.segmentedActive : ""} onClick={() => changeMode(entry.id)}>{ru ? entry.ru : entry.en}</button>)}</div>

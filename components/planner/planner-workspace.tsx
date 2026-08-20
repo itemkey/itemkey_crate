@@ -22,6 +22,7 @@ import {
   createDefaultPlannerProfile,
   type PlannerAssistantParseResult,
   type PlannerBlock,
+  type PlannerBlockStatus,
   type PlannerBootstrap,
   type PlannerDraft,
   type PlannerEnergy,
@@ -180,8 +181,23 @@ const plannerClientId = typeof window === "undefined"
   : globalThis.crypto.randomUUID();
 
 const kindLabel: Record<Locale, Record<PlannerItemKind, string>> = {
-  ru: { fixed_event: "Фиксированное событие", flexible_task: "Гибкая задача", routine: "Routine" },
+  ru: { fixed_event: "Фиксированное событие", flexible_task: "Гибкая задача", routine: "Регулярное дело" },
   en: { fixed_event: "Fixed event", flexible_task: "Flexible task", routine: "Routine" },
+};
+
+const priorityLabel: Record<Locale, Record<PlannerPriority, string>> = {
+  ru: { low: "Низкий", normal: "Обычный", high: "Высокий", critical: "Критический" },
+  en: { low: "Low", normal: "Normal", high: "High", critical: "Critical" },
+};
+
+const energyLabel: Record<Locale, Record<PlannerEnergy, string>> = {
+  ru: { low: "Низкая", normal: "Обычная", high: "Высокая" },
+  en: { low: "Low", normal: "Normal", high: "High" },
+};
+
+const blockStatusLabel: Record<Locale, Record<PlannerBlockStatus, string>> = {
+  ru: { planned: "запланировано", in_progress: "выполняется", done: "выполнено", skipped: "пропущено", cancelled: "отменено" },
+  en: { planned: "planned", in_progress: "in progress", done: "done", skipped: "skipped", cancelled: "cancelled" },
 };
 
 function todayIn(timezone: string): string {
@@ -880,8 +896,8 @@ function TimeGrid({ dates, blocks, sleepBlocks, profile, locale, selectedDate, s
                   <strong>{sleep ? "■" : block.fixed ? "◆" : "↝"} {formatTimeInTimeZone(new Date(block.startAt), profile.timezone)} · {sleep ? block.tentative ? (locale === "ru" ? "СОН · ПРЕДВАРИТЕЛЬНО" : "SLEEP · TENTATIVE") : block.recoveryNight ? (locale === "ru" ? "СОН · ВОССТАНОВЛЕНИЕ" : "SLEEP · RECOVERY") : (locale === "ru" ? "СОН · ЗАЩИЩЕНО" : "SLEEP · PROTECTED") : block.title}</strong>
                   <small>{formatDuration(duration, locale)}{sleep ? ` · ${locale === "ru" ? "не перемещается" : "locked"}` : ""}</small>
                   {!sleep && block.status === "planned" && <div className={styles.resizeActions}>
-                    <button onClick={() => void onMove(block, block.startAt, addIsoMinutes(block.endAt, -15))} aria-label="Shorten 15 minutes">−</button>
-                    <button onClick={() => void onMove(block, block.startAt, addIsoMinutes(block.endAt, 15))} aria-label="Extend 15 minutes">＋</button>
+                    <button onClick={() => void onMove(block, block.startAt, addIsoMinutes(block.endAt, -15))} aria-label={locale === "ru" ? "Уменьшить на 15 минут" : "Shorten 15 minutes"}>−</button>
+                    <button onClick={() => void onMove(block, block.startAt, addIsoMinutes(block.endAt, 15))} aria-label={locale === "ru" ? "Увеличить на 15 минут" : "Extend 15 minutes"}>＋</button>
                   </div>}
                 </article>
               );
@@ -914,7 +930,7 @@ function Agenda({ blocks, sleepBlocks, dates, profile, locale, onAction }: {
   const selected: CalendarBlock[] = [...blocks.filter((block) => dates.includes(localDate(block, profile.timezone)) && block.status !== "cancelled"), ...splitSleepBlocksByDate(sleepBlocks, dates, profile.timezone)].sort((a, b) => a.startAt.localeCompare(b.startAt));
   return <div className={styles.agenda}>{selected.map((block) => <article key={block.id}>
     <time>{formatDay(localDate(block, profile.timezone), locale)} · {formatTimeInTimeZone(new Date(block.startAt), profile.timezone)}</time>
-    <div><strong>{isSleepBlock(block) ? (locale === "ru" ? "Сон · защищено" : "Sleep · protected") : block.title}</strong><small>{formatDuration(isoDurationMinutes(block.startAt, block.endAt), locale)}{isSleepBlock(block) ? "" : ` · ${block.status}`}</small></div>
+    <div><strong>{isSleepBlock(block) ? (locale === "ru" ? "Сон · защищено" : "Sleep · protected") : block.title}</strong><small>{formatDuration(isoDurationMinutes(block.startAt, block.endAt), locale)}{isSleepBlock(block) ? "" : ` · ${blockStatusLabel[locale][block.status]}`}</small></div>
     {!isSleepBlock(block) && block.status === "planned" && <div><button onClick={() => void onAction(block, "start")}>▶</button><button onClick={() => void onAction(block, "done")}>✓</button><button onClick={() => void onAction(block, "skip")}>↷</button></div>}
   </article>)}</div>;
 }
@@ -923,9 +939,9 @@ function BlockSummary({ block, profile, locale }: { block: PlannerBlock; profile
   return <article className={styles.blockSummary}><span>{formatDay(localDate(block, profile.timezone), locale)}</span><strong>{block.title}</strong><small>{formatTimeInTimeZone(new Date(block.startAt), profile.timezone)}–{formatTimeInTimeZone(new Date(block.endAt), profile.timezone)}</small></article>;
 }
 
-function ModalShell({ children, onClose, title }: { children: React.ReactNode; onClose?: () => void; title: string }) {
+function ModalShell({ children, onClose, title, locale }: { children: React.ReactNode; onClose?: () => void; title: string; locale: Locale }) {
   return <div className={styles.modalBackdrop} role="presentation"><section className={styles.modal} role="dialog" aria-modal="true" aria-label={title}>
-    <header><h2>{title}</h2>{onClose && <button onClick={onClose} aria-label="Close">×</button>}</header>{children}
+    <header><h2>{title}</h2>{onClose && <button onClick={onClose} aria-label={locale === "ru" ? "Закрыть" : "Close"}>×</button>}</header>{children}
   </section></div>;
 }
 
@@ -934,7 +950,7 @@ function QuickModal({ command, setCommand, onSubmit, onClose, trigger, busy, loc
   onClose: () => void; trigger: PlannerProposal["trigger"]; busy: boolean; locale: Locale;
 }) {
   const changed = trigger === "plans_changed";
-  return <ModalShell title={changed ? (locale === "ru" ? "Что изменилось?" : "What changed?") : (locale === "ru" ? "Быстрое добавление" : "Quick add")} onClose={onClose}>
+  return <ModalShell title={changed ? (locale === "ru" ? "Что изменилось?" : "What changed?") : (locale === "ru" ? "Быстрое добавление" : "Quick add")} onClose={onClose} locale={locale}>
     <form onSubmit={(event) => void onSubmit(event)} className={styles.form}>
       <p className={styles.modalLead}>{locale === "ru" ? "Напишите как обычно. Перед применением вы увидите распознанные поля и все переносы." : "Use natural language. You will review every parsed field and move before applying."}</p>
       <textarea autoFocus value={command} onChange={(e) => setCommand(e.target.value)} placeholder={locale === "ru" ? "Сегодня позвали гулять с 18 до 20" : "Meeting today from 18 to 20"} />
@@ -948,7 +964,7 @@ function ItemModal({ value, setValue, onSubmit, onClose, busy, locale }: {
   onSubmit: (event: FormEvent) => Promise<void>; onClose: () => void; busy: boolean; locale: Locale;
 }) {
   const update = <K extends keyof ItemForm>(key: K, next: ItemForm[K]) => setValue((current) => ({ ...current, [key]: next }));
-  return <ModalShell title={locale === "ru" ? "Дело и его ограничения" : "Item and constraints"} onClose={onClose}>
+  return <ModalShell title={locale === "ru" ? "Дело и его ограничения" : "Item and constraints"} onClose={onClose} locale={locale}>
     <form onSubmit={(event) => void onSubmit(event)} className={styles.form}>
       <div className={styles.formGrid}>
         <label className={styles.wide}>{locale === "ru" ? "Название" : "Title"}<input autoFocus required value={value.title} onChange={(e) => update("title", e.target.value)} /></label>
@@ -960,8 +976,8 @@ function ItemModal({ value, setValue, onSubmit, onClose, busy, locale }: {
       </div>
       {value.kind === "routine" && value.recurrenceFrequency === "custom" && <div className={styles.weekdays}>{[1,2,3,4,5,6,7].map((day) => <button type="button" key={day} className={value.recurrenceWeekdays.includes(day) ? styles.weekdayActive : ""} onClick={() => update("recurrenceWeekdays", value.recurrenceWeekdays.includes(day) ? value.recurrenceWeekdays.filter((candidate) => candidate !== day) : [...value.recurrenceWeekdays, day])}>{locale === "ru" ? ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"][day-1] : ["M","T","W","T","F","S","S"][day-1]}</button>)}</div>}
       <details className={styles.advanced}><summary>{locale === "ru" ? "Дополнительно" : "Advanced"}</summary><div className={styles.formGrid}>
-        <label>{locale === "ru" ? "Приоритет" : "Priority"}<select value={value.priority} onChange={(e) => update("priority", e.target.value as PlannerPriority)}><option value="low">Low</option><option value="normal">Normal</option><option value="high">High</option><option value="critical">Critical</option></select></label>
-        <label>{locale === "ru" ? "Энергия" : "Energy"}<select value={value.energy} onChange={(e) => update("energy", e.target.value as PlannerEnergy)}><option value="low">Low</option><option value="normal">Normal</option><option value="high">High</option></select></label>
+        <label>{locale === "ru" ? "Приоритет" : "Priority"}<select value={value.priority} onChange={(e) => update("priority", e.target.value as PlannerPriority)}>{(["low", "normal", "high", "critical"] as const).map((priority) => <option key={priority} value={priority}>{priorityLabel[locale][priority]}</option>)}</select></label>
+        <label>{locale === "ru" ? "Энергия" : "Energy"}<select value={value.energy} onChange={(e) => update("energy", e.target.value as PlannerEnergy)}>{(["low", "normal", "high"] as const).map((energy) => <option key={energy} value={energy}>{energyLabel[locale][energy]}</option>)}</select></label>
         <label>{locale === "ru" ? "Предпочитать с" : "Prefer from"}<input type="time" value={value.preferredStart} onChange={(e) => update("preferredStart", e.target.value)} /></label><label>{locale === "ru" ? "до" : "to"}<input type="time" value={value.preferredEnd} onChange={(e) => update("preferredEnd", e.target.value)} /></label>
         <label>{locale === "ru" ? "Не ставить с" : "Avoid from"}<input type="time" value={value.avoidedStart} onChange={(e) => update("avoidedStart", e.target.value)} /></label><label>{locale === "ru" ? "до" : "to"}<input type="time" value={value.avoidedEnd} onChange={(e) => update("avoidedEnd", e.target.value)} /></label>
         <label>{locale === "ru" ? "Буфер до, мин" : "Buffer before"}<input type="number" min="0" value={value.bufferBeforeMinutes} onChange={(e) => update("bufferBeforeMinutes", e.target.value)} /></label><label>{locale === "ru" ? "Буфер после, мин" : "Buffer after"}<input type="number" min="0" value={value.bufferAfterMinutes} onChange={(e) => update("bufferAfterMinutes", e.target.value)} /></label>
@@ -1021,9 +1037,9 @@ function ProposalModal({ proposal, profile, locale, busy, onClose, onApply, onEd
   onClose: () => void; onApply: () => Promise<void>; onEdit: () => void; onPause: (blockId: string) => Promise<void>; onFinishFirst: (blockId: string, protectedId: string) => Promise<void>;
   onAddRecoveryNap: (nap: NonNullable<PlannerProposal["recoveryAdvice"]>["nap"] & {}) => Promise<void>;
 }) {
-  return <ModalShell title={locale === "ru" ? "Предпросмотр нового плана" : "Plan preview"} onClose={onClose}>
+  return <ModalShell title={locale === "ru" ? "Предпросмотр нового плана" : "Plan preview"} onClose={onClose} locale={locale}>
     <div className={styles.proposal}>
-      {proposal.normalizedDraft && <section className={styles.parsed}><span>{locale === "ru" ? "Распознано — проверьте перед созданием" : "Parsed — review before creating"}</span><strong>{proposal.normalizedDraft.title}</strong><p>{kindLabel[locale][proposal.normalizedDraft.kind ?? "flexible_task"]} · {formatDuration(proposal.normalizedDraft.estimateMinutes ?? 60, locale)}{proposal.normalizedDraft.date ? ` · ${formatDay(proposal.normalizedDraft.date, locale)}` : ""}{proposal.normalizedDraft.start ? ` · ${proposal.normalizedDraft.start}` : ""}{proposal.normalizedDraft.end ? `–${proposal.normalizedDraft.end}` : ""} · {locale === "ru" ? "приоритет" : "priority"}: {proposal.normalizedDraft.priority ?? "normal"}</p><button onClick={onEdit}>{locale === "ru" ? "Изменить поля" : "Edit fields"}</button></section>}
+      {proposal.normalizedDraft && <section className={styles.parsed}><span>{locale === "ru" ? "Распознано — проверьте перед созданием" : "Parsed — review before creating"}</span><strong>{proposal.normalizedDraft.title}</strong><p>{kindLabel[locale][proposal.normalizedDraft.kind ?? "flexible_task"]} · {formatDuration(proposal.normalizedDraft.estimateMinutes ?? 60, locale)}{proposal.normalizedDraft.date ? ` · ${formatDay(proposal.normalizedDraft.date, locale)}` : ""}{proposal.normalizedDraft.start ? ` · ${proposal.normalizedDraft.start}` : ""}{proposal.normalizedDraft.end ? `–${proposal.normalizedDraft.end}` : ""} · {locale === "ru" ? "приоритет" : "priority"}: {priorityLabel[locale][proposal.normalizedDraft.priority ?? "normal"]}</p><button onClick={onEdit}>{locale === "ru" ? "Изменить поля" : "Edit fields"}</button></section>}
       {proposal.wakeAnchorDecision && <section className={styles.wakeDecision}><span>{locale === "ru" ? "Автоматически выбран устойчивый режим" : "Stable schedule selected automatically"}</span><div><strong>{locale === "ru" ? "Подъём" : "Wake"} {proposal.wakeAnchorDecision.wakeTime}</strong><strong>{locale === "ru" ? "Сон с" : "Sleep from"} {proposal.wakeAnchorDecision.bedtime}</strong><strong>{formatDuration(proposal.wakeAnchorDecision.targetDurationMinutes, locale)}</strong></div><p>{wakeDecisionReason(proposal, locale)}</p><small>{locale === "ru" ? `Проверено вариантов: ${proposal.wakeAnchorDecision.candidatesEvaluated}. Диапазон сна: ${formatDuration(proposal.wakeAnchorDecision.durationRange.minMinutes, locale)}–${formatDuration(proposal.wakeAnchorDecision.durationRange.maxMinutes, locale)}. Это предложение ещё не применено.` : `${proposal.wakeAnchorDecision.candidatesEvaluated} options checked. Sleep range: ${formatDuration(proposal.wakeAnchorDecision.durationRange.minMinutes, locale)}–${formatDuration(proposal.wakeAnchorDecision.durationRange.maxMinutes, locale)}. This proposal has not been applied.`}</small></section>}
       {proposal.conflicts.length > 0 && <section className={styles.conflicts}><h3>{locale === "ru" ? "Нужно ваше решение" : "Your decision is needed"}</h3>{proposal.conflicts.map((conflict) => <article key={conflict.id}><strong>{conflict.title}</strong><p>{locale === "ru" ? conflict.message : conflict.kind === "active_overlap" ? "The protected time overlaps work already in progress. Pause it, finish first, or edit the new input." : conflict.blockIds.some((id) => id.startsWith("sleep-")) ? "A fixed event overlaps protected sleep. Edit the event or sleep input." : "Two fixed events overlap and cannot be moved automatically."}</p>{conflict.kind === "active_overlap" ? <div><button onClick={() => void onPause(conflict.blockIds[0])}>{locale === "ru" ? "Поставить текущее на паузу" : "Pause current"}</button><button onClick={() => void onFinishFirst(conflict.blockIds[0], conflict.blockIds[1])}>{locale === "ru" ? "Закончить текущее сначала" : "Finish current first"}</button><button onClick={onEdit}>{proposal.trigger === "sleep_changed" ? (locale === "ru" ? "Исправить сон" : "Edit sleep") : (locale === "ru" ? "Изменить вводные" : "Edit input")}</button></div> : <div><button onClick={onEdit}>{locale === "ru" ? "Исправить конфликт" : "Edit conflict"}</button></div>}</article>)}</section>}
       <section><h3>{locale === "ru" ? "Изменения" : "Changes"}</h3><div className={styles.changeList}>{proposal.changes.map((change) => <article key={change.id}>
@@ -1065,14 +1081,14 @@ function SettingsModal({ profile, locale, busy, onClose, onSave }: { profile: Pl
     ...current,
     energyWindows: current.energyWindows.map((window, candidate) => candidate === index ? { ...window, [field]: next } : window),
   }));
-  return <ModalShell title={locale === "ru" ? "Настройки плана" : "Planner settings"} onClose={onClose}><form className={styles.form} onSubmit={(event) => {
+  return <ModalShell title={locale === "ru" ? "Настройки плана" : "Planner settings"} onClose={onClose} locale={locale}><form className={styles.form} onSubmit={(event) => {
     event.preventDefault();
     const sleepSchedule = sleepTouched
       ? { mode: "fixed" as const, weekdays: { bedtime: form.weekdayBedtime, durationMinutes: Number(form.weekdaySleep) }, weekends: { bedtime: form.weekendBedtime, durationMinutes: Number(form.weekendSleep) } }
       : profile.sleepSchedule;
     void onSave({ timezone: form.timezone, horizon: form.horizon, reserveRatio: Number(form.reserve) / 100, defaultBufferMinutes: Number(form.buffer), availability: sleepTouched && !availabilityTouched ? availabilityFromSleepSchedule(sleepSchedule) : form.availability, energyWindows: form.energyWindows, sleepSchedule });
   }}>{profile.sleepSchedule.mode === "adaptive" && <p className={styles.sleepHint}>{locale === "ru" ? "Сейчас включён адаптивный сон. Изменение точных полей ниже переключит режим на фиксированный; остальные настройки можно менять без переключения." : "Adaptive sleep is active. Editing the exact sleep fields below switches to fixed mode; other settings keep adaptive mode."}</p>}<div className={styles.formGrid}>
-    <label>{locale === "ru" ? "Часовой пояс" : "Time zone"}<input value={form.timezone} onChange={(e) => setForm((v) => ({ ...v, timezone: e.target.value }))} /></label><label>{locale === "ru" ? "Горизонт" : "Horizon"}<select value={form.horizon} onChange={(e) => setForm((v) => ({ ...v, horizon: e.target.value as PlannerHorizon }))}><option value="week">7 days</option><option value="two_weeks">14 days</option><option value="month">30 days</option></select></label>
+    <label>{locale === "ru" ? "Часовой пояс" : "Time zone"}<input value={form.timezone} onChange={(e) => setForm((v) => ({ ...v, timezone: e.target.value }))} /></label><label>{locale === "ru" ? "Горизонт" : "Horizon"}<select value={form.horizon} onChange={(e) => setForm((v) => ({ ...v, horizon: e.target.value as PlannerHorizon }))}><option value="week">{locale === "ru" ? "7 дней" : "7 days"}</option><option value="two_weeks">{locale === "ru" ? "14 дней" : "14 days"}</option><option value="month">{locale === "ru" ? "30 дней" : "30 days"}</option></select></label>
     <label>{locale === "ru" ? "Резерв, %" : "Reserve, %"}<input type="number" min="0" max="60" value={form.reserve} onChange={(e) => setForm((v) => ({ ...v, reserve: e.target.value }))} /></label><label>{locale === "ru" ? "Буфер, мин" : "Buffer, min"}<input type="number" min="0" max="120" value={form.buffer} onChange={(e) => setForm((v) => ({ ...v, buffer: e.target.value }))} /></label>
     <label>{locale === "ru" ? "Сон перед буднями" : "Weekday bedtime"}<input type="time" value={form.weekdayBedtime} onChange={(e) => { setSleepTouched(true); setForm((v) => ({ ...v, weekdayBedtime: e.target.value })); }} /></label><label>{locale === "ru" ? "Длительность, мин" : "Duration, min"}<input type="number" min="180" max="960" value={form.weekdaySleep} onChange={(e) => { setSleepTouched(true); setForm((v) => ({ ...v, weekdaySleep: e.target.value })); }} /></label>
     <label>{locale === "ru" ? "Сон перед выходными" : "Weekend bedtime"}<input type="time" value={form.weekendBedtime} onChange={(e) => { setSleepTouched(true); setForm((v) => ({ ...v, weekendBedtime: e.target.value })); }} /></label><label>{locale === "ru" ? "Длительность, мин" : "Duration, min"}<input type="number" min="180" max="960" value={form.weekendSleep} onChange={(e) => { setSleepTouched(true); setForm((v) => ({ ...v, weekendSleep: e.target.value })); }} /></label>
@@ -1096,7 +1112,7 @@ function LegacyImportModal({ sources, locale, busy, loading, onClose, onImport }
     if (next.has(sourceKey)) next.delete(sourceKey); else next.add(sourceKey);
     return next;
   });
-  return <ModalShell title={locale === "ru" ? "Перенос старых расписаний" : "Import old plans"} onClose={onClose}>
+  return <ModalShell title={locale === "ru" ? "Перенос старых расписаний" : "Import old plans"} onClose={onClose} locale={locale}>
     <div className={styles.importBody}>
       <p className={styles.modalLead}>{locale === "ru"
         ? "Выберите источники. Дела, блоки и статусы будут скопированы, а исходные карточки останутся без изменений. Один источник нельзя перенести дважды."
@@ -1147,5 +1163,5 @@ function StatsModal({ blocks, items, profile, locale, onClose }: { blocks: Plann
   }).length;
   const plannedMinutes = done.reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0);
   const actualMinutes = actual.reduce((sum, block) => sum + isoDurationMinutes(block.actualStartAt!, block.actualEndAt!), 0);
-  return <ModalShell title={locale === "ru" ? "План и факт" : "Plan vs actual"} onClose={onClose}><div className={styles.statsPeriod}><button className={period === "week" ? styles.viewTabActive : ""} onClick={() => setPeriod("week")}>{locale === "ru" ? "7 дней" : "7 days"}</button><button className={period === "month" ? styles.viewTabActive : ""} onClick={() => setPeriod("month")}>{locale === "ru" ? "30 дней" : "30 days"}</button></div><div className={styles.statsGrid}><article><span>{locale === "ru" ? "Выполнено" : "Done"}</span><strong>{done.length}</strong></article><article><span>{locale === "ru" ? "Пропущено" : "Skipped"}</span><strong>{skipped.length}</strong></article><article><span>{locale === "ru" ? "План / факт" : "Plan / actual"}</span><strong>{formatDuration(plannedMinutes, locale)} / {formatDuration(actualMinutes, locale)}</strong></article><article><span>{locale === "ru" ? "Точность оценки" : "Estimate accuracy"}</span><strong>{accuracy}%</strong></article><article><span>Routines</span><strong>{routineRate}%</strong></article><article><span>{locale === "ru" ? "Перегруженные дни" : "Overloaded days"}</span><strong>{overloaded}</strong></article><article><span>{locale === "ru" ? "Защищённый резерв" : "Protected reserve"}</span><strong>{Math.round(profile.reserveRatio * 100)}%</strong></article></div></ModalShell>;
+  return <ModalShell title={locale === "ru" ? "План и факт" : "Plan vs actual"} onClose={onClose} locale={locale}><div className={styles.statsPeriod}><button className={period === "week" ? styles.viewTabActive : ""} onClick={() => setPeriod("week")}>{locale === "ru" ? "7 дней" : "7 days"}</button><button className={period === "month" ? styles.viewTabActive : ""} onClick={() => setPeriod("month")}>{locale === "ru" ? "30 дней" : "30 days"}</button></div><div className={styles.statsGrid}><article><span>{locale === "ru" ? "Выполнено" : "Done"}</span><strong>{done.length}</strong></article><article><span>{locale === "ru" ? "Пропущено" : "Skipped"}</span><strong>{skipped.length}</strong></article><article><span>{locale === "ru" ? "План / факт" : "Plan / actual"}</span><strong>{formatDuration(plannedMinutes, locale)} / {formatDuration(actualMinutes, locale)}</strong></article><article><span>{locale === "ru" ? "Точность оценки" : "Estimate accuracy"}</span><strong>{accuracy}%</strong></article><article><span>{locale === "ru" ? "Регулярные дела" : "Routines"}</span><strong>{routineRate}%</strong></article><article><span>{locale === "ru" ? "Перегруженные дни" : "Overloaded days"}</span><strong>{overloaded}</strong></article><article><span>{locale === "ru" ? "Защищённый резерв" : "Protected reserve"}</span><strong>{Math.round(profile.reserveRatio * 100)}%</strong></article></div></ModalShell>;
 }
