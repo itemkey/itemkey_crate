@@ -212,12 +212,10 @@ export default function AutoplannerModal({
   const ru = locale === "ru";
   const [step, setStep] = useState(upgradeOnly ? 2 : firstRun ? 1 : 0);
   const [value, setValue] = useState<AssistantDraft>(() => initialDraft(profile, firstRun));
-  const [parsed, setParsed] = useState<PlannerAssistantParseResult>({ drafts: [], ambiguities: [] });
   const [localError, setLocalError] = useState("");
   const [profileChanged, setProfileChanged] = useState(firstRun);
   const [resetStage, setResetStage] = useState<0 | 1 | 2>(0);
   const [password, setPassword] = useState("");
-  const [ambiguitiesConfirmed, setAmbiguitiesConfirmed] = useState(false);
   const [commitmentEditorOpen, setCommitmentEditorOpen] = useState(false);
 
   useEffect(() => {
@@ -248,8 +246,8 @@ export default function AutoplannerModal({
   }, [firstRun, value]);
 
   const labels = ru
-    ? ["Сводка", "Часовой пояс", "Сон", "Пробный режим", "Все дела", "Продуктивность", "Проверка", "Итог"]
-    : ["Summary", "Time zone", "Sleep", "Trial schedule", "All items", "Productivity", "Review", "Result"];
+    ? ["Сводка", "Часовой пояс", "Сон", "Пробный режим", "Все дела", "Продуктивность", "Итог"]
+    : ["Summary", "Time zone", "Sleep", "Trial schedule", "All items", "Productivity", "Result"];
   const currentLabel = labels[step] ?? labels[0];
   const commitmentDrafts = useMemo(
     () => value.commitments.map((commitment) => commitmentToPlannerDraft(commitment, locale, value.timezone)),
@@ -312,20 +310,11 @@ export default function AutoplannerModal({
         value.timezone,
         createRuntimeId()
       ));
-      const baseIndex = value.commitments.length;
       setValue((current) => ({
         ...current,
         tasks: "",
         commitments: [...current.commitments, ...imported],
       }));
-      setParsed((current) => ({
-        drafts: [],
-        ambiguities: [
-          ...current.ambiguities,
-          ...taskResult.ambiguities.map((entry) => ({ ...entry, index: entry.index + baseIndex })),
-        ],
-      }));
-      setAmbiguitiesConfirmed(false);
       return true;
     } catch (error) {
       setLocalError(error instanceof Error ? error.message : "Не удалось разобрать список.");
@@ -349,7 +338,7 @@ export default function AutoplannerModal({
 
   function goBack() {
     setCommitmentEditorOpen(false);
-    if (upgradeOnly && step === 7) setStep(2);
+    if (upgradeOnly && step === 6) setStep(2);
     else if (step > 1) setStep(step - 1);
     else if (!firstRun) setStep(0);
   }
@@ -405,7 +394,7 @@ export default function AutoplannerModal({
     && !value.healthyMinimumConfirmed;
 
   return <ModalFrame title={ru ? "Автопланировщик" : "Autoplanner"} onClose={firstRun ? undefined : onClose} locale={locale}>
-    <div className={styles.assistantProgress}><span>{upgradeOnly ? (step === 2 ? "1/2" : "2/2") : `${step}/7`}</span><strong>{upgradeOnly ? (ru ? "Новые правила сна и дедлайнов" : "New sleep and deadline rules") : currentLabel}</strong><i style={{ width: upgradeOnly ? `${step === 2 ? 50 : 100}%` : `${step / 7 * 100}%` }} /></div>
+    <div className={styles.assistantProgress}><span>{upgradeOnly ? (step === 2 ? "1/2" : "2/2") : `${step}/6`}</span><strong>{upgradeOnly ? (ru ? "Новые правила сна и дедлайнов" : "New sleep and deadline rules") : currentLabel}</strong><i style={{ width: upgradeOnly ? `${step === 2 ? 50 : 100}%` : `${step / 6 * 100}%` }} /></div>
     <div className={styles.assistantBody}>
       {localError && <p className={styles.inlineError}>{localError}</p>}
       {step === 1 && <section className={styles.assistantStep}><h3>{ru ? "Где считать ваше время?" : "Which time zone should be used?"}</h3><p>{ru ? "Он определён автоматически. Проверьте значение." : "It was detected automatically. Confirm it."}</p><label>{ru ? "Часовой пояс" : "Time zone"}<input value={value.timezone} onChange={(event) => { update("timezone", event.target.value); setProfileChanged(true); }} /></label></section>}
@@ -487,21 +476,13 @@ export default function AutoplannerModal({
         <div className={styles.segmented}>{(["auto", "morning", "day", "evening"] as const).map((energy) => <button type="button" key={energy} className={value.energy === energy ? styles.segmentedActive : ""} aria-pressed={value.energy === energy} onClick={() => { update("energy", energy); setProfileChanged(true); }}>{energy === "auto" ? (ru ? "Без разницы — выбери сам" : "No preference — choose for me") : energy === "morning" ? (ru ? "После подъёма" : "After waking") : energy === "day" ? (ru ? "Днём" : "Day") : (ru ? "Вечером" : "Evening")}</button>)}</div>
         <label>{ru ? "Оставлять свободным, %" : "Protected free time, %"}<input type="number" min="0" max="60" value={value.reserve} onChange={(event) => { update("reserve", event.target.value); setProfileChanged(true); }} /><small>{ru ? "Доля доступного времени без автозадач. 20% помогает пережить задержки, отдых и внезапные планы." : "The share of available time kept free from automatic tasks. 20% leaves room for delays, rest and unexpected plans."}</small></label>
       </section>}
-      {step === 6 && <section className={`${styles.assistantStep} ${styles.commitmentsStep}`}>
-        <h3>{ru ? "Проверьте все дела" : "Review all items"}</h3>
-        <p>{ru ? "Проверьте длительность, повторение, допустимое время и дорогу. Ничего не создаётся до следующего предпросмотра." : "Review duration, recurrence, allowed time and travel. Nothing is created before the next preview."}</p>
-        {parsed.ambiguities.length > 0 && <div className={styles.ambiguities}>{parsed.ambiguities.map((entry, index) => <p key={`${entry.index}-${entry.field}-${index}`}>#{entry.index + 1}: {ru ? entry.message : entry.field === "duration" ? "Duration was not specified; 1 hour is shown for confirmation." : entry.field === "date" ? "Date was not specified; review the selected day." : entry.field === "time" ? "A fixed item needs both start and end time." : "Review this field before continuing."}</p>)}<label className={styles.choiceCheck}><input type="checkbox" checked={ambiguitiesConfirmed} onChange={(event) => setAmbiguitiesConfirmed(event.target.checked)} />{ru ? "Я проверил отмеченные карточки и подтверждаю значения" : "I reviewed the marked cards and confirm their values"}</label></div>}
-        <CommitmentsEditor commitments={value.commitments} locale={locale} onChange={(commitments) => update("commitments", commitments)} onEstimateTravel={onEstimateTravel} onEditingChange={setCommitmentEditorOpen} />
-        {value.commitments.length === 0 && <p>{ru ? "Новых дел нет — можно обновить только настройки." : "There are no new items; settings can still be updated."}</p>}
-      </section>}
-      {step === 7 && <section className={styles.assistantStep} aria-busy={busy}><h3>{ru ? "Готово к предпросмотру" : "Ready for preview"}</h3><dl className={styles.assistantRecap}><div><dt>{ru ? "Часовой пояс" : "Time zone"}</dt><dd>{value.timezone}</dd></div><div><dt>{ru ? "Сон" : "Sleep"}</dt><dd>{draftSleepSchedule.mode === "adaptive" ? `${ru ? "адаптивный" : "adaptive"} · ${draftWakeTime} · ${Math.round(draftSleepSchedule.targetDurationMinutes / 6) / 10} ${ru ? "ч" : "h"}` : `${draftSleepSchedule.weekdays.bedtime} · ${draftSleepSchedule.weekdays.durationMinutes} ${ru ? "мин" : "min"}`}</dd></div>{draftSleepSchedule.mode === "adaptive" && <div><dt>{ru ? "Отход ко сну" : "Bedtime"}</dt><dd>{draftSleepRule.bedtime}</dd></div>}<div><dt>{ru ? "Новых дел" : "New items"}</dt><dd>{commitmentDrafts.length}</dd></div><div><dt>{ru ? "Продуктивность" : "Productivity"}</dt><dd>{value.energy === "auto" ? (ru ? "без разницы" : "no preference") : value.energy === "morning" ? (ru ? "после подъёма" : "after waking") : value.energy === "day" ? (ru ? "днём" : "day") : (ru ? "вечером" : "evening")}</dd></div><div><dt>{ru ? "Резерв" : "Reserve"}</dt><dd>{value.reserve}%</dd></div></dl>{draftSleepSchedule.mode === "adaptive" && <div className={styles.fieldExplanation}><strong>{ru ? "Предварительная причина" : "Preliminary reason"}</strong><p>{wakeReasonText(draftSleepSchedule.wakeAnchor.selectionReason, ru)}</p>{value.wakeDayPart === "auto" && <small>{ru ? "Движок выведет подходящий ориентир подъёма из обязательств, временных окон, дороги и сроков, затем один раз соберёт весь план." : "The planner derives a suitable wake anchor from commitments, time windows, travel and deadlines, then builds the full plan once."}</small>}</div>}<p>{ru ? "Следующий экран покажет каждый перенос, защищённый сон и конфликт. Ничего ещё не будет применено." : "The next screen shows every move, protected sleep block and conflict. Nothing is applied yet."}</p>{requestError && <div className={styles.requestErrorPanel} role="alert"><strong>{ru ? "Предпросмотр не был создан" : "The preview was not created"}</strong><p>{requestError}</p><small>{ru ? "Введённые дела сохранены в этом мастере. Можно проверить их или повторить расчёт — заполнять всё заново не нужно." : "Your items are still saved in this wizard. Review them or retry; you do not need to enter everything again."}</small><button type="button" onClick={() => { onClearRequestError(); setStep(6); }}>{ru ? "Вернуться к проверке дел" : "Return to item review"}</button></div>}</section>}
+      {step === 6 && <section className={styles.assistantStep} aria-busy={busy}><h3>{ru ? "Готово к предпросмотру" : "Ready for preview"}</h3><dl className={styles.assistantRecap}><div><dt>{ru ? "Часовой пояс" : "Time zone"}</dt><dd>{value.timezone}</dd></div><div><dt>{ru ? "Сон" : "Sleep"}</dt><dd>{draftSleepSchedule.mode === "adaptive" ? `${ru ? "адаптивный" : "adaptive"} · ${draftWakeTime} · ${Math.round(draftSleepSchedule.targetDurationMinutes / 6) / 10} ${ru ? "ч" : "h"}` : `${draftSleepSchedule.weekdays.bedtime} · ${draftSleepSchedule.weekdays.durationMinutes} ${ru ? "мин" : "min"}`}</dd></div>{draftSleepSchedule.mode === "adaptive" && <div><dt>{ru ? "Отход ко сну" : "Bedtime"}</dt><dd>{draftSleepRule.bedtime}</dd></div>}<div><dt>{ru ? "Новых дел" : "New items"}</dt><dd>{commitmentDrafts.length}</dd></div><div><dt>{ru ? "Продуктивность" : "Productivity"}</dt><dd>{value.energy === "auto" ? (ru ? "без разницы" : "no preference") : value.energy === "morning" ? (ru ? "после подъёма" : "after waking") : value.energy === "day" ? (ru ? "днём" : "day") : (ru ? "вечером" : "evening")}</dd></div><div><dt>{ru ? "Резерв" : "Reserve"}</dt><dd>{value.reserve}%</dd></div></dl>{draftSleepSchedule.mode === "adaptive" && <div className={styles.fieldExplanation}><strong>{ru ? "Предварительная причина" : "Preliminary reason"}</strong><p>{wakeReasonText(draftSleepSchedule.wakeAnchor.selectionReason, ru)}</p>{value.wakeDayPart === "auto" && <small>{ru ? "Движок выведет подходящий ориентир подъёма из обязательств, временных окон, дороги и сроков, затем один раз соберёт весь план." : "The planner derives a suitable wake anchor from commitments, time windows, travel and deadlines, then builds the full plan once."}</small>}</div>}<p>{ru ? "Следующий экран покажет каждый перенос, защищённый сон и конфликт. Ничего ещё не будет применено." : "The next screen shows every move, protected sleep block and conflict. Nothing is applied yet."}</p>{requestError && <div className={styles.requestErrorPanel} role="alert"><strong>{ru ? "Предпросмотр не был создан" : "The preview was not created"}</strong><p>{requestError}</p><small>{ru ? "Введённые дела сохранены в этом мастере. Можно изменить их в пункте «Все дела» или повторить расчёт — заполнять всё заново не нужно." : "Your items are still saved in this wizard. Edit them under All items or retry; you do not need to enter everything again."}</small><button type="button" onClick={() => { onClearRequestError(); setStep(4); }}>{ru ? "Вернуться к делам" : "Return to items"}</button></div>}</section>}
       <div className={styles.assistantFooter}>
         <button type="button" disabled={busy} onClick={goBack}>{ru ? "Назад" : "Back"}</button>
-        {step < 4 && <button type="button" className={styles.primaryButton} disabled={busy || healthyMinimumNeedsConfirmation} onClick={() => setStep(upgradeOnly && step === 2 ? 7 : step + 1)}>{ru ? "Дальше" : "Next"}</button>}
+        {step < 4 && <button type="button" className={styles.primaryButton} disabled={busy || healthyMinimumNeedsConfirmation} onClick={() => setStep(upgradeOnly && step === 2 ? 6 : step + 1)}>{ru ? "Дальше" : "Next"}</button>}
         {step === 4 && <button type="button" className={styles.primaryButton} disabled={busy || commitmentEditorOpen} onClick={() => void finishItemsStep()}>{commitmentEditorOpen ? (ru ? "Сначала сохраните дело" : "Save the item first") : (ru ? "Дальше" : "Next")}</button>}
-        {step === 5 && <button type="button" className={styles.primaryButton} disabled={busy} onClick={() => setStep(6)}>{ru ? "К проверке" : "Review items"}</button>}
-        {step === 6 && <button type="button" className={styles.primaryButton} disabled={busy || commitmentEditorOpen || (parsed.ambiguities.length > 0 && !ambiguitiesConfirmed)} onClick={() => setStep(7)}>{commitmentEditorOpen ? (ru ? "Сначала сохраните дело" : "Save the item first") : (ru ? "К итогу" : "Continue")}</button>}
-        {step === 7 && <button type="button" className={styles.primaryButton} disabled={busy} onClick={() => { onClearRequestError(); void prepare(); }}>{busy ? (ru ? "Составляю план…" : "Building plan…") : requestError ? (ru ? "Повторить расчёт" : "Retry") : (ru ? "Показать изменения" : "Review changes")}</button>}
+        {step === 5 && <button type="button" className={styles.primaryButton} disabled={busy} onClick={() => setStep(6)}>{ru ? "К итогу" : "Continue"}</button>}
+        {step === 6 && <button type="button" className={styles.primaryButton} disabled={busy} onClick={() => { onClearRequestError(); void prepare(); }}>{busy ? (ru ? "Составляю план…" : "Building plan…") : requestError ? (ru ? "Повторить расчёт" : "Retry") : (ru ? "Показать изменения" : "Review changes")}</button>}
       </div>
     </div>
   </ModalFrame>;
