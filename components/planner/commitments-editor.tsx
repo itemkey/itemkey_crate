@@ -26,6 +26,7 @@ const PRIORITIES: PlannerPriority[] = ["low", "normal", "high", "critical"];
 const WEEKDAYS = [1, 2, 3, 4, 5, 6, 7];
 
 type OriginMode = "home" | "saved" | "temporary";
+type DestinationMode = "home" | "saved" | "temporary";
 
 function formatCommitmentDuration(totalMinutes: number, locale: Locale): string {
   const minutes = Math.max(0, Math.round(totalMinutes));
@@ -101,6 +102,10 @@ export default function CommitmentsEditor({
   const [originAddress, setOriginAddress] = useState("");
   const [originLabel, setOriginLabel] = useState("");
   const [rememberOrigin, setRememberOrigin] = useState(false);
+  const [destinationMode, setDestinationMode] = useState<DestinationMode>("temporary");
+  const [selectedDestinationPlaceId, setSelectedDestinationPlaceId] = useState("");
+  const [destinationLabel, setDestinationLabel] = useState("");
+  const [rememberDestination, setRememberDestination] = useState(false);
   const [formError, setFormError] = useState("");
   const [estimating, setEstimating] = useState(false);
   const [estimateError, setEstimateError] = useState("");
@@ -157,6 +162,12 @@ export default function CommitmentsEditor({
     placeName: "Как назвать место",
     remember: "Запомнить это место для следующих дел",
     to: "Куда ехать",
+    toHome: "Домой",
+    toSaved: "В сохранённое место",
+    toTemporary: "Другой адрес",
+    destinationAddress: "Адрес назначения",
+    rememberDestination: "Запомнить место назначения для следующих дел",
+    destinationPlaceName: "Как назвать место назначения",
     mode: "Как добираться",
     calculate: "Рассчитать по навигатору",
     calculating: "Считаю маршрут…",
@@ -230,6 +241,12 @@ export default function CommitmentsEditor({
     placeName: "Place name",
     remember: "Remember this place for future items",
     to: "Destination",
+    toHome: "Home",
+    toSaved: "Saved place",
+    toTemporary: "Another address",
+    destinationAddress: "Destination address",
+    rememberDestination: "Remember this destination for future items",
+    destinationPlaceName: "Destination place name",
     mode: "Travel mode",
     calculate: "Calculate with navigator",
     calculating: "Calculating route…",
@@ -269,6 +286,12 @@ export default function CommitmentsEditor({
     return undefined;
   }, [home, originMode, places, selectedPlaceId]);
 
+  const selectedDestination = useMemo(() => {
+    if (destinationMode === "home") return home;
+    if (destinationMode === "saved") return places.find((place) => place.id === selectedDestinationPlaceId);
+    return undefined;
+  }, [destinationMode, home, places, selectedDestinationPlaceId]);
+
   function setEditor(next: PlannerStructuredCommitment | null) {
     setEditorState(next);
     onEditingChange?.(Boolean(next));
@@ -286,17 +309,27 @@ export default function CommitmentsEditor({
     setOriginAddress(home?.address ?? "");
     setOriginLabel("");
     setRememberOrigin(false);
+    setDestinationMode("temporary");
+    setSelectedDestinationPlaceId("");
+    setDestinationLabel("");
+    setRememberDestination(false);
     setEditor(blankCommitment(quickTitle));
   }
 
   function startEditing(rawCommitment: PlannerStructuredCommitment) {
     const commitment = normalizeStructuredCommitment(rawCommitment);
     const originPlace = places.find((place) => place.id === commitment.travel.originPlaceId);
+    const destinationPlace = places.find((place) => place.id === commitment.travel.destinationPlaceId)
+      ?? places.find((place) => place.address === commitment.travel.destinationAddress);
     setOriginMode(originPlace?.kind === "home" ? "home" : originPlace ? "saved" : "temporary");
     setSelectedPlaceId(originPlace?.id ?? "");
     setOriginAddress(commitment.travel.originAddress ?? originPlace?.address ?? "");
     setOriginLabel(commitment.travel.originLabel ?? originPlace?.label ?? "");
     setRememberOrigin(false);
+    setDestinationMode(destinationPlace?.kind === "home" ? "home" : destinationPlace ? "saved" : "temporary");
+    setSelectedDestinationPlaceId(destinationPlace?.id ?? "");
+    setDestinationLabel(commitment.travel.destinationLabel ?? destinationPlace?.label ?? "");
+    setRememberDestination(false);
     setFormError("");
     setEstimateError("");
     setEditor(structuredClone(commitment));
@@ -323,10 +356,14 @@ export default function CommitmentsEditor({
     return selectedOrigin?.address ?? originAddress.trim();
   }
 
+  function currentDestinationAddress(): string {
+    return selectedDestination?.address ?? editor?.travel.destinationAddress?.trim() ?? "";
+  }
+
   async function estimateRoute() {
     if (!editor) return;
     const origin = currentOriginAddress();
-    const destination = editor.travel.destinationAddress?.trim() ?? "";
+    const destination = currentDestinationAddress();
     if (!origin || !destination) {
       setEstimateError(ru ? "Укажите адрес отправления и назначения." : "Enter both origin and destination addresses.");
       return;
@@ -383,10 +420,12 @@ export default function CommitmentsEditor({
     }
 
     let originPlace: PlannerSavedPlace | undefined = selectedOrigin;
+    let destinationPlace: PlannerSavedPlace | undefined = selectedDestination;
     let normalizedTravel = { ...editor.travel };
     if (editor.travel.enabled) {
       const address = currentOriginAddress();
-      if (!address || !editor.travel.destinationAddress?.trim()) {
+      const destinationAddress = currentDestinationAddress();
+      if (!address || !destinationAddress) {
         return setFormError(ru ? "Для дороги нужны адрес отправления и адрес назначения." : "Travel requires origin and destination addresses.");
       }
       if (!Number.isFinite(editor.travel.durationMinutes) || editor.travel.durationMinutes < 1) {
@@ -404,12 +443,28 @@ export default function CommitmentsEditor({
           return currentHome ? [currentHome, ...saved] : saved;
         });
       }
+      if (destinationMode === "home" && !home) {
+        destinationPlace = originPlace?.kind === "home" && originPlace.address === destinationAddress
+          ? originPlace
+          : { id: createRuntimeId(), label: ru ? "Дом" : "Home", address: destinationAddress, kind: "home" };
+        setPlaces((current) => [...current.filter((place) => place.kind !== "home"), destinationPlace!]);
+      } else if (destinationMode === "temporary" && rememberDestination) {
+        if (!destinationLabel.trim()) return setFormError(ru ? "Придумайте название для места назначения." : "Name the destination you want to save.");
+        destinationPlace = { id: createRuntimeId(), label: destinationLabel.trim(), address: destinationAddress, kind: "saved" };
+        setPlaces((current) => {
+          const currentHome = current.find((place) => place.kind === "home");
+          const saved = [...current.filter((place) => place.kind === "saved"), destinationPlace!].slice(-29);
+          return currentHome ? [currentHome, ...saved] : saved;
+        });
+      }
       normalizedTravel = {
         ...editor.travel,
         originAddress: address,
         originLabel: originPlace?.label ?? (originLabel.trim() || (ru ? "Другой адрес" : "Another address")),
         originPlaceId: originPlace?.id,
-        destinationAddress: editor.travel.destinationAddress.trim(),
+        destinationAddress,
+        destinationLabel: destinationPlace?.label ?? (destinationLabel.trim() || (ru ? "Другой адрес" : "Another address")),
+        destinationPlaceId: destinationPlace?.id,
         durationMinutes: Math.round(editor.travel.durationMinutes),
         bufferMinutes: Math.max(0, Math.round(editor.travel.bufferMinutes)),
       };
@@ -471,7 +526,10 @@ export default function CommitmentsEditor({
           {originMode === "home" && (home ? <div className={styles.savedPlacePreview}><strong>{home.label}</strong><span>{home.address}</span><button type="button" onClick={() => { setPlaces((current) => current.filter((place) => place.id !== home.id)); setOriginAddress(""); }}>{ru ? "Изменить адрес" : "Change address"}</button></div> : <label>{copy.homeAddress}<input value={originAddress} onChange={(event) => setOriginAddress(event.target.value)} placeholder={ru ? "Город, улица, дом" : "City, street, house"} /><small>{ru ? "Адрес сохранится как «Дом» только в этом браузере." : "The address is stored as Home only in this browser."}</small></label>)}
           {originMode === "saved" && <label>{copy.savedPlace}<select value={selectedPlaceId} onChange={(event) => setSelectedPlaceId(event.target.value)}>{savedPlaces.map((place) => <option value={place.id} key={place.id}>{place.label} — {place.address}</option>)}</select></label>}
           {originMode === "temporary" && <><label>{copy.address}<input value={originAddress} onChange={(event) => setOriginAddress(event.target.value)} placeholder={ru ? "Адрес, откуда поедете" : "Starting address"} /></label><label className={styles.choiceCheck}><input type="checkbox" checked={rememberOrigin} onChange={(event) => setRememberOrigin(event.target.checked)} />{copy.remember}</label>{rememberOrigin && <label>{copy.placeName}<input value={originLabel} onChange={(event) => setOriginLabel(event.target.value)} placeholder={ru ? "Дом родителей, офис или другое название" : "Parents’ home, office or another name"} /></label>}</>}
-          <label>{copy.to}<input value={editor.travel.destinationAddress ?? ""} onChange={(event) => patchTravel({ destinationAddress: event.target.value, estimatedByNavigator: false })} placeholder={ru ? "Город, улица, дом" : "City, street, house"} /></label>
+          <label>{copy.to}<select value={destinationMode} onChange={(event) => { const next = event.target.value as DestinationMode; setDestinationMode(next); setEstimateError(""); setRememberDestination(false); setDestinationLabel(""); if (next === "home") { setSelectedDestinationPlaceId(home?.id ?? ""); patchTravel({ destinationAddress: home?.address ?? "", destinationLabel: home?.label, destinationPlaceId: home?.id, estimatedByNavigator: false }); } else if (next === "saved") { const first = savedPlaces[0]; setSelectedDestinationPlaceId(first?.id ?? ""); patchTravel({ destinationAddress: first?.address ?? "", destinationLabel: first?.label, destinationPlaceId: first?.id, estimatedByNavigator: false }); } else { setSelectedDestinationPlaceId(""); patchTravel({ destinationAddress: "", destinationLabel: undefined, destinationPlaceId: undefined, estimatedByNavigator: false }); } }}><option value="home">{copy.toHome}</option><option value="saved" disabled={!savedPlaces.length}>{copy.toSaved}</option><option value="temporary">{copy.toTemporary}</option></select></label>
+          {destinationMode === "home" && (home ? <div className={styles.savedPlacePreview}><strong>{home.label}</strong><span>{home.address}</span><button type="button" onClick={() => { setPlaces((current) => current.filter((place) => place.id !== home.id)); setSelectedDestinationPlaceId(""); patchTravel({ destinationAddress: "", destinationLabel: undefined, destinationPlaceId: undefined, estimatedByNavigator: false }); }}>{ru ? "Изменить адрес" : "Change address"}</button></div> : <label>{copy.homeAddress}<input value={editor.travel.destinationAddress ?? ""} onChange={(event) => patchTravel({ destinationAddress: event.target.value, destinationLabel: ru ? "Дом" : "Home", estimatedByNavigator: false })} placeholder={ru ? "Город, улица, дом" : "City, street, house"} /><small>{ru ? "Адрес сохранится как «Дом» только в этом браузере." : "The address is stored as Home only in this browser."}</small></label>)}
+          {destinationMode === "saved" && <label>{copy.savedPlace}<select value={selectedDestinationPlaceId} onChange={(event) => { const place = savedPlaces.find((candidate) => candidate.id === event.target.value); setSelectedDestinationPlaceId(event.target.value); patchTravel({ destinationAddress: place?.address ?? "", destinationLabel: place?.label, destinationPlaceId: place?.id, estimatedByNavigator: false }); }}>{savedPlaces.map((place) => <option value={place.id} key={place.id}>{place.label} — {place.address}</option>)}</select></label>}
+          {destinationMode === "temporary" && <><label>{copy.destinationAddress}<input value={editor.travel.destinationAddress ?? ""} onChange={(event) => patchTravel({ destinationAddress: event.target.value, destinationLabel: undefined, destinationPlaceId: undefined, estimatedByNavigator: false })} placeholder={ru ? "Город, улица, дом" : "City, street, house"} /></label><label className={styles.choiceCheck}><input type="checkbox" checked={rememberDestination} onChange={(event) => setRememberDestination(event.target.checked)} />{copy.rememberDestination}</label>{rememberDestination && <label>{copy.destinationPlaceName}<input value={destinationLabel} onChange={(event) => setDestinationLabel(event.target.value)} placeholder={ru ? "Университет, спортзал или другое название" : "University, gym or another name"} /></label>}</>}
           <div><span className={styles.fieldTitle}>{copy.mode}</span><div className={styles.travelModes}>{TRAVEL_MODES.map((mode) => <button type="button" key={mode} className={editor.travel.mode === mode ? styles.segmentedActive : ""} aria-pressed={editor.travel.mode === mode} onClick={() => patchTravel({ mode, estimatedByNavigator: false })}>{plannerTravelModeLabel(mode, locale)}</button>)}</div></div>
           <button type="button" className={styles.routeEstimateButton} disabled={estimating} onClick={() => void estimateRoute()}>{estimating ? copy.calculating : copy.calculate}</button>
           <small className={styles.routePrivacy}>{copy.navigatorPrivacy}</small>
@@ -498,7 +556,7 @@ export default function CommitmentsEditor({
           ? `${commitment.startTime}–${commitment.endTime}`
           : `${formatCommitmentDuration(commitment.durationMinutes, locale)} · ${commitment.allowedStartTime && commitment.allowedEndTime ? `${commitment.allowedStartTime}–${commitment.allowedEndTime}` : copy.autoTime}`;
         return <article className={styles.commitmentCard} key={commitment.id}>
-          <div className={styles.commitmentCardMain}><span>{plannerCommitmentCategoryLabel(commitment.category, locale)}</span><strong>{commitment.title}</strong><p>{occurrence} · {timing}</p>{commitment.travel.enabled ? <small>{copy.route}: {commitment.travel.originLabel || commitment.travel.originAddress} → {commitment.travel.destinationAddress} · {plannerTravelModeLabel(commitment.travel.mode, locale)} · {commitment.travel.durationMinutes} {ru ? "мин в одну сторону" : "min one way"} · {commitment.travel.direction === "round_trip" ? copy.roundTrip : copy.oneWay}</small> : <small>{copy.noRoute}</small>}</div>
+          <div className={styles.commitmentCardMain}><span>{plannerCommitmentCategoryLabel(commitment.category, locale)}</span><strong>{commitment.title}</strong><p>{occurrence} · {timing}</p>{commitment.travel.enabled ? <small>{copy.route}: {commitment.travel.originLabel || commitment.travel.originAddress} → {commitment.travel.destinationLabel || commitment.travel.destinationAddress} · {plannerTravelModeLabel(commitment.travel.mode, locale)} · {commitment.travel.durationMinutes} {ru ? "мин в одну сторону" : "min one way"} · {commitment.travel.direction === "round_trip" ? copy.roundTrip : copy.oneWay}</small> : <small>{copy.noRoute}</small>}</div>
           <div className={styles.commitmentCardActions}><button type="button" onClick={() => startEditing(commitment)}>{copy.edit}</button><button type="button" className={styles.commitmentRemove} onClick={() => onChange(commitments.filter((candidate) => candidate.id !== commitment.id))}>{copy.remove}</button></div>
         </article>;
       })}</div>

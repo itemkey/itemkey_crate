@@ -32,7 +32,9 @@ export type PlannerCommitmentTravel = {
   originLabel?: string;
   originAddress?: string;
   originPlaceId?: string;
+  destinationLabel?: string;
   destinationAddress?: string;
+  destinationPlaceId?: string;
   mode: PlannerTravelMode;
   direction: PlannerTravelDirection;
   /** Duration of one trip. */
@@ -152,7 +154,9 @@ export function normalizeStructuredCommitment(value: Partial<PlannerStructuredCo
       originLabel: value.travel?.originLabel,
       originAddress: value.travel?.originAddress,
       originPlaceId: value.travel?.originPlaceId,
+      destinationLabel: value.travel?.destinationLabel,
       destinationAddress: value.travel?.destinationAddress,
+      destinationPlaceId: value.travel?.destinationPlaceId,
       mode: value.travel?.mode ?? "transit",
       direction: value.travel?.direction ?? "one_way",
       durationMinutes: Math.max(1, Math.round(value.travel?.durationMinutes ?? 30)),
@@ -198,8 +202,8 @@ export function commitmentToPlannerDraft(
   const roundTrip = commitment.travel.enabled && commitment.travel.direction === "round_trip";
   const routeNote = commitment.travel.enabled
     ? locale === "ru"
-      ? `Дорога: ${commitment.travel.originLabel || commitment.travel.originAddress || "точка отправления"} → ${commitment.travel.destinationAddress || "место дела"}; ${plannerTravelModeLabel(commitment.travel.mode, locale)}; ${routeMinutes} мин в одну сторону; ${roundTrip ? "туда и обратно" : "только туда"}${bufferMinutes ? `; ${bufferMinutes} мин запаса перед выходом` : ""}.`
-      : `Travel: ${commitment.travel.originLabel || commitment.travel.originAddress || "origin"} → ${commitment.travel.destinationAddress || "destination"}; ${plannerTravelModeLabel(commitment.travel.mode, locale)}; ${routeMinutes} min each way; ${roundTrip ? "round trip" : "outbound only"}${bufferMinutes ? `; ${bufferMinutes} min outbound buffer` : ""}.`
+      ? `Дорога: ${commitment.travel.originLabel || commitment.travel.originAddress || "точка отправления"} → ${commitment.travel.destinationLabel || commitment.travel.destinationAddress || "место дела"}; ${plannerTravelModeLabel(commitment.travel.mode, locale)}; ${routeMinutes} мин в одну сторону; ${roundTrip ? "туда и обратно" : "только туда"}${bufferMinutes ? `; ${bufferMinutes} мин запаса перед выходом` : ""}.`
+      : `Travel: ${commitment.travel.originLabel || commitment.travel.originAddress || "origin"} → ${commitment.travel.destinationLabel || commitment.travel.destinationAddress || "destination"}; ${plannerTravelModeLabel(commitment.travel.mode, locale)}; ${routeMinutes} min each way; ${roundTrip ? "round trip" : "outbound only"}${bufferMinutes ? `; ${bufferMinutes} min outbound buffer` : ""}.`
     : "";
   const fixed = commitment.timeMode === "fixed";
   const recurring = commitment.occurrenceMode === "recurring";

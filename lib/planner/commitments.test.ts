@@ -15,6 +15,7 @@ test("structured commitment becomes a fixed recurring event with protected trave
       enabled: true,
       originLabel: "Дом",
       originAddress: "Минск, улица А",
+      destinationLabel: "Курсы",
       destinationAddress: "Минск, улица Б",
       mode: "transit",
       direction: "one_way",
@@ -35,7 +36,7 @@ test("structured commitment becomes a fixed recurring event with protected trave
     startTime: "17:00",
     endTime: "19:00",
   });
-  assert.match(draft.notes ?? "", /Дом.*общественный транспорт.*35 мин/);
+  assert.match(draft.notes ?? "", /Дом.*Курсы.*общественный транспорт.*35 мин/);
 });
 
 test("commitment duration supports an overnight event", () => {
