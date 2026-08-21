@@ -558,14 +558,40 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
       headers.set("x-csrf-token", await ensureCsrf());
       headers.set("content-type", "application/json");
     }
-    const response = await fetch(url, { ...init, headers, credentials: "same-origin", cache: "no-store" });
-    const payload = (await response.json().catch(() => ({}))) as { data?: T; error?: string };
-    if (!response.ok || payload.data === undefined) {
-      if (response.status === 403) csrfRef.current = null;
-      throw new Error(payload.error ?? "Request failed");
+    const controller = new AbortController();
+    const abortFromCaller = () => controller.abort();
+    init.signal?.addEventListener("abort", abortFromCaller, { once: true });
+    const timeout = window.setTimeout(() => controller.abort(), 45_000);
+    let response: Response;
+    try {
+      response = await fetch(url, { ...init, headers, signal: controller.signal, credentials: "same-origin", cache: "no-store" });
+    } catch (cause) {
+      if (controller.signal.aborted) {
+        throw new Error(locale === "ru"
+          ? "План считался слишком долго. Форма снова доступна — попробуйте ещё раз."
+          : "Planning took too long. The form is available again — please retry.");
+      }
+      throw cause;
+    } finally {
+      window.clearTimeout(timeout);
+      init.signal?.removeEventListener("abort", abortFromCaller);
     }
-    return payload.data;
-  }, [ensureCsrf]);
+    const rawPayload = await response.text();
+    let payload: { data?: T; error?: string } = {};
+    try {
+      payload = rawPayload ? JSON.parse(rawPayload) as { data?: T; error?: string } : {};
+    } catch { /* an upstream server can return a plain error page */ }
+    if (!response.ok || !("data" in payload)) {
+      if (response.status === 403) csrfRef.current = null;
+      const fallback = response.status === 413
+        ? (locale === "ru" ? "Список дел оказался слишком большим для одного запроса." : "The item list is too large for one request.")
+        : locale === "ru"
+          ? `Сервер не смог подготовить план (HTTP ${response.status}). Форма разблокирована.`
+          : `The server could not prepare the plan (HTTP ${response.status}). The form has been unlocked.`;
+      throw new Error(payload.error?.trim() || fallback);
+    }
+    return payload.data as T;
+  }, [ensureCsrf, locale]);
 
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
@@ -1017,6 +1043,8 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
         onEstimateTravel={(input) => api<PlannerTravelEstimateResult>("/api/planner/travel/estimate", { method: "POST", body: JSON.stringify(input) })}
         onParseSleep={(textValue) => api<PlannerSleepParseResult>("/api/planner/assistant/parse", { method: "POST", body: JSON.stringify({ mode: "sleep", text: textValue }) })}
         onPrepare={(input) => run(() => createProposal(input))}
+        requestError={error}
+        onClearRequestError={() => setError(null)}
         onOpenSleep={() => openSleep("later")}
         onReset={(password) => run(async () => {
           await api("/api/planner/reset", { method: "POST", body: JSON.stringify({ password, expectedRevision: profile.revision }) });

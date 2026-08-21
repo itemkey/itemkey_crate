@@ -1183,9 +1183,16 @@ function findPlacement(
 ): { startAt: string; endAt: string; date: string } | null {
   let best: { startAt: string; endAt: string; date: string; score: number } | null = null;
   const horizonStartMs = new Date(zonedPlannerDateTimeToUtc(startDate, "00:00", profile.timezone)).getTime();
+  const earliestFeasibleDateWins = !request.item.earliestAt
+    && !request.item.deadlineAt
+    && request.item.preferredWindows.length === 0
+    && request.item.uncertaintyPolicy.date.mode === "any"
+    && request.item.uncertaintyPolicy.time.mode === "any"
+    && profile.energyWindows.length === 0;
   for (let date = startDate; date <= endDate; date = addPlannerDays(date, 1)) {
     if (request.targetDate && date !== request.targetDate) continue;
     if (request.allowedDates && !request.allowedDates.includes(date)) continue;
+    let foundOnDate = false;
     const windows = availabilityForDate(profile, date);
     const totalAvailable = windows.reduce((sum, window) => sum + durationForLocalRange(window.start, window.end), 0);
     const fixedMinutes = occupied
@@ -1272,8 +1279,10 @@ function findPlacement(
           score += distance === 0 ? 50_000 : Math.max(0, 5_000 - distance * 20);
         }
         if (!best || score > best.score) best = { startAt, endAt, date, score };
+        foundOnDate = true;
       }
     }
+    if (foundOnDate && earliestFeasibleDateWins) return best;
   }
   return best;
 }
@@ -2193,6 +2202,15 @@ function autoWakeRequirement(
   }).sort((left, right) => left.minute - right.minute)[0];
 }
 
+function needsAutomaticWakeSearch(items: PlannerItem[]): boolean {
+  return items.some((item) => item.status === "active" && item.kind !== "fixed_event" && (
+    Boolean(item.earliestAt || item.deadlineAt)
+    || item.allowedWindows.length > 0
+    || item.preferredWindows.length > 0
+    || item.uncertaintyPolicy.time.mode !== "any"
+  ));
+}
+
 function candidateBlocks(proposal: PlannerProposal, input: PlannerEngineInput): PlannerBlock[] {
   const moved = new Map(proposal.changes.flatMap((change) => change.kind === "move_block"
     ? [[change.blockId, { startAt: change.toStartAt, endAt: change.toEndAt }] as const]
@@ -2300,16 +2318,16 @@ function resolveAutomaticWake(input: PlannerEngineInput): PlannerProposal | null
     ...draftItems,
   ].map((item) => [item.id, item])).values()];
   const requirement = autoWakeRequirement(planningItems, schedule.morningPreparationMinutes);
-  const candidateMinutes = Array.from({ length: (12 * 60 - 6 * 60 - 30) / STEP_MINUTES + 1 }, (_, index) => 6 * 60 + 30 + index * STEP_MINUTES)
+  const allCandidateMinutes = Array.from({ length: (12 * 60 - 6 * 60 - 30) / STEP_MINUTES + 1 }, (_, index) => 6 * 60 + 30 + index * STEP_MINUTES)
     .filter((minute) => !requirement || minute <= requirement.minute);
-  if (requirement && requirement.minute < 6 * 60 + 30) candidateMinutes.splice(0, candidateMinutes.length, requirement.minute);
-  if (candidateMinutes.length === 0) candidateMinutes.push(requirement?.minute ?? 9 * 60);
+  if (requirement && requirement.minute < 6 * 60 + 30) allCandidateMinutes.splice(0, allCandidateMinutes.length, requirement.minute);
+  if (allCandidateMinutes.length === 0) allCandidateMinutes.push(requirement?.minute ?? 9 * 60);
 
   const initialWakeMinute = plannerTimeToMinutes(schedule.wakeAnchor.localTime);
   const derivedAvailability = availabilityFromSleepSchedule(schedule);
   const availabilityFollowsSleep = Boolean(input.profilePatch?.availability)
     || sameAvailability(requestedProfile.availability, derivedAvailability);
-  const candidates = candidateMinutes.map((minute) => {
+  const evaluateCandidate = (minute: number): AutoWakeCandidate => {
     const candidateSchedule = {
       ...schedule,
       wakeAnchor: {
@@ -2328,7 +2346,25 @@ function resolveAutomaticWake(input: PlannerEngineInput): PlannerProposal | null
     };
     const proposal = resolvePreferredSleepDuration({ ...input, profilePatch });
     return measureAutoWakeCandidate(minute, profilePatch, proposal, input);
-  }).sort(compareAutoWakeCandidates);
+  };
+  let candidates: AutoWakeCandidate[];
+  if (!needsAutomaticWakeSearch(planningItems)) {
+    const neutralMinute = requirement?.minute ?? 9 * 60;
+    const candidateMinute = allCandidateMinutes.reduce((best, minute) => (
+      Math.abs(minute - neutralMinute) < Math.abs(best - neutralMinute) ? minute : best
+    ), allCandidateMinutes[0]);
+    candidates = [evaluateCandidate(candidateMinute)];
+  } else {
+    const coarseMinutes = allCandidateMinutes.filter((_, index) => index % 4 === 0);
+    const finalMinute = allCandidateMinutes.at(-1)!;
+    if (!coarseMinutes.includes(finalMinute)) coarseMinutes.push(finalMinute);
+    const coarseCandidates = coarseMinutes.map(evaluateCandidate).sort(compareAutoWakeCandidates);
+    const coarseBest = coarseCandidates[0].minute;
+    const refinementMinutes = allCandidateMinutes.filter((minute) => (
+      Math.abs(minute - coarseBest) <= 45 && !coarseMinutes.includes(minute)
+    ));
+    candidates = [...coarseCandidates, ...refinementMinutes.map(evaluateCandidate)].sort(compareAutoWakeCandidates);
+  }
   const selected = candidates[0];
   const mostImportantFlexible = planningItems.filter((item) => item.kind !== "fixed_event" && item.status === "active")
     .sort((left, right) => priorityWeight[right.priority] - priorityWeight[left.priority]

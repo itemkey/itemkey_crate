@@ -333,6 +333,10 @@
 .commitmentNotes { min-height:4.5rem !important; }
 .commitmentEditorActions { display:flex;align-items:center;justify-content:flex-end;gap:.3rem;border-top:1px solid #696969;padding-top:.55rem; }
 .ambiguities,.inlineError,.dangerPanel { border:1px solid #792b2b;background:#d8aaaa;padding:.5rem;color:#3a1010;font-size:.68rem;font-weight:750; }
+.requestErrorPanel { display:grid;gap:.45rem;border:2px solid #792b2b;background:#e1b4b4;padding:.7rem;color:#3a1010; }
+.requestErrorPanel strong { font-size:.78rem;text-transform:uppercase; }
+.requestErrorPanel p,.requestErrorPanel small { margin:0;line-height:1.45; }
+.requestErrorPanel button { justify-self:start;background:#ededed; }
 .ambiguities p { margin:.16rem 0; }
 .reviewTable { display:grid;gap:.3rem;overflow-x:auto; }
 .reviewTable article { display:grid;grid-template-columns:minmax(180px,2fr) minmax(120px,1fr) 80px 130px 100px 100px 100px 2.4rem;gap:.25rem;min-width:960px;border:1px solid #777;background:#b7b7b7;padding:.3rem; }

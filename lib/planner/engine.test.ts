@@ -797,8 +797,38 @@ test("automatic wake uses a stable 09:00 anchor when nothing requires another ti
   assert.equal(proposal.wakeAnchorDecision?.wakeTime, "09:00");
   assert.equal(proposal.wakeAnchorDecision?.bedtime, "01:00");
   assert.equal(proposal.wakeAnchorDecision?.reason.code, "auto_default");
-  assert.equal(proposal.wakeAnchorDecision?.candidatesEvaluated, 23);
+  assert.equal(proposal.wakeAnchorDecision?.candidatesEvaluated, 1);
   assert.deepEqual(proposal, buildPlannerProposal(input));
+});
+
+test("automatic wake prepares several unconstrained uncertain items without scanning every anchor", () => {
+  const sleepSchedule = createAdaptiveSleepSchedule({ minMinutes: 7 * 60, maxMinutes: 9 * 60, dayPart: "auto" });
+  const flexibleItems = Array.from({ length: 7 }, (_, index) => item({
+    id: `floating-${index}`,
+    title: `Плавающее дело ${index + 1}`,
+    estimateMinutes: 90,
+    canSplit: true,
+    minChunkMinutes: 30,
+    uncertaintyPolicy: {
+      outcomeMode: "deliverable",
+      duration: { mode: "range", minMinutes: 60, likelyMinutes: 90, maxMinutes: 150, source: "user" },
+      date: { mode: "any" },
+      time: { mode: "any" },
+      recurrence: { mode: "exact_days", period: "week", minOccurrences: 1, likelyOccurrences: 1, maxOccurrences: 1, allowedWeekdays: [] },
+    },
+  }));
+  const proposal = buildPlannerProposal({
+    profile,
+    profilePatch: { sleepSchedule, availability: availabilityFromSleepSchedule(sleepSchedule), energyWindows: [] },
+    items: flexibleItems,
+    blocks: [],
+    trigger: "assistant_setup",
+    rebuildFuture: true,
+    now: new Date("2026-08-19T04:00:00.000Z"),
+  });
+  assert.equal(proposal.wakeAnchorDecision?.wakeTime, "09:00");
+  assert.equal(proposal.wakeAnchorDecision?.candidatesEvaluated, 1);
+  assert.ok(proposal.changes.some((change) => change.kind === "add_block"));
 });
 
 test("automatic wake moves exactly early enough for a recurring morning commitment", () => {
