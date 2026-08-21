@@ -19,6 +19,7 @@ export type PlannerTravelMode = "walk" | "transit" | "car";
 export type PlannerTravelDirection = "one_way" | "round_trip";
 export type PlannerCommitmentOccurrenceMode = "once" | "recurring";
 export type PlannerCommitmentTimeMode = "fixed" | "flexible";
+export type PlannerCommitmentDurationMode = "per_occurrence" | "per_cycle";
 
 export type PlannerSavedPlace = {
   id: string;
@@ -56,6 +57,8 @@ export type PlannerStructuredCommitment = {
   startTime: string;
   endTime: string;
   durationMinutes: number;
+  /** For recurring flexible items: repeat this duration each day, or complete it once across the selected week. */
+  durationMode: PlannerCommitmentDurationMode;
   allowedStartTime?: string;
   allowedEndTime?: string;
   priority: PlannerPriority;
@@ -149,6 +152,7 @@ export function normalizeStructuredCommitment(value: Partial<PlannerStructuredCo
       ?? (legacyFixed && value.startTime && value.endTime
         ? plannerCommitmentDuration(value.startTime, value.endTime)
         : 60))),
+    durationMode: value.durationMode === "per_cycle" ? "per_cycle" : "per_occurrence",
     allowedStartTime: value.allowedStartTime,
     allowedEndTime: value.allowedEndTime,
     priority: value.priority ?? (legacyFixed ? "high" : "normal"),
@@ -192,6 +196,8 @@ function recurrenceForCommitment(
   if (commitment.timeMode === "fixed") {
     recurrence.startTime = commitment.startTime;
     recurrence.endTime = commitment.endTime;
+  } else {
+    recurrence.durationMode = commitment.durationMode;
   }
   return recurrence;
 }
@@ -274,6 +280,7 @@ export function plannerDraftToCommitment(
     startTime: draft.start ?? recurrence?.startTime ?? "",
     endTime: draft.end ?? recurrence?.endTime ?? "",
     durationMinutes: draft.estimateMinutes ?? 60,
+    durationMode: recurrence?.durationMode ?? "per_occurrence",
     allowedStartTime: draft.allowedWindows?.[0]?.start,
     allowedEndTime: draft.allowedWindows?.[0]?.end,
     priority: draft.priority ?? "normal",

@@ -412,6 +412,76 @@ test("a flexible recurring item stays on its weekday and inside its allowed wind
   assert.equal(blocks[0].occurrenceKey, "free-school:2026-08-21");
 });
 
+test("recurring duration can be one weekly total instead of repeating on every selected day", () => {
+  const selectedDays = [1, 3, 5];
+  const weeklyTotal = item({
+    id: "weekly-total",
+    kind: "routine",
+    title: "Практика",
+    energy: "normal",
+    estimateMinutes: 180,
+    canSplit: true,
+    minChunkMinutes: 60,
+    recurrence: { frequency: "custom", weekdays: selectedDays, durationMode: "per_cycle" },
+  });
+  const oneHourOnSelectedDays = {
+    ...profile,
+    reserveRatio: 0,
+    defaultBufferMinutes: 0,
+    availability: Object.fromEntries(Array.from({ length: 7 }, (_, index) => [
+      String(index + 1),
+      selectedDays.includes(index + 1) ? [{ start: "10:00", end: "11:00" }] : [],
+    ])),
+  };
+  const totalProposal = buildPlannerProposal({
+    profile: oneHourOnSelectedDays,
+    items: [weeklyTotal],
+    blocks: [],
+    now: new Date("2026-08-16T04:00:00.000Z"),
+  });
+  const totalBlocks = totalProposal.changes.flatMap((change) =>
+    change.kind === "add_block" && change.block.itemId === weeklyTotal.id ? [change.block] : []
+  );
+  assert.equal(totalBlocks.reduce((sum, block) => sum + (new Date(block.endAt).getTime() - new Date(block.startAt).getTime()) / 60_000, 0), 180);
+  assert.deepEqual(totalBlocks.map((block) => formatDateInTimeZone(new Date(block.startAt), profile.timezone)), [
+    "2026-08-17",
+    "2026-08-19",
+    "2026-08-21",
+  ]);
+  assert.ok(totalBlocks.every((block) => block.occurrenceKey === "weekly-total:cycle:2026-08-17"));
+  const repeatedProposal = buildPlannerProposal({
+    profile: oneHourOnSelectedDays,
+    items: [weeklyTotal],
+    blocks: totalBlocks,
+    now: new Date("2026-08-16T04:00:00.000Z"),
+  });
+  assert.ok(!repeatedProposal.changes.some((change) => change.kind === "add_block" && change.block.itemId === weeklyTotal.id));
+
+  const everyDay = item({
+    ...weeklyTotal,
+    id: "every-selected-day",
+    canSplit: false,
+    recurrence: { frequency: "custom", weekdays: selectedDays, durationMode: "per_occurrence" },
+  });
+  const threeHoursOnSelectedDays = {
+    ...oneHourOnSelectedDays,
+    availability: Object.fromEntries(Array.from({ length: 7 }, (_, index) => [
+      String(index + 1),
+      selectedDays.includes(index + 1) ? [{ start: "10:00", end: "13:00" }] : [],
+    ])),
+  };
+  const dailyProposal = buildPlannerProposal({
+    profile: threeHoursOnSelectedDays,
+    items: [everyDay],
+    blocks: [],
+    now: new Date("2026-08-16T04:00:00.000Z"),
+  });
+  const dailyMinutes = dailyProposal.changes.reduce((sum, change) => change.kind === "add_block" && change.block.itemId === everyDay.id
+    ? sum + (new Date(change.block.endAt).getTime() - new Date(change.block.startAt).getTime()) / 60_000
+    : sum, 0);
+  assert.equal(dailyMinutes, 540);
+});
+
 test("a one-time flexible item with a date cannot move to another day", () => {
   const dated = item({
     id: "dated-flexible",

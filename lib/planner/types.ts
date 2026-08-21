@@ -154,6 +154,8 @@ export type PlannerProfile = {
 export type PlannerRecurrence = {
   frequency: "once" | "daily" | "weekly" | "custom";
   weekdays?: number[];
+  /** Whether estimateMinutes applies to every selected day or once to the whole calendar-week cycle. */
+  durationMode?: "per_occurrence" | "per_cycle";
   startDate?: string;
   startTime?: string;
   endTime?: string;

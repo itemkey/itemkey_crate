@@ -77,6 +77,27 @@ test("flexible recurring commitment keeps its duration, hard window and return t
   assert.deepEqual(draft.allowedWindows, [{ start: "10:00", end: "18:00" }]);
   assert.equal(draft.bufferBeforeMinutes, 45);
   assert.equal(draft.bufferAfterMinutes, 35);
-  assert.deepEqual(draft.recurrence, { frequency: "weekly", weekdays: [5] });
+  assert.deepEqual(draft.recurrence, { frequency: "weekly", weekdays: [5], durationMode: "per_occurrence" });
   assert.match(draft.notes ?? "", /туда и обратно/);
+});
+
+test("recurring commitment can keep one total duration across selected weekdays", () => {
+  const draft = commitmentToPlannerDraft(normalizeStructuredCommitment({
+    id: "weekly-reading",
+    title: "Чтение",
+    occurrenceMode: "recurring",
+    weekdays: [1, 3, 5],
+    timeMode: "flexible",
+    startTime: "",
+    endTime: "",
+    durationMinutes: 180,
+    durationMode: "per_cycle",
+  }), "ru");
+
+  assert.equal(draft.estimateMinutes, 180);
+  assert.deepEqual(draft.recurrence, {
+    frequency: "custom",
+    weekdays: [1, 3, 5],
+    durationMode: "per_cycle",
+  });
 });

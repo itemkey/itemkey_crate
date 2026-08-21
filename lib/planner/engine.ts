@@ -63,6 +63,7 @@ type PlacementRequest = {
   occurrenceKey: string;
   durationMinutes: number;
   targetDate?: string;
+  allowedDates?: string[];
   sourceBlock?: PlannerBlock;
 };
 
@@ -211,7 +212,12 @@ export function normalizePlannerItem(value: Partial<PlannerItem> & { id: string;
     minChunkMinutes: clamp(Math.round(Number(value.minChunkMinutes ?? 25)), 5, 24 * 60),
     bufferBeforeMinutes: clamp(Math.round(Number(value.bufferBeforeMinutes ?? 0)), 0, 240),
     bufferAfterMinutes: clamp(Math.round(Number(value.bufferAfterMinutes ?? 0)), 0, 240),
-    recurrence: value.recurrence,
+    recurrence: value.recurrence
+      ? {
+          ...value.recurrence,
+          durationMode: value.recurrence.durationMode === "per_cycle" ? "per_cycle" : "per_occurrence",
+        }
+      : undefined,
     autoPlan: value.autoPlan !== false,
     status:
       value.status === "completed" || value.status === "archived" ? value.status : "active",
@@ -679,21 +685,60 @@ function getRoutineDates(item: PlannerItem, startDate: string, endDate: string):
   return dates;
 }
 
+function calendarWeekStart(date: string): string {
+  return addPlannerDays(date, 1 - plannerWeekday(date));
+}
+
+function blockLocalDate(block: PlannerBlock, timezone: string): string {
+  return formatDateInTimeZone(new Date(block.startAt), timezone);
+}
+
 function buildPlacementRequests(
   items: PlannerItem[],
   blocks: PlannerBlock[],
   startDate: string,
-  endDate: string
+  endDate: string,
+  timezone: string
 ): PlacementRequest[] {
   const requests: PlacementRequest[] = [];
   const activeBlocks = blocks.filter((block) => block.status !== "cancelled" && block.status !== "skipped");
+  const recurrenceBlocks = blocks.filter((block) => block.status !== "cancelled");
   for (const item of items) {
     if (item.status !== "active" || !item.autoPlan || item.kind === "fixed_event") continue;
     if (item.kind === "routine" || item.recurrence?.frequency === "once") {
-      for (const date of getRoutineDates(item, startDate, endDate)) {
+      const routineDates = getRoutineDates(item, startDate, endDate);
+      if (item.kind === "routine" && item.recurrence?.durationMode === "per_cycle") {
+        const datesByWeek = new Map<string, string[]>();
+        for (const date of routineDates) {
+          const weekStart = calendarWeekStart(date);
+          datesByWeek.set(weekStart, [...(datesByWeek.get(weekStart) ?? []), date]);
+        }
+        for (const [weekStart, allowedDates] of datesByWeek) {
+          const weekEnd = addPlannerDays(weekStart, 6);
+          const alreadyPlanned = recurrenceBlocks
+            .filter((block) => {
+              if (block.itemId !== item.id) return false;
+              const date = blockLocalDate(block, timezone);
+              return date >= weekStart && date <= weekEnd;
+            })
+            .reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0);
+          const remaining = Math.max(0, item.estimateMinutes - alreadyPlanned);
+          if (remaining > 0) requests.push({
+            item,
+            occurrenceKey: `${item.id}:cycle:${weekStart}`,
+            durationMinutes: remaining,
+            allowedDates,
+          });
+        }
+        continue;
+      }
+      for (const date of routineDates) {
         const key = `${item.id}:${date}`;
-        if (blocks.some((block) => block.itemId === item.id && block.occurrenceKey === key)) continue;
-        requests.push({ item, occurrenceKey: key, durationMinutes: item.estimateMinutes, targetDate: date });
+        const alreadyPlanned = recurrenceBlocks
+          .filter((block) => block.itemId === item.id && blockLocalDate(block, timezone) === date)
+          .reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0);
+        const remaining = Math.max(0, item.estimateMinutes - alreadyPlanned);
+        if (remaining > 0) requests.push({ item, occurrenceKey: key, durationMinutes: remaining, targetDate: date });
       }
       continue;
     }
@@ -760,6 +805,7 @@ function findPlacement(
   const horizonStartMs = new Date(zonedPlannerDateTimeToUtc(startDate, "00:00", profile.timezone)).getTime();
   for (let date = startDate; date <= endDate; date = addPlannerDays(date, 1)) {
     if (request.targetDate && date !== request.targetDate) continue;
+    if (request.allowedDates && !request.allowedDates.includes(date)) continue;
     const windows = availabilityForDate(profile, date);
     const totalAvailable = windows.reduce((sum, window) => sum + durationForLocalRange(window.start, window.end), 0);
     const fixedMinutes = occupied
@@ -1225,10 +1271,35 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
     });
   }
 
-  const requests = buildPlacementRequests(items, [...workingBlocks, ...movableBlocks.values()], startDate, endDate);
+  const requests = buildPlacementRequests(
+    items,
+    [...workingBlocks, ...movableBlocks.values()],
+    startDate,
+    endDate,
+    profile.timezone
+  );
   for (const block of movableBlocks.values()) {
     const item = items.find((candidate) => candidate.id === block.itemId);
-    if (item) requests.unshift({ item, occurrenceKey: block.occurrenceKey ?? item.id, durationMinutes: isoDurationMinutes(block.startAt, block.endAt), sourceBlock: block });
+    if (item) {
+      const sourceDate = blockLocalDate(block, profile.timezone);
+      const perCycle = item.kind === "routine" && item.recurrence?.durationMode === "per_cycle";
+      const weekStart = calendarWeekStart(sourceDate);
+      const constrainedStart = weekStart > startDate ? weekStart : startDate;
+      const weekEnd = addPlannerDays(weekStart, 6);
+      const constrainedEnd = weekEnd < endDate ? weekEnd : endDate;
+      requests.unshift({
+        item,
+        occurrenceKey: perCycle ? `${item.id}:cycle:${weekStart}` : block.occurrenceKey ?? item.id,
+        durationMinutes: isoDurationMinutes(block.startAt, block.endAt),
+        targetDate: !perCycle && (item.kind === "routine" || item.recurrence?.frequency === "once")
+          ? sourceDate
+          : undefined,
+        allowedDates: perCycle && constrainedStart <= constrainedEnd
+          ? getRoutineDates(item, constrainedStart, constrainedEnd)
+          : undefined,
+        sourceBlock: block,
+      });
+    }
   }
 
   const autoMinutesByDate = new Map<string, number>();
@@ -1253,7 +1324,12 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
       const duration = request.item.canSplit && remaining >= request.item.minChunkMinutes * 2
         ? Math.min(
             remaining - request.item.minChunkMinutes,
-            Math.max(minimum, Math.ceil(remaining / 2 / STEP_MINUTES) * STEP_MINUTES)
+            Math.max(
+              minimum,
+              Math.ceil(
+                remaining / (request.allowedDates?.length ?? 2) / STEP_MINUTES
+              ) * STEP_MINUTES
+            )
           )
         : remaining;
       const placement = findPlacement(

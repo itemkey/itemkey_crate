@@ -127,6 +127,7 @@ type ItemForm = {
   bufferAfterMinutes: string;
   recurrenceFrequency: "daily" | "weekly" | "custom";
   recurrenceWeekdays: number[];
+  recurrenceDurationMode: "per_occurrence" | "per_cycle";
 };
 
 const text = {
@@ -279,6 +280,7 @@ function defaultItemForm(date: string): ItemForm {
     avoidedStart: "", avoidedEnd: "", location: "", area: "", notes: "",
     bufferBeforeMinutes: "0", bufferAfterMinutes: "0", recurrenceFrequency: "daily",
     recurrenceWeekdays: [plannerWeekday(date)],
+    recurrenceDurationMode: "per_occurrence",
   };
 }
 
@@ -324,6 +326,7 @@ function formFromDraft(draft: PlannerDraft, date: string, timezone: string): Ite
     bufferAfterMinutes: String(draft.bufferAfterMinutes ?? 0),
     recurrenceFrequency: draft.recurrence?.frequency === "once" ? "daily" : draft.recurrence?.frequency ?? "daily",
     recurrenceWeekdays: draft.recurrence?.weekdays ?? form.recurrenceWeekdays,
+    recurrenceDurationMode: draft.recurrence?.durationMode ?? "per_occurrence",
   };
 }
 
@@ -331,6 +334,7 @@ function asDraft(form: ItemForm, profile: PlannerProfile, locale: Locale): Plann
   const recurrence: PlannerRecurrence | undefined = form.kind === "routine"
     ? {
         frequency: form.recurrenceFrequency,
+        durationMode: form.recurrenceDurationMode,
         weekdays: form.recurrenceFrequency === "custom"
           ? form.recurrenceWeekdays
           : form.recurrenceFrequency === "weekly" ? [plannerWeekday(form.date)] : undefined,
@@ -1072,13 +1076,17 @@ function ItemModal({ value, setValue, items, profile, now, onSubmit, onClose, bu
       <div className={styles.formGrid}>
         <label className={styles.wide}>{locale === "ru" ? "Название" : "Title"}<input autoFocus required value={value.title} onChange={(e) => update("title", e.target.value)} /></label>
         <label>{locale === "ru" ? "Вид" : "Type"}<select value={value.kind} onChange={(e) => update("kind", e.target.value as PlannerItemKind)}>{Object.entries(kindLabel[locale]).map(([kind, label]) => <option key={kind} value={kind}>{label}</option>)}</select></label>
-        <DurationInput label={locale === "ru" ? "Длительность" : "Duration"} valueMinutes={value.estimateMinutes} minMinutes={5} maxMinutes={1440} locale={locale} onChangeMinutes={(minutes) => update("estimateMinutes", String(minutes))} />
+        <DurationInput label={value.kind === "routine"
+          ? value.recurrenceDurationMode === "per_cycle"
+            ? (locale === "ru" ? "Общий объём за неделю" : "Weekly total")
+            : (locale === "ru" ? "Длительность в каждый день" : "Duration on each day")
+          : (locale === "ru" ? "Длительность" : "Duration")} valueMinutes={value.estimateMinutes} minMinutes={5} maxMinutes={1440} locale={locale} onChangeMinutes={(minutes) => update("estimateMinutes", String(minutes))} />
         {value.kind === "fixed_event" && <><label>{locale === "ru" ? "Дата" : "Date"}<input type="date" required value={value.date} onChange={(e) => update("date", e.target.value)} /></label><label>{locale === "ru" ? "Начало" : "Start"}<input type="time" required value={value.start} onChange={(e) => update("start", e.target.value)} /></label><label>{locale === "ru" ? "Конец" : "End"}<input type="time" value={value.end} onChange={(e) => update("end", e.target.value)} /></label></>}
         {value.kind !== "fixed_event" && <>
           <label>{locale === "ru" ? "Вид срока" : "Deadline type"}<select value={value.deadlineType} onChange={(e) => update("deadlineType", e.target.value as PlannerDeadlineType)}><option value="none">{locale === "ru" ? "Без срока" : "No deadline"}</option><option value="target">{locale === "ru" ? "Целевой" : "Target"}</option><option value="hard">{locale === "ru" ? "Жёсткий" : "Hard"}</option></select></label>
           {value.deadlineType !== "none" && <><label>{locale === "ru" ? "Дата срока" : "Deadline date"}<input type="date" required value={value.deadline} onChange={(e) => update("deadline", e.target.value)} /></label><label>{locale === "ru" ? "Точное время" : "Exact time"}<input type="time" required value={value.deadlineTime} onChange={(e) => update("deadlineTime", e.target.value)} /></label></>}
         </>}
-        {value.kind === "routine" && <label>{locale === "ru" ? "Повтор" : "Repeat"}<select value={value.recurrenceFrequency} onChange={(e) => update("recurrenceFrequency", e.target.value as ItemForm["recurrenceFrequency"])}><option value="daily">{locale === "ru" ? "Каждый день" : "Daily"}</option><option value="weekly">{locale === "ru" ? "Раз в неделю" : "Weekly"}</option><option value="custom">{locale === "ru" ? "По дням" : "Weekdays"}</option></select></label>}
+        {value.kind === "routine" && <><label>{locale === "ru" ? "Повтор" : "Repeat"}<select value={value.recurrenceFrequency} onChange={(e) => update("recurrenceFrequency", e.target.value as ItemForm["recurrenceFrequency"])}><option value="daily">{locale === "ru" ? "Каждый день" : "Daily"}</option><option value="weekly">{locale === "ru" ? "Раз в неделю" : "Weekly"}</option><option value="custom">{locale === "ru" ? "По дням" : "Weekdays"}</option></select></label><label>{locale === "ru" ? "Длительность означает" : "Duration means"}<select value={value.recurrenceDurationMode} onChange={(e) => { const mode = e.target.value as ItemForm["recurrenceDurationMode"]; setValue((current) => ({ ...current, recurrenceDurationMode: mode, canSplit: mode === "per_cycle" ? true : current.canSplit })); }}><option value="per_occurrence">{locale === "ru" ? "Столько в каждый выбранный день" : "This much on every selected day"}</option><option value="per_cycle">{locale === "ru" ? "Столько всего за выбранные дни недели" : "This much across the selected week"}</option></select><small>{value.recurrenceDurationMode === "per_cycle" ? (locale === "ru" ? "Планировщик распределит общий объём только между выбранными днями." : "The planner distributes the total only across selected days.") : (locale === "ru" ? "Указанная длительность повторится в каждый выбранный день." : "The duration repeats on every selected day.")}</small></label></>}
       </div>
       {deadlinePreview && <p className={styles.deadlinePreview}><strong>{deadlinePreview}</strong><span>{locale === "ru" ? "Предварительная оценка по оставшемуся времени. Точный риск с доступными окнами, сном и обязательствами появится в предпросмотре." : "A preliminary wall-clock estimate. The preview calculates exact risk using availability, sleep and commitments."}</span></p>}
       {value.kind === "routine" && value.recurrenceFrequency === "custom" && <div className={styles.weekdays}>{[1,2,3,4,5,6,7].map((day) => <button type="button" key={day} className={value.recurrenceWeekdays.includes(day) ? styles.weekdayActive : ""} onClick={() => update("recurrenceWeekdays", value.recurrenceWeekdays.includes(day) ? value.recurrenceWeekdays.filter((candidate) => candidate !== day) : [...value.recurrenceWeekdays, day])}>{locale === "ru" ? ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"][day-1] : ["M","T","W","T","F","S","S"][day-1]}</button>)}</div>}

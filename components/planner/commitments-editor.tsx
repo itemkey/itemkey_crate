@@ -52,6 +52,7 @@ function blankCommitment(title: string): PlannerStructuredCommitment {
     startTime: "",
     endTime: "",
     durationMinutes: 60,
+    durationMode: "per_occurrence",
     priority: "normal",
     deadlineType: "none",
     canSplit: false,
@@ -128,6 +129,11 @@ export default function CommitmentsEditor({
     start: "Начало",
     end: "Конец",
     activityDuration: "Длительность дела",
+    durationMeaning: "Что означает эта длительность?",
+    perOccurrence: "Столько в каждый выбранный день",
+    perOccurrenceHint: "Например, 1 час в понедельник, среду и пятницу — по 1 часу в каждый день.",
+    perCycle: "Столько всего на выбранные дни",
+    perCycleHint: "Например, 3 часа за неделю — сайт распределит их только между выбранными днями.",
     allowedFrom: "Можно начать не раньше",
     allowedTo: "Дело должно закончиться до",
     allowedHint: "Оба поля необязательны. Интервал ограничивает само дело, но не дорогу.",
@@ -205,6 +211,11 @@ export default function CommitmentsEditor({
     start: "Starts",
     end: "Ends",
     activityDuration: "Item duration",
+    durationMeaning: "What does this duration mean?",
+    perOccurrence: "This much on every selected day",
+    perOccurrenceHint: "For example, 1 hour on Monday, Wednesday and Friday means 1 hour on each day.",
+    perCycle: "This much across all selected days",
+    perCycleHint: "For example, 3 hours per week will be distributed only across the selected days.",
     allowedFrom: "May start no earlier than",
     allowedTo: "Must finish by",
     allowedHint: "Both fields are optional. The window limits the item itself, not travel.",
@@ -501,7 +512,14 @@ export default function CommitmentsEditor({
         <div className={styles.routeToggle}><button type="button" className={editor.timeMode === "fixed" ? styles.segmentedActive : ""} aria-pressed={editor.timeMode === "fixed"} onClick={() => patchEditor({ timeMode: "fixed", canSplit: false })}>{copy.fixed}<small>{copy.fixedHint}</small></button><button type="button" className={editor.timeMode === "flexible" ? styles.segmentedActive : ""} aria-pressed={editor.timeMode === "flexible"} onClick={() => patchEditor({ timeMode: "flexible" })}>{copy.flexible}<small>{copy.flexibleHint}</small></button></div>
         {editor.timeMode === "fixed"
           ? <div className={styles.formGrid}><label>{copy.start}<input type="time" value={editor.startTime} onChange={(event) => patchEditor({ startTime: event.target.value })} /></label><label>{copy.end}<input type="time" value={editor.endTime} onChange={(event) => patchEditor({ endTime: event.target.value })} /></label></div>
-          : <><DurationInput label={copy.activityDuration} valueMinutes={editor.durationMinutes} minMinutes={5} maxMinutes={1440} locale={locale} onChangeMinutes={(durationMinutes) => patchEditor({ durationMinutes })} /><div className={styles.formGrid}><label>{copy.allowedFrom}<input type="time" value={editor.allowedStartTime ?? ""} onChange={(event) => patchEditor({ allowedStartTime: event.target.value || undefined })} /></label><label>{copy.allowedTo}<input type="time" value={editor.allowedEndTime ?? ""} onChange={(event) => patchEditor({ allowedEndTime: event.target.value || undefined })} /></label></div><small>{copy.allowedHint}</small></>}
+          : <>
+            <DurationInput label={copy.activityDuration} valueMinutes={editor.durationMinutes} minMinutes={5} maxMinutes={1440} locale={locale} onChangeMinutes={(durationMinutes) => patchEditor({ durationMinutes })} />
+            {editor.occurrenceMode === "recurring" && <div><span className={styles.fieldTitle}>{copy.durationMeaning}</span><div className={styles.routeToggle}>
+              <button type="button" className={editor.durationMode === "per_occurrence" ? styles.segmentedActive : ""} aria-pressed={editor.durationMode === "per_occurrence"} onClick={() => patchEditor({ durationMode: "per_occurrence" })}>{copy.perOccurrence}<small>{copy.perOccurrenceHint}</small></button>
+              <button type="button" className={editor.durationMode === "per_cycle" ? styles.segmentedActive : ""} aria-pressed={editor.durationMode === "per_cycle"} onClick={() => patchEditor({ durationMode: "per_cycle", canSplit: true })}>{copy.perCycle}<small>{copy.perCycleHint}</small></button>
+            </div></div>}
+            <div className={styles.formGrid}><label>{copy.allowedFrom}<input type="time" value={editor.allowedStartTime ?? ""} onChange={(event) => patchEditor({ allowedStartTime: event.target.value || undefined })} /></label><label>{copy.allowedTo}<input type="time" value={editor.allowedEndTime ?? ""} onChange={(event) => patchEditor({ allowedEndTime: event.target.value || undefined })} /></label></div><small>{copy.allowedHint}</small>
+          </>}
       </fieldset>
 
       <fieldset className={styles.commitmentFieldset}>
@@ -547,7 +565,11 @@ export default function CommitmentsEditor({
           : commitment.date || copy.anyDay;
         const timing = commitment.timeMode === "fixed"
           ? `${commitment.startTime}–${commitment.endTime}`
-          : `${plannerDurationLabel(commitment.durationMinutes, locale)} · ${commitment.allowedStartTime && commitment.allowedEndTime ? `${commitment.allowedStartTime}–${commitment.allowedEndTime}` : copy.autoTime}`;
+          : `${plannerDurationLabel(commitment.durationMinutes, locale)}${commitment.occurrenceMode === "recurring"
+              ? commitment.durationMode === "per_cycle"
+                ? (ru ? " всего на выбранные дни за неделю" : " total across the selected days per week")
+                : (ru ? " в каждый выбранный день" : " on every selected day")
+              : ""} · ${commitment.allowedStartTime && commitment.allowedEndTime ? `${commitment.allowedStartTime}–${commitment.allowedEndTime}` : copy.autoTime}`;
         return <article className={styles.commitmentCard} key={commitment.id}>
           <div className={styles.commitmentCardMain}><span>{plannerCommitmentCategoryLabel(commitment.category, locale)}</span><strong>{commitment.title}</strong><p>{occurrence} · {timing}</p>{commitment.travel.enabled ? <small>{copy.route}: {commitment.travel.originLabel || commitment.travel.originAddress} → {commitment.travel.destinationLabel || commitment.travel.destinationAddress} · {plannerTravelModeLabel(commitment.travel.mode, locale)} · {plannerDurationLabel(commitment.travel.durationMinutes, locale)} {ru ? "в одну сторону" : "one way"} · {commitment.travel.direction === "round_trip" ? copy.roundTrip : copy.oneWay}</small> : <small>{copy.noRoute}</small>}</div>
           <div className={styles.commitmentCardActions}><button type="button" onClick={() => startEditing(commitment)}>{copy.edit}</button><button type="button" className={styles.commitmentRemove} onClick={() => onChange(commitments.filter((candidate) => candidate.id !== commitment.id))}>{copy.remove}</button></div>
