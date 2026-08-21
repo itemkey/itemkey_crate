@@ -328,6 +328,8 @@
 .dangerButton { border-color:#651d1d !important;background:#c95c5c !important;color:#251010 !important; }
 .sleepHint { border-left:4px solid #55556b;background:#c1c1cf;padding:.45rem;font-size:.68rem; }
 .fieldTitle { margin:0 0 .3rem;color:#282828;font-size:.68rem;font-weight:800;text-transform:uppercase; }
+.durationField { display:grid;gap:.22rem;min-width:0; }
+.durationParts { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.5rem; }
 .ratingField { display:grid;gap:.35rem;margin:0;border:1px solid #747474;padding:.55rem; }
 .ratingField legend { padding:0 .25rem;font-size:.68rem;font-weight:850;text-transform:uppercase; }
 

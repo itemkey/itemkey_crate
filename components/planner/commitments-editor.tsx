@@ -7,6 +7,7 @@ import {
   normalizeStructuredCommitment,
   plannerCommitmentCategoryLabel,
   plannerCommitmentDuration,
+  plannerDurationLabel,
   plannerTravelModeLabel,
   type PlannerCommitmentCategory,
   type PlannerSavedPlace,
@@ -17,6 +18,7 @@ import {
 } from "@/lib/planner/commitments";
 import type { PlannerDeadlineType, PlannerPriority } from "@/lib/planner/types";
 import { createRuntimeId } from "@/lib/runtime-id";
+import DurationInput from "./duration-input";
 import styles from "./planner-workspace.module.css";
 
 const PLACES_STORAGE_KEY = "itemkey.planner.saved-places.v1";
@@ -27,24 +29,6 @@ const WEEKDAYS = [1, 2, 3, 4, 5, 6, 7];
 
 type OriginMode = "home" | "saved" | "temporary";
 type DestinationMode = "home" | "saved" | "temporary";
-
-function formatCommitmentDuration(totalMinutes: number, locale: Locale): string {
-  const minutes = Math.max(0, Math.round(totalMinutes));
-  const hours = Math.floor(minutes / 60);
-  const remainder = minutes % 60;
-  if (!hours) return `${remainder} ${locale === "ru" ? "мин" : "min"}`;
-  return `${hours} ${locale === "ru" ? "ч" : "h"}${remainder ? ` ${remainder} ${locale === "ru" ? "мин" : "min"}` : ""}`;
-}
-
-function durationInputParts(totalMinutes: number): { hours: string; minutes: string } {
-  const total = Math.max(0, Math.round(totalMinutes));
-  const hours = Math.floor(total / 60);
-  const minutes = total % 60;
-  return {
-    hours: hours ? String(hours) : "",
-    minutes: minutes ? String(minutes) : "",
-  };
-}
 
 function validPlaces(value: unknown): PlannerSavedPlace[] {
   if (!Array.isArray(value)) return [];
@@ -98,8 +82,6 @@ export default function CommitmentsEditor({
   const ru = locale === "ru";
   const [quickTitle, setQuickTitle] = useState("");
   const [editor, setEditorState] = useState<PlannerStructuredCommitment | null>(null);
-  const [durationHoursInput, setDurationHoursInput] = useState("1");
-  const [durationMinutesInput, setDurationMinutesInput] = useState("");
   const [places, setPlaces] = useState<PlannerSavedPlace[]>(() => {
     if (typeof window === "undefined") return [];
     try {
@@ -146,8 +128,6 @@ export default function CommitmentsEditor({
     start: "Начало",
     end: "Конец",
     activityDuration: "Длительность дела",
-    durationHours: "Часы",
-    durationRemainder: "Минуты",
     allowedFrom: "Можно начать не раньше",
     allowedTo: "Дело должно закончиться до",
     allowedHint: "Оба поля необязательны. Интервал ограничивает само дело, но не дорогу.",
@@ -160,7 +140,7 @@ export default function CommitmentsEditor({
     deadlineDate: "Дата срока",
     deadlineTime: "Время срока",
     canSplit: "Можно разделить дело на части",
-    minChunk: "Минимальная часть, минут",
+    minChunk: "Минимальная часть",
     road: "5. Нужно ли добираться",
     noRoad: "Нет, дорога не нужна",
     hasRoad: "Да, учесть дорогу",
@@ -186,8 +166,8 @@ export default function CommitmentsEditor({
     direction: "Нужна ли дорога назад",
     oneWay: "Только туда",
     roundTrip: "Туда и обратно",
-    duration: "Время одного пути, минут",
-    reserve: "Запас перед выходом, минут",
+    duration: "Время одного пути",
+    reserve: "Запас перед выходом",
     routeHint: "Сайт зарезервирует дорогу до дела. Для варианта «туда и обратно» такое же время будет оставлено после него.",
     navigatorPrivacy: "Для расчёта адреса передаются сервисам OpenStreetMap. Можно указать время вручную.",
     notes: "Дополнительные детали (необязательно)",
@@ -225,8 +205,6 @@ export default function CommitmentsEditor({
     start: "Starts",
     end: "Ends",
     activityDuration: "Item duration",
-    durationHours: "Hours",
-    durationRemainder: "Minutes",
     allowedFrom: "May start no earlier than",
     allowedTo: "Must finish by",
     allowedHint: "Both fields are optional. The window limits the item itself, not travel.",
@@ -239,7 +217,7 @@ export default function CommitmentsEditor({
     deadlineDate: "Deadline date",
     deadlineTime: "Deadline time",
     canSplit: "This item can be split",
-    minChunk: "Minimum part, minutes",
+    minChunk: "Minimum part",
     road: "5. Travel",
     noRoad: "No travel needed",
     hasRoad: "Yes, include travel",
@@ -265,8 +243,8 @@ export default function CommitmentsEditor({
     direction: "Is a return trip needed",
     oneWay: "Outbound only",
     roundTrip: "Round trip",
-    duration: "One-way travel, minutes",
-    reserve: "Outbound buffer, minutes",
+    duration: "One-way travel time",
+    reserve: "Outbound buffer",
     routeHint: "Travel before the item is protected. Round trips reserve the same travel time after it.",
     navigatorPrivacy: "Route calculation sends addresses to OpenStreetMap services. You can enter travel time manually.",
     notes: "Extra details (optional)",
@@ -325,8 +303,6 @@ export default function CommitmentsEditor({
     setSelectedDestinationPlaceId("");
     setDestinationLabel("");
     setRememberDestination(false);
-    setDurationHoursInput("1");
-    setDurationMinutesInput("");
     setEditor(blankCommitment(quickTitle));
   }
 
@@ -335,7 +311,6 @@ export default function CommitmentsEditor({
     const originPlace = places.find((place) => place.id === commitment.travel.originPlaceId);
     const destinationPlace = places.find((place) => place.id === commitment.travel.destinationPlaceId)
       ?? places.find((place) => place.address === commitment.travel.destinationAddress);
-    const durationParts = durationInputParts(commitment.durationMinutes);
     setOriginMode(originPlace?.kind === "home" ? "home" : originPlace ? "saved" : "temporary");
     setSelectedPlaceId(originPlace?.id ?? "");
     setOriginAddress(commitment.travel.originAddress ?? originPlace?.address ?? "");
@@ -345,8 +320,6 @@ export default function CommitmentsEditor({
     setSelectedDestinationPlaceId(destinationPlace?.id ?? "");
     setDestinationLabel(commitment.travel.destinationLabel ?? destinationPlace?.label ?? "");
     setRememberDestination(false);
-    setDurationHoursInput(durationParts.hours);
-    setDurationMinutesInput(durationParts.minutes);
     setFormError("");
     setEstimateError("");
     setEditor(structuredClone(commitment));
@@ -418,11 +391,7 @@ export default function CommitmentsEditor({
         return setFormError(ru ? "Укажите время начала и окончания." : "Enter both start and end times.");
       }
     } else {
-      const durationHours = Number(durationHoursInput || 0);
-      const durationRemainder = Number(durationMinutesInput || 0);
-      if (!Number.isFinite(durationHours) || durationHours < 0 || durationHours > 24
-        || !Number.isFinite(durationRemainder) || durationRemainder < 0 || durationRemainder >= 60
-        || !Number.isFinite(editor.durationMinutes) || editor.durationMinutes < 5 || editor.durationMinutes > 1440) {
+      if (!Number.isFinite(editor.durationMinutes) || editor.durationMinutes < 5 || editor.durationMinutes > 1440) {
         return setFormError(ru ? "Укажите длительность от 5 минут до 24 часов." : "Enter a duration from 5 minutes to 24 hours.");
       }
       if (Boolean(editor.allowedStartTime) !== Boolean(editor.allowedEndTime)) {
@@ -449,8 +418,11 @@ export default function CommitmentsEditor({
       if (!address || !destinationAddress) {
         return setFormError(ru ? "Для дороги нужны адрес отправления и адрес назначения." : "Travel requires origin and destination addresses.");
       }
-      if (!Number.isFinite(editor.travel.durationMinutes) || editor.travel.durationMinutes < 1) {
+      if (!Number.isFinite(editor.travel.durationMinutes) || editor.travel.durationMinutes < 1 || editor.travel.durationMinutes > 240) {
         return setFormError(ru ? "Укажите время одного пути или рассчитайте его." : "Enter or calculate one-way travel time.");
+      }
+      if (!Number.isFinite(editor.travel.bufferMinutes) || editor.travel.bufferMinutes < 0 || editor.travel.bufferMinutes > 120) {
+        return setFormError(ru ? "Запас перед выходом должен быть от 0 минут до 2 часов." : "The outbound buffer must be between 0 minutes and 2 hours.");
       }
       if (originMode === "home" && !home) {
         originPlace = { id: createRuntimeId(), label: ru ? "Дом" : "Home", address, kind: "home" };
@@ -529,14 +501,14 @@ export default function CommitmentsEditor({
         <div className={styles.routeToggle}><button type="button" className={editor.timeMode === "fixed" ? styles.segmentedActive : ""} aria-pressed={editor.timeMode === "fixed"} onClick={() => patchEditor({ timeMode: "fixed", canSplit: false })}>{copy.fixed}<small>{copy.fixedHint}</small></button><button type="button" className={editor.timeMode === "flexible" ? styles.segmentedActive : ""} aria-pressed={editor.timeMode === "flexible"} onClick={() => patchEditor({ timeMode: "flexible" })}>{copy.flexible}<small>{copy.flexibleHint}</small></button></div>
         {editor.timeMode === "fixed"
           ? <div className={styles.formGrid}><label>{copy.start}<input type="time" value={editor.startTime} onChange={(event) => patchEditor({ startTime: event.target.value })} /></label><label>{copy.end}<input type="time" value={editor.endTime} onChange={(event) => patchEditor({ endTime: event.target.value })} /></label></div>
-          : <><div><span className={styles.fieldTitle}>{copy.activityDuration}</span><div className={styles.formGrid}><label>{copy.durationHours}<input type="number" inputMode="decimal" min="0" max="24" step="1" placeholder="0" value={durationHoursInput} onFocus={(event) => event.currentTarget.select()} onChange={(event) => { const next = event.target.value; setDurationHoursInput(next); patchEditor({ durationMinutes: Math.max(0, Number(next || 0) * 60 + Number(durationMinutesInput || 0)) }); }} /></label><label>{copy.durationRemainder}<input type="number" inputMode="numeric" min="0" max="59" step="5" placeholder="0" value={durationMinutesInput} onFocus={(event) => event.currentTarget.select()} onChange={(event) => { const next = event.target.value; setDurationMinutesInput(next); patchEditor({ durationMinutes: Math.max(0, Number(durationHoursInput || 0) * 60 + Number(next || 0)) }); }} /></label></div></div><div className={styles.formGrid}><label>{copy.allowedFrom}<input type="time" value={editor.allowedStartTime ?? ""} onChange={(event) => patchEditor({ allowedStartTime: event.target.value || undefined })} /></label><label>{copy.allowedTo}<input type="time" value={editor.allowedEndTime ?? ""} onChange={(event) => patchEditor({ allowedEndTime: event.target.value || undefined })} /></label></div><small>{copy.allowedHint}</small></>}
+          : <><DurationInput label={copy.activityDuration} valueMinutes={editor.durationMinutes} minMinutes={5} maxMinutes={1440} locale={locale} onChangeMinutes={(durationMinutes) => patchEditor({ durationMinutes })} /><div className={styles.formGrid}><label>{copy.allowedFrom}<input type="time" value={editor.allowedStartTime ?? ""} onChange={(event) => patchEditor({ allowedStartTime: event.target.value || undefined })} /></label><label>{copy.allowedTo}<input type="time" value={editor.allowedEndTime ?? ""} onChange={(event) => patchEditor({ allowedEndTime: event.target.value || undefined })} /></label></div><small>{copy.allowedHint}</small></>}
       </fieldset>
 
       <fieldset className={styles.commitmentFieldset}>
         <legend>{copy.planning}</legend>
         <div className={styles.formGrid}><label>{copy.priority}<select value={editor.priority} onChange={(event) => patchEditor({ priority: event.target.value as PlannerPriority })}>{PRIORITIES.map((priority) => <option key={priority} value={priority}>{priorityLabels[priority]}</option>)}</select></label>{editor.timeMode === "flexible" && <label>{copy.deadlineType}<select value={editor.deadlineType} onChange={(event) => patchEditor({ deadlineType: event.target.value as PlannerDeadlineType })}><option value="none">{copy.noDeadline}</option><option value="target">{copy.targetDeadline}</option><option value="hard">{copy.hardDeadline}</option></select></label>}</div>
         {editor.timeMode === "flexible" && editor.deadlineType !== "none" && <div className={styles.formGrid}><label>{copy.deadlineDate}<input type="date" value={editor.deadlineDate ?? ""} onChange={(event) => patchEditor({ deadlineDate: event.target.value || undefined })} /></label><label>{copy.deadlineTime}<input type="time" value={editor.deadlineTime ?? "23:59"} onChange={(event) => patchEditor({ deadlineTime: event.target.value })} /></label></div>}
-        {editor.timeMode === "flexible" && <><label className={styles.choiceCheck}><input type="checkbox" checked={editor.canSplit} onChange={(event) => patchEditor({ canSplit: event.target.checked })} />{copy.canSplit}</label>{editor.canSplit && <label>{copy.minChunk}<input type="number" min="5" max={editor.durationMinutes} step="5" value={editor.minChunkMinutes} onChange={(event) => patchEditor({ minChunkMinutes: Number(event.target.value) })} /></label>}</>}
+        {editor.timeMode === "flexible" && <><label className={styles.choiceCheck}><input type="checkbox" checked={editor.canSplit} onChange={(event) => patchEditor({ canSplit: event.target.checked })} />{copy.canSplit}</label>{editor.canSplit && <DurationInput label={copy.minChunk} valueMinutes={editor.minChunkMinutes} minMinutes={5} maxMinutes={editor.durationMinutes} locale={locale} onChangeMinutes={(minChunkMinutes) => patchEditor({ minChunkMinutes })} />}</>}
       </fieldset>
 
       <fieldset className={styles.commitmentFieldset}>
@@ -555,9 +527,9 @@ export default function CommitmentsEditor({
           <button type="button" className={styles.routeEstimateButton} disabled={estimating} onClick={() => void estimateRoute()}>{estimating ? copy.calculating : copy.calculate}</button>
           <small className={styles.routePrivacy}>{copy.navigatorPrivacy}</small>
           {estimateError && <p className={styles.routeError}>{estimateError} {ru ? "Можно указать время вручную ниже." : "You can enter the time manually below."}</p>}
-          {editor.travel.distanceKm !== undefined && <div className={styles.routeEstimate}><strong>≈ {editor.travel.durationMinutes} {ru ? "мин" : "min"}</strong><span>{editor.travel.distanceKm.toLocaleString(locale, { maximumFractionDigits: 1 })} {ru ? "км" : "km"} · {editor.travel.estimatedByNavigator ? copy.savedNavigator : copy.manualRoute}</span></div>}
+          {editor.travel.distanceKm !== undefined && <div className={styles.routeEstimate}><strong>≈ {plannerDurationLabel(editor.travel.durationMinutes, locale)}</strong><span>{editor.travel.distanceKm.toLocaleString(locale, { maximumFractionDigits: 1 })} {ru ? "км" : "km"} · {editor.travel.estimatedByNavigator ? copy.savedNavigator : copy.manualRoute}</span></div>}
           <div><span className={styles.fieldTitle}>{copy.direction}</span><div className={styles.routeToggle}><button type="button" className={editor.travel.direction === "one_way" ? styles.segmentedActive : ""} aria-pressed={editor.travel.direction === "one_way"} onClick={() => patchTravel({ direction: "one_way" })}>{copy.oneWay}</button><button type="button" className={editor.travel.direction === "round_trip" ? styles.segmentedActive : ""} aria-pressed={editor.travel.direction === "round_trip"} onClick={() => patchTravel({ direction: "round_trip" })}>{copy.roundTrip}</button></div></div>
-          <div className={styles.formGrid}><label>{copy.duration}<input type="number" min="1" max="240" step="5" value={editor.travel.durationMinutes} onChange={(event) => patchTravel({ durationMinutes: Number(event.target.value), estimatedByNavigator: false })} /></label><label>{copy.reserve}<input type="number" min="0" max="120" step="5" value={editor.travel.bufferMinutes} onChange={(event) => patchTravel({ bufferMinutes: Number(event.target.value) })} /></label></div>
+          <div className={styles.formGrid}><DurationInput label={copy.duration} valueMinutes={editor.travel.durationMinutes} minMinutes={1} maxMinutes={240} locale={locale} onChangeMinutes={(durationMinutes) => patchTravel({ durationMinutes, estimatedByNavigator: false })} /><DurationInput label={copy.reserve} valueMinutes={editor.travel.bufferMinutes} maxMinutes={120} locale={locale} onChangeMinutes={(bufferMinutes) => patchTravel({ bufferMinutes })} /></div>
           <small className={styles.routeHint}>{copy.routeHint}</small>
         </div>}
       </fieldset>
@@ -575,9 +547,9 @@ export default function CommitmentsEditor({
           : commitment.date || copy.anyDay;
         const timing = commitment.timeMode === "fixed"
           ? `${commitment.startTime}–${commitment.endTime}`
-          : `${formatCommitmentDuration(commitment.durationMinutes, locale)} · ${commitment.allowedStartTime && commitment.allowedEndTime ? `${commitment.allowedStartTime}–${commitment.allowedEndTime}` : copy.autoTime}`;
+          : `${plannerDurationLabel(commitment.durationMinutes, locale)} · ${commitment.allowedStartTime && commitment.allowedEndTime ? `${commitment.allowedStartTime}–${commitment.allowedEndTime}` : copy.autoTime}`;
         return <article className={styles.commitmentCard} key={commitment.id}>
-          <div className={styles.commitmentCardMain}><span>{plannerCommitmentCategoryLabel(commitment.category, locale)}</span><strong>{commitment.title}</strong><p>{occurrence} · {timing}</p>{commitment.travel.enabled ? <small>{copy.route}: {commitment.travel.originLabel || commitment.travel.originAddress} → {commitment.travel.destinationLabel || commitment.travel.destinationAddress} · {plannerTravelModeLabel(commitment.travel.mode, locale)} · {commitment.travel.durationMinutes} {ru ? "мин в одну сторону" : "min one way"} · {commitment.travel.direction === "round_trip" ? copy.roundTrip : copy.oneWay}</small> : <small>{copy.noRoute}</small>}</div>
+          <div className={styles.commitmentCardMain}><span>{plannerCommitmentCategoryLabel(commitment.category, locale)}</span><strong>{commitment.title}</strong><p>{occurrence} · {timing}</p>{commitment.travel.enabled ? <small>{copy.route}: {commitment.travel.originLabel || commitment.travel.originAddress} → {commitment.travel.destinationLabel || commitment.travel.destinationAddress} · {plannerTravelModeLabel(commitment.travel.mode, locale)} · {plannerDurationLabel(commitment.travel.durationMinutes, locale)} {ru ? "в одну сторону" : "one way"} · {commitment.travel.direction === "round_trip" ? copy.roundTrip : copy.oneWay}</small> : <small>{copy.noRoute}</small>}</div>
           <div className={styles.commitmentCardActions}><button type="button" onClick={() => startEditing(commitment)}>{copy.edit}</button><button type="button" className={styles.commitmentRemove} onClick={() => onChange(commitments.filter((candidate) => candidate.id !== commitment.id))}>{copy.remove}</button></div>
         </article>;
       })}</div>
