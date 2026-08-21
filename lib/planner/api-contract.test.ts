@@ -73,10 +73,12 @@ test("proposal application and undo are transactional and account-scoped", () =>
   assert.match(store, /Number\(change\.to_revision\) !== current\.revision/);
 });
 
-test("proposal endpoint accepts replanning and missed-occurrence workflows", () => {
+test("proposal endpoint accepts replanning, missed-occurrence and remainder-transfer workflows", () => {
   assert.match(proposalsRoute, /body\.trigger !== "plans_changed"/);
   assert.match(proposalsRoute, /const missedOccurrence = body\.missedOccurrence/);
   assert.match(proposalsRoute, /missedOccurrence,/);
+  assert.match(proposalsRoute, /const remainderTransfer = body\.remainderTransfer/);
+  assert.match(proposalsRoute, /remainderTransfer,/);
   assert.doesNotMatch(proposalsRoute, /Опишите новое дело или запустите автоплан/);
 });
 
@@ -103,6 +105,8 @@ test("planner upgrade is idempotent and fresh installs include protected sleep",
   assert.match(plannerUpgrade, /add column if not exists soft/);
   assert.match(plannerUpgrade, /add column if not exists planned_duration_minutes/);
   assert.match(plannerUpgrade, /add column if not exists sleepiness_level/);
+  assert.match(plannerUpgrade, /create table if not exists public\.planner_deferred_remainders/);
+  assert.match(plannerUpgrade, /planner_deferred_remainders_user_expiry_idx/);
   assert.match(plannerUpgrade, /activation_transition/);
   assert.match(plannerUpgrade, /planner_reset/);
   assert.doesNotMatch(plannerUpgrade, /drop table if exists public\.planner_(?:profiles|items|blocks|sleep_events)/);
@@ -116,6 +120,8 @@ test("planner upgrade is idempotent and fresh installs include protected sleep",
   assert.match(freshSchema, /commitment_level text not null default 'required'/);
   assert.match(freshSchema, /role text not null default 'work'/);
   assert.match(freshSchema, /sleepiness_level integer null/);
+  assert.match(freshSchema, /create table public\.planner_deferred_remainders/);
+  assert.match(freshSchema, /pending_minutes integer not null/);
   assert.match(freshSchema, /activation_transition/);
 });
 
@@ -128,5 +134,9 @@ test("planner store repairs additive schema changes before serving requests", ()
   assert.match(store, /add column if not exists uncertainty_policy/);
   assert.match(store, /add column if not exists commitment_level/);
   assert.match(store, /add column if not exists role/);
+  assert.match(store, /create table if not exists public\.planner_deferred_remainders/);
+  assert.match(store, /delete from public\.planner_deferred_remainders where app_user_id=\$1::uuid/);
+  assert.match(store, /deferredRemainders: beforeDeferredRemainders/);
+  assert.match(store, /change\.inverse_snapshot\.deferredRemainders/);
   assert.match(store, /await ensurePlannerSchema\(getPostgresPool\(\)\)/);
 });

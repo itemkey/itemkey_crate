@@ -29,6 +29,7 @@ import {
   type PlannerDraft,
   type PlannerDeadlineChainMode,
   type PlannerDeadlineType,
+  type PlannerDeferredRemainder,
   type PlannerCommitmentLevel,
   type PlannerEnergy,
   type PlannerEstimateConfidence,
@@ -41,6 +42,7 @@ import {
   type PlannerProfile,
   type PlannerProposal,
   type PlannerProposalInput,
+  type PlannerRemainderTransferInput,
   type PlannerRecurrence,
   type PlannerSleepBlock,
   type PlannerSleepEvent,
@@ -61,7 +63,7 @@ import {
 import styles from "./planner-workspace.module.css";
 
 type PlannerView = "day" | "week" | "month" | "agenda";
-type Modal = "quick" | "item" | "proposal" | "settings" | "stats" | "import" | "assistant" | "sleep" | "hierarchy" | "missed" | null;
+type Modal = "quick" | "item" | "proposal" | "settings" | "stats" | "import" | "assistant" | "sleep" | "hierarchy" | "missed" | "remainder" | null;
 type CalendarBlock = PlannerBlock | PlannerSleepBlock;
 
 function isSleepBlock(block: CalendarBlock): block is PlannerSleepBlock {
@@ -534,6 +536,8 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
   const [itemForm, setItemForm] = useState(() => defaultItemForm(selectedDate));
   const [proposal, setProposal] = useState<PlannerProposal | null>(null);
   const [missedBlock, setMissedBlock] = useState<PlannerBlock | null>(null);
+  const [remainderBlock, setRemainderBlock] = useState<PlannerBlock | null>(null);
+  const [remainderRecord, setRemainderRecord] = useState<PlannerDeferredRemainder | null>(null);
   const [legacySources, setLegacySources] = useState<LegacySource[]>([]);
   const [legacyLoading, setLegacyLoading] = useState(initialLegacyImport);
   const [now, setNow] = useState(() => new Date());
@@ -642,6 +646,10 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
   const profile = data?.profile ?? createDefaultPlannerProfile();
   const blocks = useMemo(() => data?.blocks ?? [], [data?.blocks]);
   const items = useMemo(() => data?.items ?? [], [data?.items]);
+  const deferredRemainders = useMemo(() => data?.deferredRemainders ?? [], [data?.deferredRemainders]);
+  const activeDeferredRemainders = useMemo(() => deferredRemainders.filter((remainder) => !remainder.resolvedAt
+    && remainder.pendingMinutes > 0
+    && new Date(remainder.expiresAt) > now), [deferredRemainders, now]);
   const tentativeSleepEvent = data?.sleepEvents.find((event) => event.state === "tentative");
   const visibleDates = useMemo(() => {
     if (view === "day") return [selectedDate];
@@ -709,6 +717,7 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
       rebuildFuture: current.trigger === "sleep_changed" || current.trigger === "assistant_setup" || current.trigger === "assistant_update",
       blockExtension: current.blockExtension,
       missedOccurrence: current.missedOccurrence,
+      remainderTransfer: current.remainderTransfer,
     };
   }
 
@@ -725,8 +734,20 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
   }
 
   async function moveRemainder(block: PlannerBlock) {
-    if (!await blockAction(block, "pause")) return;
-    await run(() => createProposal({ trigger: "plans_changed", rebuildFuture: true }));
+    setRemainderBlock(block);
+    setRemainderRecord(null);
+    setModal("remainder");
+  }
+
+  function restoreDeferredRemainder(remainder: PlannerDeferredRemainder) {
+    const block = blocks.find((candidate) => candidate.id === remainder.sourceBlockId);
+    if (!block) {
+      setError(locale === "ru" ? "Исходный блок этого остатка больше не найден." : "The source block for this remainder is no longer available.");
+      return;
+    }
+    setRemainderBlock(block);
+    setRemainderRecord(remainder);
+    setModal("remainder");
   }
 
   async function applyProposal() {
@@ -959,10 +980,18 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
 
       <div className={styles.workspace}>
         <aside className={`${styles.inbox} ${mobileTab !== "inbox" ? styles.mobileHidden : ""}`}>
-          <div className={styles.panelHead}><h2>{copy.inbox}</h2><span>{inbox.length}</span></div>
+          <div className={styles.panelHead}><h2>{copy.inbox}</h2><span>{inbox.length + activeDeferredRemainders.length}</span></div>
           <p className={styles.panelHint}>{locale === "ru" ? "Дела без подходящего времени остаются здесь — ничего не потеряется." : "Items without a safe slot stay here."}</p>
           <div className={styles.inboxList}>
-            {inbox.length === 0 ? <p className={styles.emptyState}>{copy.noInbox}</p> : inbox.map((item) => (
+            {activeDeferredRemainders.map((remainder) => {
+              const hoursLeft = Math.max(0, Math.ceil((new Date(remainder.expiresAt).getTime() - now.getTime()) / 3_600_000));
+              return <article key={remainder.id} className={`${styles.inboxItem} ${hoursLeft <= 24 ? styles.remainderUrgent : ""}`}>
+                <span className={`${styles.priorityDot} ${styles.high}`} />
+                <div><strong>{remainder.title} · {locale === "ru" ? "остаток" : "remainder"}</strong><small>{formatDuration(remainder.pendingMinutes, locale)} · {locale === "ru" ? `в очереди до ${formatDay(formatDateInTimeZone(new Date(remainder.expiresAt), profile.timezone), locale)}` : `queued until ${formatDay(formatDateInTimeZone(new Date(remainder.expiresAt), profile.timezone), locale)}`}</small><small className={styles.unplacedReason}>{hoursLeft <= 24 ? (locale === "ru" ? "Истечёт меньше чем через сутки и попадёт в пропуски." : "Expires in under a day and will count as missed.") : (locale === "ru" ? `Осталось примерно ${Math.ceil(hoursLeft / 24)} дн.` : `About ${Math.ceil(hoursLeft / 24)} days left.`)}</small></div>
+                <button onClick={() => restoreDeferredRemainder(remainder)} aria-label={locale === "ru" ? `Вернуть в план ${remainder.title}` : `Return ${remainder.title} to plan`}>→</button>
+              </article>;
+            })}
+            {inbox.length === 0 && activeDeferredRemainders.length === 0 ? <p className={styles.emptyState}>{copy.noInbox}</p> : inbox.map((item) => (
               <article key={item.id} className={styles.inboxItem}>
                 <span className={`${styles.priorityDot} ${styles[item.priority]}`} />
                 <div><strong>{item.title}</strong><small>{kindLabel[locale][item.kind]} · {plannerItemDurationLabel(item, locale)}</small>{item.unplacedReason && <small className={styles.unplacedReason}>{locale === "ru" ? item.unplacedReason : "No safe slot matches availability, buffers and reserve."}</small>}</div>
@@ -1075,6 +1104,16 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
         })}
       />}
       {modal === "sleep" && <SleepChangedModal profile={profile} locale={locale} busy={busy} initialMode={sleepModalMode} initialWakeDate={sleepModalWakeDate} onClose={() => setModal(null)} onSubmit={(sleepEvent: PlannerSleepEvent) => run(() => createProposal({ sleepEvent, trigger: "sleep_changed", rebuildFuture: Boolean(sleepEvent.actualStartAt) }))} onCheckIn={checkInSleep} onParseFeedback={(textValue) => api<PlannerSleepParseResult>("/api/planner/assistant/parse", { method: "POST", body: JSON.stringify({ mode: "sleep", text: textValue }) })} />}
+      {modal === "remainder" && remainderBlock && <RemainderTransferModal
+        block={remainderBlock}
+        remainder={remainderRecord ?? undefined}
+        profile={profile}
+        now={now}
+        locale={locale}
+        busy={busy}
+        onClose={() => { setRemainderBlock(null); setRemainderRecord(null); setModal(null); }}
+        onReview={(remainderTransfer) => run(() => createProposal({ trigger: "plans_changed", remainderTransfer }))}
+      />}
       {modal === "missed" && missedBlock && <MissedOccurrenceModal
         block={missedBlock}
         item={missedBlock.itemId ? items.find((item) => item.id === missedBlock.itemId) : undefined}
@@ -1141,7 +1180,7 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
           await run(() => createProposal(replayProposalInput(proposal)));
         }} />}
       {modal === "settings" && <SettingsModal profile={profile} locale={locale} busy={busy} onClose={() => setModal(null)} onOpenSleepSettings={() => setModal("assistant")} onSave={(profilePatch) => run(() => createProposal({ profilePatch, trigger: "assistant_update", rebuildFuture: true }))} />}
-      {modal === "stats" && <StatsModal blocks={blocks} items={items} profile={profile} locale={locale} onClose={() => setModal(null)} />}
+      {modal === "stats" && <StatsModal blocks={blocks} items={items} deferredRemainders={deferredRemainders} profile={profile} locale={locale} onClose={() => setModal(null)} />}
       {modal === "import" && <LegacyImportModal key={legacySources.map((source) => `${source.sourceKey}:${source.alreadyImported}`).join("|")} sources={legacySources} locale={locale} busy={busy} loading={legacyLoading} onClose={() => setModal(null)} onImport={importLegacy} />}
     </main>
   );
@@ -1406,6 +1445,51 @@ function PlannerHierarchyModal({ items, locale, busy, onClose, onReview }: {
   </ModalShell>;
 }
 
+function RemainderTransferModal({ block, remainder, profile, now, locale, busy, onClose, onReview }: {
+  block: PlannerBlock;
+  remainder?: PlannerDeferredRemainder;
+  profile: PlannerProfile;
+  now: Date;
+  locale: Locale;
+  busy: boolean;
+  onClose: () => void;
+  onReview: (value: PlannerRemainderTransferInput) => Promise<void>;
+}) {
+  const ru = locale === "ru";
+  const remainingMinutes = remainder?.pendingMinutes ?? Math.max(5, block.status === "in_progress"
+    ? Math.round((new Date(block.endAt).getTime() - now.getTime()) / 60_000)
+    : isoDurationMinutes(block.startAt, block.endAt));
+  const [amountMode, setAmountMode] = useState<"percent" | "minutes">("percent");
+  const [percent, setPercent] = useState<25 | 50 | 75 | 100>(100);
+  const [customMinutes, setCustomMinutes] = useState(String(remainingMinutes));
+  const [distributionMode, setDistributionMode] = useState<"asap" | "date" | "spread_week">("asap");
+  const tomorrow = addPlannerDays(formatDateInTimeZone(now, profile.timezone), 1);
+  const latestDate = addPlannerDays(formatDateInTimeZone(now, profile.timezone), horizonDays(profile.horizon) - 1);
+  const [targetDate, setTargetDate] = useState(tomorrow);
+  const selectedMinutes = amountMode === "minutes"
+    ? Math.min(remainingMinutes, Math.max(5, Number(customMinutes) || 5))
+    : percent === 100
+      ? remainingMinutes
+      : Math.max(5, Math.round(remainingMinutes * percent / 100 / 15) * 15);
+  return <ModalShell title={ru ? "Куда перенести остаток?" : "Where should the remainder go?"} onClose={onClose} locale={locale}>
+    <div className={styles.form}>
+      <section className={styles.remainderSummary}><span>{ru ? "ОСТАЛОСЬ" : "REMAINING"}</span><strong>{block.title} · {formatDuration(remainingMinutes, locale)}</strong><p>{ru ? "Сегодня больше не используется. Пока вы не подтвердите предпросмотр, текущее дело и расписание не изменятся." : "Today is excluded. The current item and schedule stay unchanged until you confirm the preview."}</p></section>
+      <fieldset><legend>{ru ? "Сколько перенести" : "How much to move"}</legend><div className={styles.segmented}>{([100, 75, 50, 25] as const).map((value) => <button type="button" key={value} className={amountMode === "percent" && percent === value ? styles.segmentedActive : ""} onClick={() => { setAmountMode("percent"); setPercent(value); }}>{value}%</button>)}<button type="button" className={amountMode === "minutes" ? styles.segmentedActive : ""} onClick={() => setAmountMode("minutes")}>{ru ? "Своё время" : "Custom"}</button></div>{amountMode === "minutes" && <DurationInput label={ru ? "Перенести" : "Move"} valueMinutes={customMinutes} minMinutes={5} maxMinutes={remainingMinutes} minuteStep={5} locale={locale} onChangeMinutes={(minutes) => setCustomMinutes(String(minutes))} />}<p className={styles.fieldHelp}>{ru ? `Будет запрошено ${formatDuration(selectedMinutes, locale)}. Остальное останется в очереди максимум на 7 дней.` : `${formatDuration(selectedMinutes, locale)} will be requested. The rest stays queued for up to 7 days.`}</p></fieldset>
+      <fieldset><legend>{ru ? "Как распределить" : "Distribution"}</legend><div className={styles.assistantChoices}>
+        <button type="button" className={distributionMode === "asap" ? styles.segmentedActive : ""} onClick={() => setDistributionMode("asap")}><strong>{ru ? "Как можно скорее" : "As soon as possible"}</strong><small>{ru ? "Первое подходящее окно со следующего дня" : "First suitable slot starting tomorrow"}</small></button>
+        <button type="button" className={distributionMode === "date" ? styles.segmentedActive : ""} onClick={() => setDistributionMode("date")}><strong>{ru ? "В выбранный день" : "On a chosen day"}</strong><small>{ru ? "Искать место только в указанную дату" : "Use only the selected date"}</small></button>
+        <button type="button" className={distributionMode === "spread_week" ? styles.segmentedActive : ""} onClick={() => setDistributionMode("spread_week")}><strong>{ru ? "Распределить по неделе" : "Spread across the week"}</strong><small>{ru ? "Разделить объём по оставшимся дням" : "Split the volume over remaining days"}</small></button>
+      </div>{distributionMode === "date" && <label>{ru ? "Дата" : "Date"}<input type="date" min={tomorrow} max={latestDate} value={targetDate} onChange={(event) => setTargetDate(event.target.value)} /></label>}</fieldset>
+      <div className={styles.modalActions}><button type="button" onClick={onClose}>{ru ? "Оставить как есть" : "Keep as is"}</button><button type="button" className={styles.primaryButton} disabled={busy} onClick={() => void onReview({
+        blockId: block.id,
+        deferredRemainderId: remainder?.id,
+        amount: amountMode === "percent" ? { mode: "percent", percent } : { mode: "minutes", minutes: selectedMinutes },
+        distribution: distributionMode === "date" ? { mode: "date", date: targetDate } : { mode: distributionMode },
+      })}>{ru ? "Показать последствия" : "Preview consequences"}</button></div>
+    </div>
+  </ModalShell>;
+}
+
 function MissedOccurrenceModal({ block, item, locale, busy, onClose, onReview }: {
   block: PlannerBlock;
   item?: PlannerItem;
@@ -1441,6 +1525,7 @@ function MissedOccurrenceModal({ block, item, locale, busy, onClose, onReview }:
 
 function proposalChangeReason(change: PlannerProposal["changes"][number], locale: Locale): string {
   if (locale === "ru") return change.reason;
+  if (change.kind === "add_deferred_remainder" || change.kind === "update_deferred_remainder") return "The unscheduled part stays in the queue until it is planned or expires.";
   if (change.kind === "update_profile") return "Planner settings were confirmed in the reviewed assistant flow.";
   if (change.kind === "update_block_status") return "The missed occurrence was recorded with the selected carry or cancellation rule.";
   if (change.kind === "upsert_sleep_event") return "This night was adjusted without changing the regular sleep schedule.";
@@ -1450,18 +1535,20 @@ function proposalChangeReason(change: PlannerProposal["changes"][number], locale
     : "A safe slot was found and the previous inbox reason was cleared.";
   if (change.kind === "move_block") return "Flexible work was moved around the new fixed commitment.";
   if (change.kind === "remove_block") return "No safe replacement slot was found, so the item returns to the inbox.";
-  return change.block.fixed
+  if ("block" in change) return change.block.fixed
     ? "The fixed event keeps the exact reviewed time."
     : "A free slot was selected using priority, energy, preferences and workload.";
+  return "The reviewed planner change is ready to apply.";
 }
 
 function proposalChangeTitle(change: PlannerProposal["changes"][number], locale: Locale): string {
+  if (change.kind === "add_deferred_remainder" || change.kind === "update_deferred_remainder") return locale === "ru" ? `Очередь: ${change.remainder.title}` : `Queue: ${change.remainder.title}`;
   if (change.kind === "update_profile") return locale === "ru" ? "Настройки плана" : "Planner settings";
   if (change.kind === "update_block_status") return change.title;
   if (change.kind === "upsert_sleep_event") return locale === "ru" ? `Сон перед ${change.event.wakeDate}` : `Sleep before ${change.event.wakeDate}`;
   if (change.kind === "add_block") return change.block.title;
   if (change.kind === "move_block" || change.kind === "remove_block") return change.title;
-  return change.item.title;
+  return "item" in change ? change.item.title : (locale === "ru" ? "Изменение плана" : "Plan change");
 }
 
 function wakeDecisionReason(proposal: PlannerProposal, locale: Locale): string {
@@ -1492,6 +1579,8 @@ function ProposalModal({ proposal, profile, locale, busy, onClose, onApply, onEd
   onSwitchFocus: (focus: "sleep" | "work") => Promise<void>;
 }) {
   const [showAllChanges, setShowAllChanges] = useState(false);
+  const [showTechnical, setShowTechnical] = useState(false);
+  const transferImpact = proposal.impact?.kind === "remainder_transfer" ? proposal.impact : undefined;
   const compact = proposal.trigger === "sleep_changed" || Boolean(proposal.missedOccurrence);
   const activation = new Date(proposal.effectiveFromAt ?? zonedPlannerDateTimeToUtc(proposal.horizonStart, "00:00", profile.timezone));
   const activationDate = formatDateInTimeZone(activation, profile.timezone);
@@ -1536,22 +1625,39 @@ function ProposalModal({ proposal, profile, locale, busy, onClose, onApply, onEd
               ? (locale === "ru" ? "примерное время пользователя" : "user approximate time")
               : (locale === "ru" ? "нейтральный автоматический выбор" : "neutral automatic choice")
     : (locale === "ru" ? "фиксированный режим" : "fixed schedule");
+  const semanticPlacements = (proposal.impact?.placements ?? []).reduce<Array<{ title: string; date: string; entries: NonNullable<PlannerProposal["impact"]>["placements"] }>>((groups, placement) => {
+    const date = formatDateInTimeZone(new Date(placement.startAt), profile.timezone);
+    const existing = groups.find((group) => group.title === placement.title && group.date === date);
+    if (existing) existing.entries.push(placement);
+    else groups.push({ title: placement.title, date, entries: [placement] });
+    return groups;
+  }, []);
+  const secondaryImpactCount = (proposal.impact?.moves.length ?? 0)
+    + (proposal.impact?.reductions.length ?? 0)
+    + (proposal.impact?.sleepChanges.length ?? 0);
   return <ModalShell title={locale === "ru" ? "Предпросмотр нового плана" : "Plan preview"} onClose={onClose} locale={locale}>
     <div className={styles.proposal}>
-      <section className={styles.wakeDecision}><span>{locale === "ru" ? "План начинается с реальной текущей ситуации" : "The plan starts from real life now"}</span><div><strong>{formatDay(activationDate, locale)} · {formatTimeInTimeZone(activation, profile.timezone)}</strong>{nextWork && <strong>{locale === "ru" ? "Первое дело" : "First item"}: {nextWork.title} · {formatTimeInTimeZone(new Date(nextWork.startAt), profile.timezone)}</strong>}</div><p>{locale === "ru" ? "Время до этого момента не считается долгом. Разовые проекты и жёсткие сроки сохраняют свой реальный оставшийся объём." : "Time before this instant is not debt. One-time projects and hard deadlines keep their real remaining volume."}</p></section>
+      {!transferImpact && <section className={styles.wakeDecision}><span>{locale === "ru" ? "План начинается с реальной текущей ситуации" : "The plan starts from real life now"}</span><div><strong>{formatDay(activationDate, locale)} · {formatTimeInTimeZone(activation, profile.timezone)}</strong>{nextWork && <strong>{locale === "ru" ? "Первое дело" : "First item"}: {nextWork.title} · {formatTimeInTimeZone(new Date(nextWork.startAt), profile.timezone)}</strong>}</div><p>{locale === "ru" ? "Время до этого момента не считается долгом. Разовые проекты и жёсткие сроки сохраняют свой реальный оставшийся объём." : "Time before this instant is not debt. One-time projects and hard deadlines keep their real remaining volume."}</p></section>}
+      {transferImpact && <section className={transferImpact.scheduledMinutes === 0 ? styles.transferFailed : styles.transferResult}><span>{locale === "ru" ? "РЕЗУЛЬТАТ ПЕРЕНОСА" : "TRANSFER RESULT"}</span><h3>{transferImpact.title}</h3><div className={styles.transferNumbers}><strong>{locale === "ru" ? "Осталось" : "Remaining"}: {formatDuration(transferImpact.sourceRemainingMinutes ?? 0, locale)}</strong><strong>{locale === "ru" ? "Запрошено" : "Requested"}: {formatDuration(transferImpact.requestedMinutes ?? 0, locale)}</strong><strong>{locale === "ru" ? "Получит время" : "Scheduled"}: {formatDuration(transferImpact.scheduledMinutes ?? 0, locale)}</strong></div><p>{transferImpact.scheduledMinutes === 0
+        ? (locale === "ru" ? "Перенести сейчас не удалось. Остаток не потеряется и будет отправлен в очередь." : "No suitable slot was found. The remainder will stay safely queued.")
+        : (locale === "ru" ? "До подтверждения текущее дело и остальное расписание остаются без изменений." : "Nothing changes until you confirm this preview.")}</p></section>}
+      {semanticPlacements.length > 0 && <section><h3>{transferImpact ? (locale === "ru" ? "Куда переносим" : "New placement") : (locale === "ru" ? "Итоговое размещение" : "Final placement")}</h3><div className={styles.semanticChanges}>{semanticPlacements.map((group) => <article key={`${group.title}-${group.date}`}><strong>{group.title}</strong><span>{formatDay(group.date, locale)}</span>{group.entries.map((entry) => <small key={`${entry.startAt}-${entry.endAt}`}>{formatTimeInTimeZone(new Date(entry.startAt), profile.timezone)}–{formatTimeInTimeZone(new Date(entry.endAt), profile.timezone)} · {formatDuration(isoDurationMinutes(entry.startAt, entry.endAt), locale)}</small>)}</article>)}</div></section>}
+      {transferImpact?.queuedMinutes ? <section className={styles.unplaced}><h3>{locale === "ru" ? "Останется в очереди" : "Will remain queued"}</h3><article><strong>{transferImpact.title} · {formatDuration(transferImpact.queuedMinutes, locale)}</strong><p>{locale === "ru" ? `Можно вернуть в план до ${formatDay(formatDateInTimeZone(new Date(transferImpact.queueExpiresAt!), profile.timezone), locale)} ${formatTimeInTimeZone(new Date(transferImpact.queueExpiresAt!), profile.timezone)}. Затем объём станет пропущенным.` : `Return it to the plan before ${formatDay(formatDateInTimeZone(new Date(transferImpact.queueExpiresAt!), profile.timezone), locale)}. After that it counts as missed.`}</p></article></section> : null}
+      {proposal.impact && <section><h3>{locale === "ru" ? "Что ещё изменится" : "Other effects"}</h3>{secondaryImpactCount === 0 ? <p className={styles.noSecondaryImpact}>{locale === "ru" ? "Другие дела и сон не изменятся." : "Other items and sleep will not change."}</p> : <div className={styles.semanticChanges}>{proposal.impact.moves.map((move) => <article key={`${move.title}-${move.fromStartAt}`}><strong>{move.title}</strong><span>{formatDay(formatDateInTimeZone(new Date(move.fromStartAt), profile.timezone), locale)} {formatTimeInTimeZone(new Date(move.fromStartAt), profile.timezone)}–{formatTimeInTimeZone(new Date(move.fromEndAt), profile.timezone)} → {formatDay(formatDateInTimeZone(new Date(move.toStartAt), profile.timezone), locale)} {formatTimeInTimeZone(new Date(move.toStartAt), profile.timezone)}–{formatTimeInTimeZone(new Date(move.toEndAt), profile.timezone)}</span></article>)}{proposal.impact.reductions.map((reduction, index) => <article key={`${reduction.title}-${index}`}><strong>{reduction.title}</strong><span>{locale === "ru" ? `Сократится на ${formatDuration(reduction.minutes, locale)}` : `Reduced by ${formatDuration(reduction.minutes, locale)}`}</span></article>)}{proposal.impact.sleepChanges.map((sleep) => <article key={sleep.wakeDate}><strong>{locale === "ru" ? `Сон перед ${formatDay(sleep.wakeDate, locale)}` : `Sleep before ${formatDay(sleep.wakeDate, locale)}`}</strong><span>{formatDuration(sleep.fromMinutes, locale)} → {formatDuration(sleep.toMinutes, locale)}</span></article>)}</div>}</section>}
       {proposal.normalizedDraft && <section className={styles.parsed}><span>{locale === "ru" ? "Распознано — проверьте перед созданием" : "Parsed — review before creating"}</span><strong>{proposal.normalizedDraft.title}</strong><p>{kindLabel[locale][proposal.normalizedDraft.kind ?? "flexible_task"]} · {formatDuration(proposal.normalizedDraft.estimateMinutes ?? 60, locale)}{proposal.normalizedDraft.date ? ` · ${formatDay(proposal.normalizedDraft.date, locale)}` : ""}{proposal.normalizedDraft.start ? ` · ${proposal.normalizedDraft.start}` : ""}{proposal.normalizedDraft.end ? `–${proposal.normalizedDraft.end}` : ""} · {locale === "ru" ? "приоритет" : "priority"}: {priorityLabel[locale][proposal.normalizedDraft.priority ?? "normal"]}</p><button onClick={onEdit}>{locale === "ru" ? "Изменить поля" : "Edit fields"}</button></section>}
       {proposal.wakeAnchorDecision && <section className={styles.wakeDecision}><span>{locale === "ru" ? "Автоматически выбран устойчивый режим" : "Stable schedule selected automatically"}</span><div><strong>{locale === "ru" ? "Подъём" : "Wake"} {proposal.wakeAnchorDecision.wakeTime}</strong><strong>{locale === "ru" ? "Сон с" : "Sleep from"} {proposal.wakeAnchorDecision.bedtime}</strong><strong>{formatDuration(proposal.wakeAnchorDecision.targetDurationMinutes, locale)}</strong></div><p>{wakeDecisionReason(proposal, locale)}</p><small>{locale === "ru" ? `Проверено вариантов: ${proposal.wakeAnchorDecision.candidatesEvaluated}. Диапазон сна: ${formatDuration(proposal.wakeAnchorDecision.durationRange.minMinutes, locale)}–${formatDuration(proposal.wakeAnchorDecision.durationRange.maxMinutes, locale)}. Это предложение ещё не применено.` : `${proposal.wakeAnchorDecision.candidatesEvaluated} options checked. Sleep range: ${formatDuration(proposal.wakeAnchorDecision.durationRange.minMinutes, locale)}–${formatDuration(proposal.wakeAnchorDecision.durationRange.maxMinutes, locale)}. This proposal has not been applied.`}</small></section>}
-      {proposal.effectiveFocus && <section className={styles.focusOverride}><h3>{locale === "ru" ? "Приоритет только для этого предпросмотра" : "Priority for this preview only"}</h3><p>{locale === "ru" ? "Переключение пересчитает предложение, но не изменит постоянную настройку." : "Switching recalculates this proposal without changing your saved preference."}</p><div className={styles.segmented}><button type="button" disabled={busy} className={proposal.effectiveFocus === "sleep" ? styles.segmentedActive : ""} onClick={() => void onSwitchFocus("sleep")}>{locale === "ru" ? "Сон важнее" : "Sleep first"}</button><button type="button" disabled={busy} className={proposal.effectiveFocus === "work" ? styles.segmentedActive : ""} onClick={() => void onSwitchFocus("work")}>{locale === "ru" ? "Дедлайны важнее" : "Deadlines first"}</button></div></section>}
-      {proposal.sleepPlan?.length ? <section><h3>{locale === "ru" ? "Защищённый сон" : "Protected sleep"}</h3><p className={styles.fieldHelp}>{locale === "ru" ? "Источник подъёма" : "Wake-up source"}: {wakePreferenceLabel}</p><div className={styles.sleepPlanList}>{proposal.sleepPlan.map((night) => <article key={night.wakeDate}><strong>{night.wakeDate} · {formatDuration(night.durationMinutes, locale)}</strong><span>{night.transitionNight ? (locale === "ru" ? `Переходная ночь: обычное время уже прошло, поэтому сон начинается только после подготовки. Долг и восстановительный штраф не создаются.${night.durationMinutes < profile.planningPolicy.minimumNightMinutes ? " Эта ночь короче вашего защищённого минимума; применение плана подтверждает это только один раз." : ""}` : `Transition night: the usual bedtime has passed, so sleep starts after wind-down. No debt or recovery penalty is created.${night.durationMinutes < profile.planningPolicy.minimumNightMinutes ? " This night is below your protected minimum; applying confirms it once only." : ""}`) : night.borrowedMinutes > 0 ? (locale === "ru" ? `Сокращение на ${formatDuration(night.borrowedMinutes, locale)} ради жёсткого срока` : `${formatDuration(night.borrowedMinutes, locale)} borrowed for a hard deadline`) : night.reason === "workload" ? (locale === "ru" ? "Более короткий допустимый вариант улучшает план" : "A shorter allowed option improves the plan") : night.reason === "recovery" ? (locale === "ru" ? "Восстановительная ночь" : "Recovery night") : (locale === "ru" ? "Предпочтительный вариант" : "Preferred option")}</span><small>{formatTimeInTimeZone(new Date(night.startAt), profile.timezone)}–{formatTimeInTimeZone(new Date(night.endAt), profile.timezone)}</small></article>)}</div></section> : null}
-      {proposal.deadlineAnalysis?.length ? <section><h3>{locale === "ru" ? "Сроки и риск" : "Deadlines and risk"}</h3><div className={styles.deadlineList}>{proposal.deadlineAnalysis.map((entry) => <article key={entry.itemId} data-risk={entry.risk}><div><strong>{entry.title}</strong><span>{entry.risk === "on_track" ? (locale === "ru" ? "Успеваем" : "On track") : entry.risk === "tight" ? (locale === "ru" ? "Плотно" : "Tight") : entry.risk === "at_risk" ? (locale === "ru" ? "Под угрозой" : "At risk") : (locale === "ru" ? "Физически не помещается" : "Cannot physically fit")}</span></div><p>{locale === "ru" ? "Внутренняя цель" : "Internal target"}: {formatDay(formatDateInTimeZone(new Date(entry.targetFinishAt), profile.timezone), locale)} {formatTimeInTimeZone(new Date(entry.targetFinishAt), profile.timezone)} · {locale === "ru" ? "жёсткий срок" : "deadline"}: {formatDay(formatDateInTimeZone(new Date(entry.deadlineAt), profile.timezone), locale)} {formatTimeInTimeZone(new Date(entry.deadlineAt), profile.timezone)}</p><small>{locale === "ru" ? "Осталось работы" : "Work remaining"}: {formatDuration(entry.remainingMinutes, locale)} · {locale === "ru" ? "доступно" : "available"}: {formatDuration(entry.availableMinutes, locale)}{entry.latestSafeStartAt ? ` · ${locale === "ru" ? "последний безопасный старт" : "latest safe start"}: ${formatDay(formatDateInTimeZone(new Date(entry.latestSafeStartAt), profile.timezone), locale)} ${formatTimeInTimeZone(new Date(entry.latestSafeStartAt), profile.timezone)}` : ""}</small>{entry.likelyScenario && entry.maximumScenario && <small>{locale === "ru" ? "Обычный сценарий" : "Likely scenario"}: {entry.likelyScenario.risk} · {locale === "ru" ? "максимальный сценарий" : "maximum scenario"}: {entry.maximumScenario.risk} ({formatDuration(entry.maximumScenario.remainingMinutes, locale)})</small>}{entry.nextItemTitle && <p>{locale === "ru" ? "Следом" : "Next"}: {entry.nextItemTitle}</p>}</article>)}</div></section> : null}
+      {!transferImpact && proposal.effectiveFocus && <section className={styles.focusOverride}><h3>{locale === "ru" ? "Приоритет только для этого предпросмотра" : "Priority for this preview only"}</h3><p>{locale === "ru" ? "Переключение пересчитает предложение, но не изменит постоянную настройку." : "Switching recalculates this proposal without changing your saved preference."}</p><div className={styles.segmented}><button type="button" disabled={busy} className={proposal.effectiveFocus === "sleep" ? styles.segmentedActive : ""} onClick={() => void onSwitchFocus("sleep")}>{locale === "ru" ? "Сон важнее" : "Sleep first"}</button><button type="button" disabled={busy} className={proposal.effectiveFocus === "work" ? styles.segmentedActive : ""} onClick={() => void onSwitchFocus("work")}>{locale === "ru" ? "Дедлайны важнее" : "Deadlines first"}</button></div></section>}
+      {!transferImpact && proposal.sleepPlan?.length && (proposal.trigger === "sleep_changed" || proposal.trigger === "assistant_setup" || proposal.trigger === "assistant_update") ? <section><h3>{locale === "ru" ? "Защищённый сон" : "Protected sleep"}</h3><p className={styles.fieldHelp}>{locale === "ru" ? "Источник подъёма" : "Wake-up source"}: {wakePreferenceLabel}</p><div className={styles.sleepPlanList}>{proposal.sleepPlan.map((night) => <article key={night.wakeDate}><strong>{night.wakeDate} · {formatDuration(night.durationMinutes, locale)}</strong><span>{night.transitionNight ? (locale === "ru" ? `Переходная ночь: обычное время уже прошло, поэтому сон начинается только после подготовки. Долг и восстановительный штраф не создаются.${night.durationMinutes < profile.planningPolicy.minimumNightMinutes ? " Эта ночь короче вашего защищённого минимума; применение плана подтверждает это только один раз." : ""}` : `Transition night: the usual bedtime has passed, so sleep starts after wind-down. No debt or recovery penalty is created.${night.durationMinutes < profile.planningPolicy.minimumNightMinutes ? " This night is below your protected minimum; applying confirms it once only." : ""}`) : night.borrowedMinutes > 0 ? (locale === "ru" ? `Сокращение на ${formatDuration(night.borrowedMinutes, locale)} ради жёсткого срока` : `${formatDuration(night.borrowedMinutes, locale)} borrowed for a hard deadline`) : night.reason === "workload" ? (locale === "ru" ? "Более короткий допустимый вариант улучшает план" : "A shorter allowed option improves the plan") : night.reason === "recovery" ? (locale === "ru" ? "Восстановительная ночь" : "Recovery night") : (locale === "ru" ? "Предпочтительный вариант" : "Preferred option")}</span><small>{formatTimeInTimeZone(new Date(night.startAt), profile.timezone)}–{formatTimeInTimeZone(new Date(night.endAt), profile.timezone)}</small></article>)}</div></section> : null}
+      {!transferImpact && proposal.deadlineAnalysis?.length ? <section><h3>{locale === "ru" ? "Сроки и риск" : "Deadlines and risk"}</h3><div className={styles.deadlineList}>{proposal.deadlineAnalysis.map((entry) => <article key={entry.itemId} data-risk={entry.risk}><div><strong>{entry.title}</strong><span>{entry.risk === "on_track" ? (locale === "ru" ? "Успеваем" : "On track") : entry.risk === "tight" ? (locale === "ru" ? "Плотно" : "Tight") : entry.risk === "at_risk" ? (locale === "ru" ? "Под угрозой" : "At risk") : (locale === "ru" ? "Физически не помещается" : "Cannot physically fit")}</span></div><p>{locale === "ru" ? "Внутренняя цель" : "Internal target"}: {formatDay(formatDateInTimeZone(new Date(entry.targetFinishAt), profile.timezone), locale)} {formatTimeInTimeZone(new Date(entry.targetFinishAt), profile.timezone)} · {locale === "ru" ? "жёсткий срок" : "deadline"}: {formatDay(formatDateInTimeZone(new Date(entry.deadlineAt), profile.timezone), locale)} {formatTimeInTimeZone(new Date(entry.deadlineAt), profile.timezone)}</p><small>{locale === "ru" ? "Осталось работы" : "Work remaining"}: {formatDuration(entry.remainingMinutes, locale)} · {locale === "ru" ? "доступно" : "available"}: {formatDuration(entry.availableMinutes, locale)}{entry.latestSafeStartAt ? ` · ${locale === "ru" ? "последний безопасный старт" : "latest safe start"}: ${formatDay(formatDateInTimeZone(new Date(entry.latestSafeStartAt), profile.timezone), locale)} ${formatTimeInTimeZone(new Date(entry.latestSafeStartAt), profile.timezone)}` : ""}</small>{entry.likelyScenario && entry.maximumScenario && <small>{locale === "ru" ? "Обычный сценарий" : "Likely scenario"}: {entry.likelyScenario.risk} · {locale === "ru" ? "максимальный сценарий" : "maximum scenario"}: {entry.maximumScenario.risk} ({formatDuration(entry.maximumScenario.remainingMinutes, locale)})</small>}{entry.nextItemTitle && <p>{locale === "ru" ? "Следом" : "Next"}: {entry.nextItemTitle}</p>}</article>)}</div></section> : null}
       {proposal.conflicts.length > 0 && <section className={styles.conflicts}><h3>{locale === "ru" ? "Нужно ваше решение" : "Your decision is needed"}</h3>{proposal.conflicts.map((conflict) => <article key={conflict.id}><strong>{conflict.title}</strong><p>{locale === "ru" ? conflict.message : conflict.kind === "active_overlap" ? "The protected time overlaps work already in progress. Pause it, finish first, or edit the new input." : conflict.blockIds.some((id) => id.startsWith("sleep-")) ? "A fixed event overlaps protected sleep. Edit the event or sleep input." : "Two fixed events overlap and cannot be moved automatically."}</p>{conflict.kind === "active_overlap" ? <div><button onClick={() => void onPause(conflict.blockIds[0])}>{locale === "ru" ? "Поставить текущее на паузу" : "Pause current"}</button><button onClick={() => void onFinishFirst(conflict.blockIds[0], conflict.blockIds[1])}>{locale === "ru" ? "Закончить текущее сначала" : "Finish current first"}</button><button onClick={onEdit}>{proposal.trigger === "sleep_changed" ? (locale === "ru" ? "Исправить сон" : "Edit sleep") : (locale === "ru" ? "Изменить вводные" : "Edit input")}</button></div> : <div><button onClick={onEdit}>{locale === "ru" ? "Исправить конфликт" : "Edit conflict"}</button></div>}</article>)}</section>}
-      <section><h3>{compact ? (locale === "ru" ? "Изменения сегодня и завтра" : "Changes today and tomorrow") : (locale === "ru" ? "Изменения" : "Changes")}</h3><div className={styles.changeList}>{groupedChanges.map(({ change, count }) => <article key={change.id}>
+      <button type="button" className={styles.technicalToggle} onClick={() => setShowTechnical((current) => !current)}>{showTechnical ? (locale === "ru" ? "Скрыть технические подробности" : "Hide technical details") : (locale === "ru" ? `Технические подробности (${proposal.changes.length})` : `Technical details (${proposal.changes.length})`)}</button>
+      {showTechnical && <section><h3>{compact ? (locale === "ru" ? "Изменения сегодня и завтра" : "Changes today and tomorrow") : (locale === "ru" ? "Все внутренние изменения" : "All internal changes")}</h3><div className={styles.changeList}>{groupedChanges.map(({ change, count }) => <article key={change.id}>
         <span>{change.kind === "add_block" ? "+" : change.kind === "move_block" ? "→" : change.kind === "remove_block" ? "−" : change.kind === "upsert_sleep_event" || change.kind === "update_block_status" ? "■" : "•"}</span>
         <div><strong>{proposalChangeTitle(change, locale)}{count > 1 ? ` ×${count}` : ""}</strong><p>{proposalChangeReason(change, locale)}</p>{change.kind === "add_block" && <small>{formatDay(localDate(change.block, profile.timezone), locale)} · {formatTimeInTimeZone(new Date(change.block.startAt), profile.timezone)}–{formatTimeInTimeZone(new Date(change.block.endAt), profile.timezone)}</small>}{change.kind === "move_block" && <small>{formatTimeInTimeZone(new Date(change.fromStartAt), profile.timezone)} → {formatDay(formatDateInTimeZone(new Date(change.toStartAt), profile.timezone), locale)} {formatTimeInTimeZone(new Date(change.toStartAt), profile.timezone)}</small>}{change.kind === "upsert_sleep_event" && <small>{change.event.plannedStartAt && change.event.plannedEndAt ? `${locale === "ru" ? "запланировано" : "planned"} · ${formatTimeInTimeZone(new Date(change.event.plannedStartAt), profile.timezone)}–${formatTimeInTimeZone(new Date(change.event.plannedEndAt), profile.timezone)} · ${formatDuration(change.event.plannedDurationMinutes ?? isoDurationMinutes(change.event.plannedStartAt, change.event.plannedEndAt), locale)}` : change.event.actualStartAt && (change.event.actualEndAt ?? change.event.projectedEndAt) ? `${change.event.state === "tentative" ? (locale === "ru" ? "предварительно · " : "tentative · ") : ""}${formatTimeInTimeZone(new Date(change.event.actualStartAt), profile.timezone)}–${formatTimeInTimeZone(new Date(change.event.actualEndAt ?? change.event.projectedEndAt!), profile.timezone)}` : (locale === "ru" ? "Время неизвестно: расписание пока не перестраивается" : "Time unknown: schedule is not rebuilt yet")}</small>}</div>
-      </article>)}</div>{compact && (hiddenChanges > 0 || showAllChanges) && <button type="button" onClick={() => setShowAllChanges((current) => !current)}>{showAllChanges ? (locale === "ru" ? "Скрыть дальние изменения" : "Hide later changes") : (locale === "ru" ? `Показать ещё ${hiddenChanges}` : `Show ${hiddenChanges} later changes`)}</button>}</section>
+      </article>)}</div>{compact && (hiddenChanges > 0 || showAllChanges) && <button type="button" onClick={() => setShowAllChanges((current) => !current)}>{showAllChanges ? (locale === "ru" ? "Скрыть дальние изменения" : "Hide later changes") : (locale === "ru" ? `Показать ещё ${hiddenChanges}` : `Show ${hiddenChanges} later changes`)}</button>}</section>}
       {proposal.unplaced.length > 0 && <section className={styles.unplaced}><h3>{locale === "ru" ? "Останется в очереди" : "Will stay in inbox"}</h3>{proposal.unplaced.map((item, index) => <article key={`${item.itemId}-${item.remainingMinutes}-${index}`}><strong>{item.title} · {formatDuration(item.remainingMinutes, locale)}</strong><p>{locale === "ru" ? item.reason : "No free slot satisfies availability, buffers and the protected reserve. The duration was not shortened."}</p></article>)}</section>}
       {proposal.recoveryAdvice && <section className={styles.recoveryPanel}><h3>{locale === "ru" ? "Восстановление" : "Recovery"}</h3><p>{locale === "ru" ? `Недосып относительно цели: ${formatDuration(proposal.recoveryAdvice.deficitMinutes, locale)}. Дополнительное время распределяется максимум на ${proposal.recoveryAdvice.recoveryNights} ночи.` : `Sleep below target: ${formatDuration(proposal.recoveryAdvice.deficitMinutes, locale)}. Extra sleep opportunity is spread across up to ${proposal.recoveryAdvice.recoveryNights} nights.`}</p>{proposal.recoveryAdvice.nap ? <article><strong>{locale === "ru" ? "Можно добавить короткий сон" : "A short nap is available"}</strong><small>{formatDay(formatDateInTimeZone(new Date(proposal.recoveryAdvice.nap.startAt), profile.timezone), locale)} · {formatTimeInTimeZone(new Date(proposal.recoveryAdvice.nap.startAt), profile.timezone)}–{formatTimeInTimeZone(new Date(proposal.recoveryAdvice.nap.endAt), profile.timezone)}</small><p>{locale === "ru" ? proposal.recoveryAdvice.nap.reason : "The slot ends before 15:00 and stays at least six hours away from night sleep."}</p><button type="button" onClick={() => void onAddRecoveryNap(proposal.recoveryAdvice!.nap!)}>{locale === "ru" ? "Добавить в этот план" : "Add to this plan"}</button></article> : <p>{locale === "ru" ? "Безопасного окна для короткого дневного сна сейчас нет — оно не будет добавлено автоматически." : "There is no suitable short-nap window, so none will be added automatically."}</p>}</section>}
-      <div className={styles.modalActions}><button onClick={onClose}>{locale === "ru" ? "Не применять" : "Cancel"}</button><button className={styles.primaryButton} disabled={busy || proposal.conflicts.length > 0} onClick={() => void onApply()}>{locale === "ru" ? "Применить весь план" : "Apply full plan"}</button></div>
+      <div className={styles.modalActions}><button onClick={onClose}>{transferImpact ? (locale === "ru" ? "Оставить как есть" : "Keep as is") : (locale === "ru" ? "Не применять" : "Cancel")}</button><button className={styles.primaryButton} disabled={busy || proposal.conflicts.length > 0} onClick={() => void onApply()}>{transferImpact ? (locale === "ru" ? "Подтвердить перенос" : "Confirm transfer") : (locale === "ru" ? "Применить изменения" : "Apply changes")}</button></div>
     </div>
   </ModalShell>;
 }
@@ -1632,16 +1738,44 @@ function LegacyImportModal({ sources, locale, busy, loading, onClose, onImport }
   </ModalShell>;
 }
 
-function StatsModal({ blocks, items, profile, locale, onClose }: { blocks: PlannerBlock[]; items: PlannerItem[]; profile: PlannerProfile; locale: Locale; onClose: () => void }) {
-  const [period, setPeriod] = useState<"week" | "month">("week");
-  const until = todayIn(profile.timezone);
-  const from = addPlannerDays(until, period === "week" ? -6 : -29);
+function StatsModal({ blocks, items, deferredRemainders, profile, locale, onClose }: {
+  blocks: PlannerBlock[];
+  items: PlannerItem[];
+  deferredRemainders: PlannerDeferredRemainder[];
+  profile: PlannerProfile;
+  locale: Locale;
+  onClose: () => void;
+}) {
+  const [period, setPeriod] = useState<"day" | "week" | "month">("week");
+  const today = todayIn(profile.timezone);
+  const monthStart = `${today.slice(0, 7)}-01`;
+  const [year, month] = today.split("-").map(Number);
+  const nextMonth = new Date(Date.UTC(year, month, 1)).toISOString().slice(0, 10);
+  const from = period === "day"
+    ? today
+    : period === "week"
+      ? addPlannerDays(today, 1 - plannerWeekday(today))
+      : monthStart;
+  const until = period === "day"
+    ? today
+    : period === "week"
+      ? addPlannerDays(from, 6)
+      : addPlannerDays(nextMonth, -1);
   const scopedBlocks = blocks.filter((block) => {
     const date = localDate(block, profile.timezone);
     return date >= from && date <= until;
   });
   const done = scopedBlocks.filter((block) => block.status === "done");
   const skipped = scopedBlocks.filter((block) => block.status === "skipped");
+  const now = new Date();
+  const expiredRemainders = deferredRemainders.filter((remainder) => {
+    if (remainder.resolvedAt || remainder.pendingMinutes <= 0 || new Date(remainder.expiresAt) > now) return false;
+    const date = formatDateInTimeZone(new Date(remainder.expiresAt), profile.timezone);
+    return date >= from && date <= until;
+  });
+  const pendingRemainders = deferredRemainders.filter((remainder) => !remainder.resolvedAt
+    && remainder.pendingMinutes > 0
+    && new Date(remainder.expiresAt) > now);
   const actual = done.filter((block) => block.actualStartAt && block.actualEndAt);
   const accuracy = actual.length ? Math.round(actual.reduce((sum, block) => {
     const planned = isoDurationMinutes(block.startAt, block.endAt);
@@ -1666,5 +1800,22 @@ function StatsModal({ blocks, items, profile, locale, onClose }: { blocks: Plann
   }).length;
   const plannedMinutes = done.reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0);
   const actualMinutes = actual.reduce((sum, block) => sum + isoDurationMinutes(block.actualStartAt!, block.actualEndAt!), 0);
-  return <ModalShell title={locale === "ru" ? "План и факт" : "Plan vs actual"} onClose={onClose} locale={locale}><div className={styles.statsPeriod}><button className={period === "week" ? styles.viewTabActive : ""} onClick={() => setPeriod("week")}>{locale === "ru" ? "7 дней" : "7 days"}</button><button className={period === "month" ? styles.viewTabActive : ""} onClick={() => setPeriod("month")}>{locale === "ru" ? "30 дней" : "30 days"}</button></div><div className={styles.statsGrid}><article><span>{locale === "ru" ? "Выполнено" : "Done"}</span><strong>{done.length}</strong></article><article><span>{locale === "ru" ? "Пропущено" : "Skipped"}</span><strong>{skipped.length}</strong></article><article><span>{locale === "ru" ? "План / факт" : "Plan / actual"}</span><strong>{formatDuration(plannedMinutes, locale)} / {formatDuration(actualMinutes, locale)}</strong></article><article><span>{locale === "ru" ? "Точность оценки" : "Estimate accuracy"}</span><strong>{accuracy}%</strong></article><article><span>{locale === "ru" ? "Регулярные дела" : "Routines"}</span><strong>{routineRate}%</strong></article><article><span>{locale === "ru" ? "Перегруженные дни" : "Overloaded days"}</span><strong>{overloaded}</strong></article><article><span>{locale === "ru" ? "Защищённый резерв" : "Protected reserve"}</span><strong>{Math.round(profile.reserveRatio * 100)}%</strong></article></div></ModalShell>;
+  const expiredMinutes = expiredRemainders.reduce((sum, remainder) => sum + remainder.pendingMinutes, 0);
+  const skippedMinutes = skipped.reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0);
+  const pendingMinutes = pendingRemainders.reduce((sum, remainder) => sum + remainder.pendingMinutes, 0);
+  return <ModalShell title={locale === "ru" ? "План и факт" : "Plan vs actual"} onClose={onClose} locale={locale}><div className={styles.statsPeriod}>
+    <button className={period === "day" ? styles.viewTabActive : ""} onClick={() => setPeriod("day")}>{locale === "ru" ? "День" : "Day"}</button>
+    <button className={period === "week" ? styles.viewTabActive : ""} onClick={() => setPeriod("week")}>{locale === "ru" ? "Неделя" : "Week"}</button>
+    <button className={period === "month" ? styles.viewTabActive : ""} onClick={() => setPeriod("month")}>{locale === "ru" ? "Месяц" : "Month"}</button>
+  </div><p className={styles.fieldHelp}>{formatDay(from, locale)}{from !== until ? ` — ${formatDay(until, locale)}` : ""}</p><div className={styles.statsGrid}>
+    <article><span>{locale === "ru" ? "Выполнено" : "Done"}</span><strong>{done.length}</strong></article>
+    <article><span>{locale === "ru" ? "Пропущено" : "Missed"}</span><strong>{skipped.length + expiredRemainders.length}</strong><small>{formatDuration(skippedMinutes + expiredMinutes, locale)}</small></article>
+    <article><span>{locale === "ru" ? "Истёкшие остатки" : "Expired remainders"}</span><strong>{formatDuration(expiredMinutes, locale)}</strong><small>{locale === "ru" ? "учтены в пропусках один раз" : "counted once as missed"}</small></article>
+    <article><span>{locale === "ru" ? "Ожидает в очереди" : "Pending in queue"}</span><strong>{formatDuration(pendingMinutes, locale)}</strong><small>{locale === "ru" ? "пока не считается пропуском" : "not missed before expiry"}</small></article>
+    <article><span>{locale === "ru" ? "План / факт" : "Plan / actual"}</span><strong>{formatDuration(plannedMinutes, locale)} / {formatDuration(actualMinutes, locale)}</strong></article>
+    <article><span>{locale === "ru" ? "Точность оценки" : "Estimate accuracy"}</span><strong>{accuracy}%</strong></article>
+    <article><span>{locale === "ru" ? "Регулярные дела" : "Routines"}</span><strong>{routineRate}%</strong></article>
+    <article><span>{locale === "ru" ? "Перегруженные дни" : "Overloaded days"}</span><strong>{overloaded}</strong></article>
+    <article><span>{locale === "ru" ? "Защищённый резерв" : "Protected reserve"}</span><strong>{Math.round(profile.reserveRatio * 100)}%</strong></article>
+  </div></ModalShell>;
 }

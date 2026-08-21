@@ -12,6 +12,7 @@ import {
   type PlannerBlock,
   type PlannerBlockStatus,
   type PlannerBootstrap,
+  type PlannerDeferredRemainder,
   type PlannerItem,
   type PlannerProfile,
   type PlannerProposal,
@@ -117,6 +118,22 @@ type BlockRow = {
   updated_at: Date | string;
 };
 
+type DeferredRemainderRow = {
+  id: string;
+  item_id: string | null;
+  source_block_id: string | null;
+  occurrence_key: string | null;
+  title: string;
+  total_minutes: number;
+  pending_minutes: number;
+  scheduled_minutes: number;
+  expires_at: Date | string;
+  resolved_at: Date | string | null;
+  resolution: PlannerDeferredRemainder["resolution"] | null;
+  created_at: Date | string;
+  updated_at: Date | string;
+};
+
 type ProposalRow = {
   id: string;
   base_revision: string | number;
@@ -149,6 +166,29 @@ async function ensurePlannerSchema(executor: SqlExecutor): Promise<void> {
       alter table if exists public.planner_blocks
         add column if not exists role text not null default 'work',
         add column if not exists soft boolean not null default false
+    `);
+    await executor.query(`
+      create table if not exists public.planner_deferred_remainders (
+        app_user_id uuid not null references public.app_users(id) on delete cascade,
+        id text not null check (char_length(trim(id)) between 1 and 160),
+        item_id text null,
+        source_block_id text null,
+        occurrence_key text null,
+        title text not null check (char_length(trim(title)) between 1 and 160),
+        total_minutes integer not null check (total_minutes between 1 and 600000),
+        pending_minutes integer not null check (pending_minutes between 0 and 600000),
+        scheduled_minutes integer not null default 0 check (scheduled_minutes between 0 and 600000),
+        expires_at timestamptz not null,
+        resolved_at timestamptz null,
+        resolution text null check (resolution is null or resolution in ('scheduled', 'cancelled')),
+        created_at timestamptz not null default now(),
+        updated_at timestamptz not null default now(),
+        primary key (app_user_id, id)
+      );
+      alter table public.planner_deferred_remainders
+        add column if not exists occurrence_key text null;
+      create index if not exists planner_deferred_remainders_user_expiry_idx
+        on public.planner_deferred_remainders(app_user_id, expires_at, resolved_at)
     `);
     await executor.query(`
       alter table if exists public.planner_items drop constraint if exists planner_items_estimate_minutes_check;
@@ -283,6 +323,23 @@ function blockFromRow(row: BlockRow): PlannerBlock {
   };
 }
 
+function deferredRemainderFromRow(row: DeferredRemainderRow): PlannerDeferredRemainder {
+  return {
+    id: row.id,
+    itemId: row.item_id ?? undefined,
+    sourceBlockId: row.source_block_id ?? undefined,
+    occurrenceKey: row.occurrence_key ?? undefined,
+    title: row.title,
+    totalMinutes: Number(row.total_minutes),
+    pendingMinutes: Number(row.pending_minutes),
+    scheduledMinutes: Number(row.scheduled_minutes),
+    createdAt: toIso(row.created_at)!,
+    expiresAt: toIso(row.expires_at)!,
+    resolvedAt: toIso(row.resolved_at),
+    resolution: row.resolution ?? undefined,
+  };
+}
+
 async function withTransaction<T>(pool: Pool, run: (client: PoolClient) => Promise<T>): Promise<T> {
   const client = await pool.connect();
   try {
@@ -388,6 +445,56 @@ async function listBlocks(
     [userId, from ?? null, to ?? null]
   );
   return rows.map(blockFromRow);
+}
+
+async function listDeferredRemainders(
+  executor: SqlExecutor,
+  userId: string
+): Promise<PlannerDeferredRemainder[]> {
+  const { rows } = await executor.query<DeferredRemainderRow>(
+    `select id,item_id,source_block_id,occurrence_key,title,total_minutes,pending_minutes,scheduled_minutes,
+       expires_at,resolved_at,resolution,created_at,updated_at
+     from public.planner_deferred_remainders
+     where app_user_id=$1::uuid order by created_at asc`,
+    [userId]
+  );
+  return rows.map(deferredRemainderFromRow);
+}
+
+async function insertDeferredRemainder(
+  executor: SqlExecutor,
+  userId: string,
+  remainder: PlannerDeferredRemainder
+): Promise<void> {
+  await executor.query(
+    `insert into public.planner_deferred_remainders(
+       app_user_id,id,item_id,source_block_id,occurrence_key,title,total_minutes,pending_minutes,scheduled_minutes,
+       expires_at,resolved_at,resolution,created_at,updated_at
+     ) values($1::uuid,$2::text,$3::text,$4::text,$5::text,$6::text,$7::integer,$8::integer,$9::integer,
+       $10::timestamptz,$11::timestamptz,$12::text,$13::timestamptz,now())
+     on conflict(app_user_id,id) do update set
+       item_id=excluded.item_id,source_block_id=excluded.source_block_id,occurrence_key=excluded.occurrence_key,title=excluded.title,
+       total_minutes=excluded.total_minutes,pending_minutes=excluded.pending_minutes,
+       scheduled_minutes=excluded.scheduled_minutes,expires_at=excluded.expires_at,
+       resolved_at=excluded.resolved_at,resolution=excluded.resolution,updated_at=now()`,
+    [
+      userId,remainder.id,remainder.itemId ?? null,remainder.sourceBlockId ?? null,remainder.occurrenceKey ?? null,remainder.title,
+      remainder.totalMinutes,remainder.pendingMinutes,remainder.scheduledMinutes,remainder.expiresAt,
+      remainder.resolvedAt ?? null,remainder.resolution ?? null,remainder.createdAt,
+    ]
+  );
+}
+
+function applyDeferredRemainderChanges(
+  current: PlannerDeferredRemainder[],
+  proposal: PlannerProposal
+): PlannerDeferredRemainder[] {
+  let next = [...current];
+  for (const change of proposal.changes) {
+    if (change.kind !== "add_deferred_remainder" && change.kind !== "update_deferred_remainder") continue;
+    next = [...next.filter((candidate) => candidate.id !== change.remainder.id), change.remainder];
+  }
+  return next;
 }
 
 async function insertItem(executor: SqlExecutor, userId: string, value: PlannerItem): Promise<void> {
@@ -510,10 +617,11 @@ function createPlannerStore(): PlannerStore {
   return {
     async getBootstrap(userId, from, to) {
       const profile = await ensureProfile(pool, userId);
-      const [items, blocks, sleepEvents, latest] = await Promise.all([
+      const [items, blocks, sleepEvents, deferredRemainders, latest] = await Promise.all([
         listItems(pool, userId),
         listBlocks(pool, userId, from, to),
         listSleepEvents(pool, userId),
+        listDeferredRemainders(pool, userId),
         pool.query<{ id: string }>(
           `select id from public.planner_change_sets
            where app_user_id=$1::uuid and undone_at is null
@@ -539,7 +647,7 @@ function createPlannerStore(): PlannerStore {
       const sleepBlocks = buildPlannerSleepBlocks(profile, sleepEvents, today, new Date(Date.now() + 35 * 86_400_000).toISOString().slice(0, 10));
       const sleepDurationSuggestion = plannerSleepDurationSuggestion(profile.sleepSchedule, sleepEvents, today);
       const sleepHealthNotice = plannerSleepHealthNotice(profile, sleepEvents, today);
-      return { profile, items, blocks: annotatedBlocks, sleepEvents, sleepBlocks, latestChangeSetId: latest.rows[0]?.id, durationSuggestions, sleepDurationSuggestion, sleepHealthNotice };
+      return { profile, items, blocks: annotatedBlocks, sleepEvents, sleepBlocks, deferredRemainders, latestChangeSetId: latest.rows[0]?.id, durationSuggestions, sleepDurationSuggestion, sleepHealthNotice };
     },
     async updateSettings(userId, patch, expectedRevision) {
       return withTransaction(pool, async (client) => {
@@ -595,8 +703,10 @@ function createPlannerStore(): PlannerStore {
     },
     async createProposal(userId, input) {
       const profile = await ensureProfile(pool, userId);
-      const [items, blocks, sleepEvents] = await Promise.all([listItems(pool, userId), listBlocks(pool, userId), listSleepEvents(pool, userId)]);
-      const proposal = buildPlannerProposal({ profile, items, blocks, sleepEvents, ...input });
+      const [items, blocks, sleepEvents, deferredRemainders] = await Promise.all([
+        listItems(pool, userId), listBlocks(pool, userId), listSleepEvents(pool, userId), listDeferredRemainders(pool, userId),
+      ]);
+      const proposal = buildPlannerProposal({ profile, items, blocks, sleepEvents, deferredRemainders, ...input });
       const id = randomUUID();
       const expiresAt = new Date(Date.now() + 30 * 60_000).toISOString();
       const stored = { ...proposal, id, expiresAt };
@@ -628,14 +738,17 @@ function createPlannerStore(): PlannerStore {
         if (Number(row.base_revision) !== current.revision) throw new PlannerRevisionError();
         const proposal = row.proposal_data;
         if (proposal.conflicts.length > 0) throw new PlannerConflictError();
-        const [beforeItems, beforeBlocks, beforeSleepEvents] = await Promise.all([
-          listItems(client, userId), listBlocks(client, userId), listSleepEvents(client, userId),
+        const [beforeItems, beforeBlocks, beforeSleepEvents, beforeDeferredRemainders] = await Promise.all([
+          listItems(client, userId), listBlocks(client, userId), listSleepEvents(client, userId), listDeferredRemainders(client, userId),
         ]);
         const applied = applyProposalChanges(beforeItems, beforeBlocks, proposal);
+        const appliedRemainders = applyDeferredRemainderChanges(beforeDeferredRemainders, proposal);
         await client.query(`delete from public.planner_blocks where app_user_id=$1::uuid`, [userId]);
         await client.query(`delete from public.planner_items where app_user_id=$1::uuid`, [userId]);
+        await client.query(`delete from public.planner_deferred_remainders where app_user_id=$1::uuid`, [userId]);
         for (const item of applied.items) await insertItem(client, userId, item);
         for (const block of applied.blocks) await insertBlock(client, userId, block);
+        for (const remainder of appliedRemainders) await insertDeferredRemainder(client, userId, remainder);
         const profileChange = proposal.changes.find((change) => change.kind === "update_profile");
         if (profileChange?.kind === "update_profile") {
           const next = normalizePlannerProfile({ ...profileChange.profile, revision: current.revision });
@@ -660,7 +773,7 @@ function createPlannerStore(): PlannerStore {
            ) values($1::uuid,$2::bigint,$3::bigint,$4::text,$5::jsonb,$6::jsonb)
            returning id`,
           [userId,current.revision,revision,proposal.trigger,JSON.stringify(proposal.changes),
-            JSON.stringify({ profile: current, items: beforeItems, blocks: beforeBlocks, sleepEvents: beforeSleepEvents })]
+            JSON.stringify({ profile: current, items: beforeItems, blocks: beforeBlocks, sleepEvents: beforeSleepEvents, deferredRemainders: beforeDeferredRemainders })]
         );
         await client.query(`update public.planner_proposals set applied_at=now() where id=$1::uuid`, [proposalId]);
         return { revision, changeSetId: changeRows[0].id };
@@ -780,6 +893,7 @@ function createPlannerStore(): PlannerStore {
         const { rows } = await client.query<{
           id: string; to_revision: string | number; inverse_snapshot: {
             profile?: PlannerProfile; items: PlannerItem[]; blocks: PlannerBlock[]; sleepEvents?: PlannerSleepEvent[];
+            deferredRemainders?: PlannerDeferredRemainder[];
           };
         }>(
           `select id,to_revision,inverse_snapshot from public.planner_change_sets
@@ -790,8 +904,10 @@ function createPlannerStore(): PlannerStore {
         if (!change || Number(change.to_revision) !== current.revision) throw new PlannerRevisionError();
         await client.query(`delete from public.planner_blocks where app_user_id=$1::uuid`, [userId]);
         await client.query(`delete from public.planner_items where app_user_id=$1::uuid`, [userId]);
+        await client.query(`delete from public.planner_deferred_remainders where app_user_id=$1::uuid`, [userId]);
         for (const item of change.inverse_snapshot.items) await insertItem(client, userId, item);
         for (const block of change.inverse_snapshot.blocks) await insertBlock(client, userId, block);
+        for (const remainder of change.inverse_snapshot.deferredRemainders ?? []) await insertDeferredRemainder(client, userId, remainder);
         if (change.inverse_snapshot.sleepEvents) {
           await client.query(`delete from public.planner_sleep_events where app_user_id=$1::uuid`, [userId]);
           for (const event of change.inverse_snapshot.sleepEvents) await insertSleepEvent(client, userId, event);
@@ -900,6 +1016,7 @@ function createPlannerStore(): PlannerStore {
         }
         await client.query(`delete from public.planner_blocks where app_user_id=$1::uuid`, [userId]);
         await client.query(`delete from public.planner_items where app_user_id=$1::uuid`, [userId]);
+        await client.query(`delete from public.planner_deferred_remainders where app_user_id=$1::uuid`, [userId]);
         await client.query(`delete from public.planner_sleep_events where app_user_id=$1::uuid`, [userId]);
         await client.query(`delete from public.planner_proposals where app_user_id=$1::uuid`, [userId]);
         await client.query(`delete from public.planner_change_sets where app_user_id=$1::uuid`, [userId]);

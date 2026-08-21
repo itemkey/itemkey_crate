@@ -1538,3 +1538,237 @@ test("three comparable completions suggest a range but never apply it automatica
   assert.ok(suggestion);
   assert.equal(learned.uncertaintyPolicy.duration.mode, "exact");
 });
+
+test("remainder transfer is atomic and a fifty-percent choice keeps the rest queued", () => {
+  const now = new Date("2026-08-21T19:07:00.000Z");
+  const project = item({ id: "editing", title: "Монтаж проекта", estimateMinutes: 180, canSplit: true, minChunkMinutes: 15 });
+  const current: PlannerBlock = {
+    id: "editing-current",
+    itemId: project.id,
+    title: project.title,
+    startAt: "2026-08-21T18:00:00.000Z",
+    endAt: "2026-08-21T21:00:00.000Z",
+    actualStartAt: "2026-08-21T18:00:00.000Z",
+    status: "in_progress",
+    source: "auto",
+    fixed: false,
+  };
+  const proposal = buildPlannerProposal({
+    profile,
+    items: [project],
+    blocks: [current],
+    now,
+    remainderTransfer: {
+      blockId: current.id,
+      amount: { mode: "percent", percent: 50 },
+      distribution: { mode: "asap" },
+    },
+  });
+  assert.equal(current.status, "in_progress", "building a preview must not mutate the current block");
+  assert.equal(proposal.remainderTransfer?.sourceRemainingMinutes, 113);
+  assert.equal(proposal.remainderTransfer?.requestedMinutes, 60);
+  assert.equal(proposal.impact?.scheduledMinutes, 60);
+  assert.equal(proposal.impact?.queuedMinutes, 53);
+  assert.ok(proposal.changes.some((change) => change.kind === "update_block_status" && change.blockId === current.id));
+  const applied = applyProposalChanges([project], [current], proposal);
+  assert.equal(applied.blocks.find((block) => block.id === current.id)?.status, "done");
+});
+
+test("weekly remainder transfer starts tomorrow and spreads work across remaining days", () => {
+  const now = new Date("2026-08-21T12:00:00.000Z");
+  const project = item({ id: "weekly-editing", title: "Монтаж", estimateMinutes: 180, canSplit: true, minChunkMinutes: 30 });
+  const source: PlannerBlock = {
+    id: "weekly-source",
+    itemId: project.id,
+    title: project.title,
+    startAt: "2026-08-21T10:00:00.000Z",
+    endAt: "2026-08-21T13:00:00.000Z",
+    status: "planned",
+    source: "auto",
+    fixed: false,
+  };
+  const proposal = buildPlannerProposal({
+    profile: { ...profile, reserveRatio: 0 },
+    items: [project],
+    blocks: [source],
+    now,
+    remainderTransfer: {
+      blockId: source.id,
+      amount: { mode: "percent", percent: 100 },
+      distribution: { mode: "spread_week" },
+    },
+  });
+  const placements = proposal.impact?.placements ?? [];
+  const dates = new Set(placements.map((placement) => formatDateInTimeZone(new Date(placement.startAt), profile.timezone)));
+  assert.equal(proposal.impact?.scheduledMinutes, 180);
+  assert.equal(dates.size, 2);
+  assert.ok([...dates].every((date) => date > "2026-08-21"));
+  assert.ok(!proposal.changes.some((change) => change.kind === "remove_block" && change.blockId !== source.id));
+});
+
+test("remainder transfer moves a less important flexible block before shortening it", () => {
+  const now = new Date("2026-08-21T12:00:00.000Z");
+  const project = item({
+    id: "important-transfer",
+    title: "Важный монтаж",
+    estimateMinutes: 120,
+    minChunkMinutes: 120,
+    commitmentLevel: "required",
+    planningRank: 0,
+  });
+  const optional = item({
+    id: "movable-hobby",
+    title: "Хобби",
+    estimateMinutes: 60,
+    minChunkMinutes: 30,
+    commitmentLevel: "desired",
+    planningRank: 10,
+  });
+  const source: PlannerBlock = {
+    id: "important-source",
+    itemId: project.id,
+    title: project.title,
+    startAt: "2026-08-21T10:00:00.000Z",
+    endAt: "2026-08-21T12:00:00.000Z",
+    status: "planned",
+    source: "auto",
+    fixed: false,
+  };
+  const hobbyBlock: PlannerBlock = {
+    id: "hobby-block",
+    itemId: optional.id,
+    title: optional.title,
+    startAt: "2026-08-22T07:00:00.000Z",
+    endAt: "2026-08-22T08:00:00.000Z",
+    status: "planned",
+    source: "auto",
+    fixed: false,
+  };
+  const availability = Object.fromEntries(Array.from({ length: 7 }, (_, index) => [
+    String(index + 1),
+    index === 5 ? [{ start: "09:00", end: "12:30" }] : [],
+  ]));
+  const proposal = buildPlannerProposal({
+    profile: {
+      ...profile,
+      availability,
+      reserveRatio: 0,
+      sleepSchedule: {
+        mode: "fixed",
+        weekdays: { bedtime: "00:00", durationMinutes: 360 },
+        weekends: { bedtime: "00:00", durationMinutes: 360 },
+      },
+    },
+    items: [project, optional],
+    blocks: [source, hobbyBlock],
+    now,
+    remainderTransfer: {
+      blockId: source.id,
+      amount: { mode: "percent", percent: 100 },
+      distribution: { mode: "date", date: "2026-08-22" },
+    },
+  });
+  assert.equal(proposal.impact?.scheduledMinutes, 120);
+  assert.equal(proposal.impact?.moves.length, 1);
+  assert.equal(proposal.impact?.moves[0]?.title, optional.title);
+  assert.equal(proposal.impact?.reductions.length, 0);
+  const moved = proposal.changes.find((change) => change.kind === "move_block" && change.blockId === hobbyBlock.id);
+  assert.ok(moved?.kind === "move_block");
+  assert.equal(isoDurationMinutes(moved.toStartAt, moved.toEndAt), 60);
+});
+
+test("queued remainder is not silently recreated by a later full autoplan", () => {
+  const project = item({ id: "queued-project", title: "Отложенный монтаж", estimateMinutes: 90, canSplit: true });
+  const deferred = {
+    id: "queued-remainder",
+    itemId: project.id,
+    sourceBlockId: "old-source",
+    title: project.title,
+    totalMinutes: 90,
+    pendingMinutes: 90,
+    scheduledMinutes: 0,
+    createdAt: "2026-08-19T10:00:00.000Z",
+    expiresAt: "2026-08-26T10:00:00.000Z",
+  };
+  const proposal = buildPlannerProposal({
+    profile,
+    items: [project],
+    blocks: [],
+    deferredRemainders: [deferred],
+    now: new Date("2026-08-21T10:00:00.000Z"),
+  });
+  assert.ok(!proposal.changes.some((change) => change.kind === "add_block" && change.block.itemId === project.id));
+});
+
+test("expired remainder leaves active planning and is counted once in deadline volume", () => {
+  const deadline = item({
+    id: "expired-project",
+    title: "Истёкший проект",
+    estimateMinutes: 60,
+    deadlineType: "hard",
+    deadlineAt: "2026-08-23T18:00:00.000Z",
+  });
+  const expired = {
+    id: "expired-remainder",
+    itemId: deadline.id,
+    sourceBlockId: "expired-source",
+    title: deadline.title,
+    totalMinutes: 60,
+    pendingMinutes: 60,
+    scheduledMinutes: 0,
+    createdAt: "2026-08-13T10:00:00.000Z",
+    expiresAt: "2026-08-20T10:00:00.000Z",
+  };
+  const analysis = analyzePlannerDeadlines(
+    [deadline],
+    [],
+    profile,
+    new Date("2026-08-21T10:00:00.000Z"),
+    [expired]
+  )[0];
+  assert.equal(analysis.remainingMinutes, 0);
+  const proposal = buildPlannerProposal({
+    profile,
+    items: [deadline],
+    blocks: [],
+    deferredRemainders: [expired],
+    now: new Date("2026-08-21T10:00:00.000Z"),
+  });
+  assert.ok(!proposal.changes.some((change) => change.kind === "add_block" && change.block.itemId === deadline.id));
+});
+
+test("a queued hard-deadline remainder expires at the earlier deadline", () => {
+  const deadlineAt = "2026-08-23T18:00:00.000Z";
+  const project = item({
+    id: "deadline-transfer",
+    title: "Срочный монтаж",
+    estimateMinutes: 60,
+    deadlineType: "hard",
+    deadlineAt,
+    commitmentLevel: "must_not_skip",
+  });
+  const source: PlannerBlock = {
+    id: "deadline-source",
+    itemId: project.id,
+    title: project.title,
+    startAt: "2026-08-21T10:00:00.000Z",
+    endAt: "2026-08-21T11:00:00.000Z",
+    status: "planned",
+    source: "auto",
+    fixed: false,
+  };
+  const noAvailability = Object.fromEntries(Array.from({ length: 7 }, (_, index) => [String(index + 1), []]));
+  const proposal = buildPlannerProposal({
+    profile: { ...profile, availability: noAvailability },
+    items: [project],
+    blocks: [source],
+    now: new Date("2026-08-21T10:00:00.000Z"),
+    remainderTransfer: {
+      blockId: source.id,
+      amount: { mode: "percent", percent: 100 },
+      distribution: { mode: "asap" },
+    },
+  });
+  assert.equal(proposal.impact?.scheduledMinutes, 0);
+  assert.equal(proposal.impact?.queueExpiresAt, deadlineAt);
+});

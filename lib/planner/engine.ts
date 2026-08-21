@@ -3,6 +3,7 @@ import {
   type PlannerBlock,
   type PlannerConflict,
   type PlannerDeadlineAnalysis,
+  type PlannerDeferredRemainder,
   type PlannerDraft,
   type PlannerEnergy,
   type PlannerAssistantParseResult,
@@ -11,6 +12,7 @@ import {
   type PlannerPriority,
   type PlannerProfile,
   type PlannerProposal,
+  type PlannerProposalImpact,
   type PlannerProposalInput,
   type PlannerProposalChange,
   type PlannerSleepEvent,
@@ -53,6 +55,7 @@ type PlannerEngineInput = PlannerProposalInput & {
   items: PlannerItem[];
   blocks: PlannerBlock[];
   sleepEvents?: PlannerSleepEvent[];
+  deferredRemainders?: PlannerDeferredRemainder[];
   now?: Date;
   /** A transient profile used to compare sleep choices without changing saved preferences. */
   calculationProfile?: PlannerProfile;
@@ -868,15 +871,23 @@ export function analyzePlannerDeadlines(
   items: PlannerItem[],
   blocks: PlannerBlock[],
   profile: PlannerProfile,
-  now = new Date()
+  now = new Date(),
+  deferredRemainders: PlannerDeferredRemainder[] = []
 ): PlannerDeadlineAnalysis[] {
   return items.flatMap((item): PlannerDeadlineAnalysis[] => {
     if (item.status !== "active" || item.deadlineType === "none" || !item.deadlineAt) return [];
     const completedMinutes = blocks
       .filter((block) => block.itemId === item.id && block.status === "done" && !block.soft)
       .reduce((sum, block) => sum + accountedBlockMinutes(block), 0);
-    const remainingMinutes = Math.max(0, item.uncertaintyPolicy.duration.likelyMinutes - completedMinutes);
-    const maximumRemainingMinutes = Math.max(0, item.uncertaintyPolicy.duration.maxMinutes - completedMinutes);
+    const expiredDeferredMinutes = deferredRemainders
+      .filter((remainder) => remainder.itemId === item.id
+        && !remainder.resolvedAt
+        && remainder.pendingMinutes > 0
+        && new Date(remainder.expiresAt).getTime() <= now.getTime())
+      .reduce((sum, remainder) => sum + remainder.pendingMinutes, 0);
+    const accountedMinutes = completedMinutes + expiredDeferredMinutes;
+    const remainingMinutes = Math.max(0, item.uncertaintyPolicy.duration.likelyMinutes - accountedMinutes);
+    const maximumRemainingMinutes = Math.max(0, item.uncertaintyPolicy.duration.maxMinutes - accountedMinutes);
     const capacityBlocks = blocks.filter((block) => block.itemId !== item.id);
     const targetFinishAt = resolvePlannerTargetFinish(item, profile, capacityBlocks, now) ?? item.deadlineAt;
     const deadlineMs = new Date(item.deadlineAt).getTime();
@@ -951,12 +962,19 @@ function buildPlacementRequests(
   startDate: string,
   endDate: string,
   timezone: string,
-  effectiveFromAt?: string
+  effectiveFromAt?: string,
+  deferredRemainders: PlannerDeferredRemainder[] = []
 ): PlacementRequest[] {
   const requests: PlacementRequest[] = [];
   const activeBlocks = blocks.filter((block) => block.status !== "cancelled" && block.status !== "skipped" && !block.soft);
   const recurrenceBlocks = blocks.filter((block) => block.status !== "cancelled" && !block.soft);
   const activationDate = effectiveFromAt ? formatDateInTimeZone(new Date(effectiveFromAt), timezone) : undefined;
+  const deferredMinutes = (itemId: string, occurrencePrefix?: string) => deferredRemainders
+    .filter((remainder) => remainder.itemId === itemId
+      && !remainder.resolvedAt
+      && remainder.pendingMinutes > 0
+      && (!occurrencePrefix || remainder.occurrenceKey?.startsWith(occurrencePrefix)))
+    .reduce((sum, remainder) => sum + remainder.pendingMinutes, 0);
   const mandatoryMinimum = (item: PlannerItem) => item.deadlineType === "hard"
     || item.commitmentLevel === "must_not_skip"
     || item.commitmentLevel === "required";
@@ -1093,7 +1111,8 @@ function buildPlacementRequests(
           const allowedDates = periodDates.slice(0, Math.max(1, policy.maxOccurrences));
           const alreadyPlanned = recurrenceBlocks
             .filter((block) => block.itemId === item.id && block.occurrenceKey?.startsWith(`${item.id}:project:${periodKey}`))
-            .reduce((sum, block) => sum + accountedBlockMinutes(block), 0);
+            .reduce((sum, block) => sum + accountedBlockMinutes(block), 0)
+            + deferredMinutes(item.id, `${item.id}:project:${periodKey}`);
           pushVolumeRequests(item, `${item.id}:project:${periodKey}`, alreadyPlanned, { allowedDates });
         }
         continue;
@@ -1106,7 +1125,8 @@ function buildPlacementRequests(
           const targetDate = periodDates[Math.min(periodDates.length - 1, Math.floor(index * periodDates.length / Math.max(1, maximum)))];
           const alreadyPlanned = recurrenceBlocks
             .filter((block) => block.itemId === item.id && block.occurrenceKey?.startsWith(occurrenceKey))
-            .reduce((sum, block) => sum + accountedBlockMinutes(block), 0);
+            .reduce((sum, block) => sum + accountedBlockMinutes(block), 0)
+            + deferredMinutes(item.id, occurrenceKey);
           const occurrenceTier = index < partial.min
             ? undefined
             : index < partial.likely
@@ -1133,7 +1153,8 @@ function buildPlacementRequests(
               const date = blockLocalDate(block, timezone);
               return monthly ? date.startsWith(periodKey) : calendarWeekStart(date) === periodKey;
             })
-            .reduce((sum, block) => sum + accountedBlockMinutes(block), 0);
+            .reduce((sum, block) => sum + accountedBlockMinutes(block), 0)
+            + deferredMinutes(item.id, `${item.id}:cycle:${periodKey}`);
           const partial = partialPeriod(item, monthly ? "month" : "week", periodKey);
           const scale = item.uncertaintyPolicy.outcomeMode === "time_budget" ? partial.scale : 1;
           pushVolumeRequests(item, `${item.id}:cycle:${periodKey}`, alreadyPlanned, { allowedDates }, undefined, scale);
@@ -1144,14 +1165,16 @@ function buildPlacementRequests(
         const key = `${item.id}:${date}`;
         const alreadyPlanned = recurrenceBlocks
           .filter((block) => block.itemId === item.id && blockLocalDate(block, timezone) === date)
-          .reduce((sum, block) => sum + accountedBlockMinutes(block), 0);
+          .reduce((sum, block) => sum + accountedBlockMinutes(block), 0)
+          + deferredMinutes(item.id, key);
         pushVolumeRequests(item, key, alreadyPlanned, { targetDate: date }, undefined, 1, date === activationDate ? false : undefined);
       }
       continue;
     }
     const alreadyPlanned = activeBlocks
       .filter((block) => block.itemId === item.id)
-      .reduce((sum, block) => sum + accountedBlockMinutes(block), 0);
+      .reduce((sum, block) => sum + accountedBlockMinutes(block), 0)
+      + deferredMinutes(item.id);
     pushVolumeRequests(item, item.id, alreadyPlanned, directConstraints(item));
   }
   return requests.sort((left, right) => {
@@ -1849,7 +1872,8 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
     startDate,
     endDate,
     profile.timezone,
-    storedProfile.planningPolicy.effectiveFromAt
+    storedProfile.planningPolicy.effectiveFromAt,
+    input.deferredRemainders
   );
   for (const block of movableBlocks.values()) {
     const item = items.find((candidate) => candidate.id === block.itemId);
@@ -2074,7 +2098,13 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
     });
   }
 
-  const deadlineAnalysis = analyzePlannerDeadlines(items, [...workingBlocks, ...sleepBlocks], profile, now);
+  const deadlineAnalysis = analyzePlannerDeadlines(
+    items,
+    [...workingBlocks, ...sleepBlocks],
+    profile,
+    now,
+    input.deferredRemainders
+  );
   const riskWeight = { impossible: 4, at_risk: 3, tight: 2, on_track: 1 } as const;
   for (const analysis of deadlineAnalysis) {
     const item = items.find((candidate) => candidate.id === analysis.itemId);
@@ -2603,8 +2633,612 @@ function resolveAutomaticWake(input: PlannerEngineInput): PlannerProposal | null
   };
 }
 
+function transferItemRank(item: PlannerItem | undefined): number {
+  if (!item) return -1;
+  const group = item.deadlineType === "hard" || item.commitmentLevel === "must_not_skip"
+    ? 0
+    : item.commitmentLevel === "required"
+      ? 1
+      : item.commitmentLevel === "desired"
+        ? 2
+        : 3;
+  return group * 1_000_000 + item.planningRank * 100 - priorityWeight[item.priority];
+}
+
+function transferDates(
+  profile: PlannerProfile,
+  distribution: NonNullable<PlannerProposalInput["remainderTransfer"]>["distribution"],
+  now: Date
+): { startDate: string; endDate: string; allowedDates?: string[]; targetDate?: string } {
+  const today = formatDateInTimeZone(now, profile.timezone);
+  const startDate = addPlannerDays(today, 1);
+  const horizonEnd = addPlannerDays(today, horizonDays(profile.horizon) - 1);
+  if (distribution.mode === "date") {
+    if (distribution.date < startDate || distribution.date > horizonEnd) {
+      throw new Error("Выберите будущую дату внутри горизонта планирования.");
+    }
+    return { startDate: distribution.date, endDate: distribution.date, targetDate: distribution.date };
+  }
+  if (distribution.mode === "spread_week") {
+    const endDate = addPlannerDays(startDate, 7 - plannerWeekday(startDate));
+    const allowedDates: string[] = [];
+    for (let date = startDate; date <= endDate; date = addPlannerDays(date, 1)) allowedDates.push(date);
+    return { startDate, endDate, allowedDates };
+  }
+  return { startDate, endDate: horizonEnd };
+}
+
+function transferAutoMinutesByDate(
+  blocks: PlannerBlock[],
+  items: Map<string, PlannerItem>,
+  profile: PlannerProfile
+): Map<string, number> {
+  const result = new Map<string, number>();
+  for (const block of blocks) {
+    if (block.fixed || block.soft || ["cancelled", "skipped", "done"].includes(block.status)) continue;
+    const date = formatDateInTimeZone(new Date(block.startAt), profile.timezone);
+    const item = block.itemId ? items.get(block.itemId) : undefined;
+    const minutes = item
+      ? placementFootprintMinutes(item, isoDurationMinutes(block.startAt, block.endAt))
+      : isoDurationMinutes(block.startAt, block.endAt);
+    result.set(date, (result.get(date) ?? 0) + minutes);
+  }
+  return result;
+}
+
+function attemptRemainderPlacement(args: {
+  item: PlannerItem;
+  minutes: number;
+  profile: PlannerProfile;
+  occupied: PlannerBlock[];
+  range: ReturnType<typeof transferDates>;
+  now: Date;
+  items: Map<string, PlannerItem>;
+  occurrenceKey: string;
+}): PlannerBlock[] {
+  const { item, profile, range, now, items, occurrenceKey } = args;
+  const occupied = [...args.occupied];
+  const placed: PlannerBlock[] = [];
+  const autoMinutesByDate = transferAutoMinutesByDate(occupied, items, profile);
+  const energyShiftByDate = new Map<string, number>();
+  let remaining = args.minutes;
+  const minimumChunk = Math.min(remaining, Math.max(5, item.minChunkMinutes));
+  const spreadTargets = range.allowedDates ?? [];
+  const perDayTarget = spreadTargets.length
+    ? Math.max(minimumChunk, Math.ceil(args.minutes / spreadTargets.length / STEP_MINUTES) * STEP_MINUTES)
+    : undefined;
+
+  const placeOne = (maximum: number, targetDate?: string): boolean => {
+    const floor = Math.min(maximum, minimumChunk);
+    for (let duration = maximum; duration >= floor; duration = Math.max(floor - 1, duration - STEP_MINUTES)) {
+      const request: PlacementRequest = {
+        item,
+        occurrenceKey,
+        durationMinutes: duration,
+        tier: "required",
+        mandatory: true,
+        targetDate: targetDate ?? range.targetDate,
+        allowedDates: targetDate ? undefined : range.allowedDates,
+      };
+      const placement = findPlacement(
+        request,
+        duration,
+        profile,
+        occupied,
+        range.startDate,
+        range.endDate,
+        now.getTime(),
+        autoMinutesByDate,
+        items,
+        energyShiftByDate
+      );
+      if (!placement) {
+        if (duration === floor) break;
+        continue;
+      }
+      const block: PlannerBlock = {
+        id: uniqueId("remainder-block", occurrenceKey, placed.length + 1, placement.startAt),
+        itemId: item.id,
+        title: item.title,
+        startAt: placement.startAt,
+        endAt: placement.endAt,
+        status: "planned",
+        source: "auto",
+        fixed: false,
+        role: "work",
+        soft: false,
+        occurrenceKey: `${occurrenceKey}:part:${placed.length + 1}`,
+      };
+      occupied.push(block);
+      placed.push(block);
+      autoMinutesByDate.set(
+        placement.date,
+        (autoMinutesByDate.get(placement.date) ?? 0) + placementFootprintMinutes(item, duration)
+      );
+      remaining -= duration;
+      return true;
+    }
+    return false;
+  };
+
+  if (spreadTargets.length) {
+    for (const date of spreadTargets) {
+      if (remaining <= 0) break;
+      placeOne(Math.min(remaining, perDayTarget!), date);
+    }
+  }
+  while (remaining > 0) {
+    if (!placeOne(remaining)) break;
+  }
+  return placed;
+}
+
+function buildRemainderTransferProposal(input: PlannerEngineInput): PlannerProposal {
+  const transfer = input.remainderTransfer!;
+  const now = input.now ?? new Date();
+  const normalizedProfile = normalizePlannerProfile(input.profile);
+  const profile = input.planningFocusOverride
+    ? { ...normalizedProfile, planningPolicy: { ...normalizedProfile.planningPolicy, focus: input.planningFocusOverride } }
+    : normalizedProfile;
+  const deferred = input.deferredRemainders ?? [];
+  const existing = transfer.deferredRemainderId
+    ? deferred.find((candidate) => candidate.id === transfer.deferredRemainderId)
+    : undefined;
+  if (transfer.deferredRemainderId && (!existing || existing.resolvedAt || existing.pendingMinutes <= 0)) {
+    throw new Error("Этот остаток уже перенесён или больше не находится в очереди.");
+  }
+  if (existing && new Date(existing.expiresAt).getTime() <= now.getTime()) {
+    throw new Error("Срок этого остатка в очереди уже истёк.");
+  }
+  const sourceBlock = input.blocks.find((block) => block.id === (existing?.sourceBlockId ?? transfer.blockId));
+  if (!sourceBlock) throw new Error("Исходный блок для переноса не найден.");
+  if (!existing && ["done", "skipped", "cancelled"].includes(sourceBlock.status)) {
+    throw new Error("Этот блок уже завершён и не может быть перенесён повторно.");
+  }
+  const item = input.items.find((candidate) => candidate.id === (existing?.itemId ?? sourceBlock.itemId));
+  if (!item || item.kind === "fixed_event") throw new Error("Переносить остаток можно только у гибкого дела.");
+
+  const sourceRemainingMinutes = existing?.pendingMinutes ?? Math.max(5,
+    sourceBlock.status === "in_progress"
+      ? Math.round((new Date(sourceBlock.endAt).getTime() - now.getTime()) / 60_000)
+      : isoDurationMinutes(sourceBlock.startAt, sourceBlock.endAt)
+  );
+  const rawRequested = transfer.amount.mode === "percent"
+    ? sourceRemainingMinutes * transfer.amount.percent / 100
+    : transfer.amount.minutes;
+  const requestedMinutes = transfer.amount.mode === "percent" && transfer.amount.percent === 100
+    ? sourceRemainingMinutes
+    : clamp(Math.round(rawRequested / STEP_MINUTES) * STEP_MINUTES, 5, sourceRemainingMinutes);
+  const range = transferDates(profile, transfer.distribution, now);
+  const occurrenceKey = existing?.id ?? uniqueId("remainder", sourceBlock.id, now.toISOString());
+  const transferItem = normalizePlannerItem({
+    ...item,
+    canSplit: true,
+    minChunkMinutes: Math.min(item.minChunkMinutes, requestedMinutes),
+    uncertaintyPolicy: {
+      ...item.uncertaintyPolicy,
+      date: { mode: "any" },
+    },
+  });
+  const itemById = new Map(input.items.map((candidate) => [candidate.id, candidate]));
+  itemById.set(transferItem.id, transferItem);
+  const sleepPlan = buildPlannerSleepBlocks(profile, input.sleepEvents ?? [], range.startDate, range.endDate, now);
+  const sleepBlocks: PlannerBlock[] = sleepPlan.map((block) => ({
+    id: block.id,
+    title: block.title,
+    startAt: block.startAt,
+    endAt: block.endAt,
+    status: "planned",
+    source: "auto",
+    fixed: true,
+    occurrenceKey: block.wakeDate,
+  }));
+  const baseOccupied = input.blocks.filter((block) => block.id !== sourceBlock.id
+    && !["cancelled", "skipped", "done"].includes(block.status));
+  const originalById = new Map(baseOccupied.map((block) => [block.id, block]));
+  const moved = new Map<string, PlannerBlock>();
+  const trimmed = new Map<string, PlannerBlock | null>();
+  const adjustedBaseBlocks = (excludedId?: string) => baseOccupied.flatMap((block) => {
+    if (block.id === excludedId) return [];
+    if (trimmed.has(block.id)) {
+      const modified = trimmed.get(block.id);
+      return modified ? [modified] : [];
+    }
+    return [moved.get(block.id) ?? block];
+  });
+  let occupied = [...baseOccupied, ...sleepBlocks];
+  let placementProfile = profile;
+  let placements = attemptRemainderPlacement({
+    item: transferItem, minutes: requestedMinutes, profile: placementProfile, occupied, range, now,
+    items: itemById, occurrenceKey,
+  });
+
+  const moveCandidates = baseOccupied.filter((block) => {
+    if (block.fixed || block.soft || block.itemId === item.id || block.status !== "planned") return false;
+    const candidateItem = block.itemId ? itemById.get(block.itemId) : undefined;
+    const date = blockLocalDate(block, profile.timezone);
+    return Boolean(candidateItem)
+      && date >= range.startDate
+      && date <= range.endDate
+      && candidateItem!.deadlineType !== "hard"
+      && candidateItem!.commitmentLevel !== "must_not_skip"
+      && transferItemRank(candidateItem) > transferItemRank(item);
+  }).sort((left, right) => transferItemRank(itemById.get(right.itemId!)) - transferItemRank(itemById.get(left.itemId!))
+    || right.startAt.localeCompare(left.startAt));
+  for (const candidate of moveCandidates) {
+    const scheduledBefore = placements.reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0);
+    if (scheduledBefore >= requestedMinutes) break;
+    const candidateItem = itemById.get(candidate.itemId!);
+    if (!candidateItem) continue;
+    const baseWithoutCandidate = adjustedBaseBlocks(candidate.id);
+    const candidatePlacements = attemptRemainderPlacement({
+      item: transferItem,
+      minutes: requestedMinutes,
+      profile: placementProfile,
+      occupied: [...baseWithoutCandidate, ...sleepBlocks],
+      range,
+      now,
+      items: itemById,
+      occurrenceKey,
+    });
+    const scheduledAfterRemoval = candidatePlacements.reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0);
+    if (scheduledAfterRemoval <= scheduledBefore) continue;
+    const candidateDuration = isoDurationMinutes(candidate.startAt, candidate.endAt);
+    const candidateDate = blockLocalDate(candidate, profile.timezone);
+    const candidateOccupied = [...baseWithoutCandidate, ...sleepBlocks, ...candidatePlacements];
+    const replacement = findPlacement(
+      {
+        item: candidateItem,
+        occurrenceKey: candidate.occurrenceKey ?? candidate.id,
+        durationMinutes: candidateDuration,
+        tier: "required",
+        mandatory: candidateItem.commitmentLevel === "required",
+        targetDate: candidateDate,
+      },
+      candidateDuration,
+      placementProfile,
+      candidateOccupied,
+      range.startDate,
+      range.endDate,
+      now.getTime(),
+      transferAutoMinutesByDate(candidateOccupied, itemById, placementProfile),
+      itemById,
+      new Map()
+    );
+    if (!replacement || (replacement.startAt === candidate.startAt && replacement.endAt === candidate.endAt)) continue;
+    moved.set(candidate.id, { ...candidate, startAt: replacement.startAt, endAt: replacement.endAt });
+    placements = candidatePlacements;
+    occupied = [...adjustedBaseBlocks(), ...sleepBlocks];
+  }
+
+  const optionalCandidates = baseOccupied.filter((block) => {
+    if (block.fixed || block.itemId === item.id || block.status !== "planned") return false;
+    const candidateItem = block.itemId ? itemById.get(block.itemId) : undefined;
+    if (!candidateItem || candidateItem.deadlineType === "hard" || candidateItem.commitmentLevel === "must_not_skip") return false;
+    const optionalTier = Boolean(block.soft)
+      || block.occurrenceKey?.includes(":reserve")
+      || block.occurrenceKey?.includes(":extra")
+      || block.occurrenceKey?.includes(":likely")
+      || candidateItem.commitmentLevel === "desired"
+      || candidateItem.commitmentLevel === "if_time"
+      || candidateItem.recurrence?.schedulingMode === "spare_time";
+    return optionalTier && transferItemRank(candidateItem) > transferItemRank(item);
+  }).sort((left, right) => transferItemRank(itemById.get(right.itemId!)) - transferItemRank(itemById.get(left.itemId!))
+    || right.startAt.localeCompare(left.startAt));
+
+  const removableCandidates = optionalCandidates.filter((block) => block.soft
+    || block.occurrenceKey?.includes(":reserve")
+    || block.occurrenceKey?.includes(":extra"));
+  for (const removable of removableCandidates) {
+    if (placements.reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0) >= requestedMinutes) break;
+    trimmed.set(removable.id, null);
+    occupied = [...adjustedBaseBlocks(), ...sleepBlocks];
+    placements = attemptRemainderPlacement({
+      item: transferItem, minutes: requestedMinutes, profile: placementProfile, occupied, range, now,
+      items: itemById, occurrenceKey,
+    });
+  }
+
+  let trimSteps = 0;
+  while (placements.reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0) < requestedMinutes
+    && optionalCandidates.length > 0 && trimSteps < 200) {
+    const original = optionalCandidates[trimSteps % optionalCandidates.length];
+    const current = trimmed.has(original.id) ? trimmed.get(original.id) : moved.get(original.id) ?? original;
+    trimSteps += 1;
+    if (!current) continue;
+    const duration = isoDurationMinutes(current.startAt, current.endAt);
+    const removable = current.soft
+      || current.occurrenceKey?.includes(":reserve")
+      || current.occurrenceKey?.includes(":extra")
+      || current.occurrenceKey?.includes(":likely");
+    const minimum = removable ? 0 : Math.min(duration, itemById.get(current.itemId!)?.minChunkMinutes ?? STEP_MINUTES);
+    if (duration <= minimum) continue;
+    const nextDuration = Math.max(minimum, duration - STEP_MINUTES);
+    trimmed.set(original.id, nextDuration <= 0 ? null : { ...current, endAt: addIsoMinutes(current.startAt, nextDuration) });
+    occupied = [...adjustedBaseBlocks(), ...sleepBlocks];
+    placements = attemptRemainderPlacement({
+      item: transferItem, minutes: requestedMinutes, profile: placementProfile, occupied, range, now,
+      items: itemById, occurrenceKey,
+    });
+  }
+
+  const sleepChanges: PlannerProposalImpact["sleepChanges"] = [];
+  const shortenedSleep = new Map<string, typeof sleepPlan[number]>();
+  const mayBorrowSleep = profile.planningPolicy.focus === "work"
+    && (item.deadlineType === "hard" || item.commitmentLevel === "must_not_skip");
+  if (mayBorrowSleep && placements.reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0) < requestedMinutes) {
+    const candidates = sleepPlan.filter((block) => block.selectedDurationMinutes > profile.planningPolicy.minimumNightMinutes);
+    let index = 0;
+    while (candidates.length > 0 && index < 200
+      && placements.reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0) < requestedMinutes) {
+      const original = candidates[index % candidates.length];
+      const current = shortenedSleep.get(original.wakeDate) ?? original;
+      index += 1;
+      if (current.selectedDurationMinutes <= profile.planningPolicy.minimumNightMinutes) continue;
+      const next = {
+        ...current,
+        startAt: addIsoMinutes(current.startAt, STEP_MINUTES),
+        selectedDurationMinutes: current.selectedDurationMinutes - STEP_MINUTES,
+        borrowedMinutes: current.borrowedMinutes + STEP_MINUTES,
+        selectionReason: "hard_deadline" as const,
+      };
+      shortenedSleep.set(original.wakeDate, next);
+      placementProfile = extendEveningAvailability(placementProfile, original.wakeDate, STEP_MINUTES);
+      const adjustedSleepBlocks = sleepBlocks.map((block) => {
+        const wakeDate = block.occurrenceKey;
+        const shortened = wakeDate ? shortenedSleep.get(wakeDate) : undefined;
+        return shortened ? { ...block, startAt: shortened.startAt } : block;
+      });
+      occupied = [...adjustedBaseBlocks(), ...adjustedSleepBlocks];
+      placements = attemptRemainderPlacement({
+        item: transferItem, minutes: requestedMinutes, profile: placementProfile, occupied, range, now,
+        items: itemById, occurrenceKey,
+      });
+    }
+  }
+
+  const scheduledMinutes = placements.reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0);
+  const pendingMinutes = Math.max(0, sourceRemainingMinutes - scheduledMinutes);
+  const sevenDaysAt = new Date(now.getTime() + 7 * 86_400_000).toISOString();
+  const expiresAt = item.deadlineType === "hard" && item.deadlineAt && item.deadlineAt < sevenDaysAt
+    ? item.deadlineAt
+    : existing?.expiresAt ?? sevenDaysAt;
+  const remainder: PlannerDeferredRemainder = {
+    id: existing?.id ?? occurrenceKey,
+    itemId: item.id,
+    sourceBlockId: existing?.sourceBlockId ?? sourceBlock.id,
+    occurrenceKey: existing?.occurrenceKey ?? sourceBlock.occurrenceKey,
+    title: item.title,
+    totalMinutes: existing?.totalMinutes ?? sourceRemainingMinutes,
+    pendingMinutes,
+    scheduledMinutes: (existing?.scheduledMinutes ?? 0) + scheduledMinutes,
+    createdAt: existing?.createdAt ?? now.toISOString(),
+    expiresAt,
+    resolvedAt: pendingMinutes === 0 ? now.toISOString() : undefined,
+    resolution: pendingMinutes === 0 ? "scheduled" : undefined,
+  };
+
+  const changes: PlannerProposalChange[] = [];
+  if (!existing) {
+    changes.push({
+      id: uniqueId("finish-remainder-source", sourceBlock.id, now.toISOString()),
+      kind: "update_block_status",
+      blockId: sourceBlock.id,
+      title: sourceBlock.title,
+      status: sourceBlock.status === "in_progress" ? "done" : "cancelled",
+      actualStartAt: sourceBlock.status === "in_progress" ? sourceBlock.actualStartAt ?? sourceBlock.startAt : undefined,
+      actualEndAt: sourceBlock.status === "in_progress" ? now.toISOString() : undefined,
+      reason: sourceBlock.status === "in_progress"
+        ? "Выполненная часть сохранена как факт; переносится только остаток."
+        : "Исходный блок отменён только после подтверждения переноса.",
+    });
+  }
+  for (const [blockId, relocated] of moved) {
+    if (trimmed.has(blockId)) continue;
+    const original = originalById.get(blockId);
+    if (!original) continue;
+    changes.push({
+      id: uniqueId("move-for-remainder", original.id, relocated.startAt),
+      kind: "move_block",
+      blockId: original.id,
+      title: original.title,
+      fromStartAt: original.startAt,
+      fromEndAt: original.endAt,
+      toStartAt: relocated.startAt,
+      toEndAt: relocated.endAt,
+      reason: "Менее важный гибкий блок перенесён целиком, чтобы освободить место без сокращения.",
+    });
+  }
+  const reductions: PlannerProposalImpact["reductions"] = [];
+  for (const [blockId, modified] of trimmed) {
+    const original = originalById.get(blockId);
+    if (!original) continue;
+    const removedMinutes = isoDurationMinutes(original.startAt, original.endAt)
+      - (modified ? isoDurationMinutes(modified.startAt, modified.endAt) : 0);
+    if (removedMinutes <= 0) continue;
+    reductions.push({
+      itemId: original.itemId,
+      title: original.title,
+      minutes: removedMinutes,
+      reason: original.soft ? "soft_reserve" : "optional_work",
+    });
+    changes.push(modified ? {
+      id: uniqueId("trim-remainder", original.id, modified.endAt),
+      kind: "move_block",
+      blockId: original.id,
+      title: original.title,
+      fromStartAt: original.startAt,
+      fromEndAt: original.endAt,
+      toStartAt: modified.startAt,
+      toEndAt: modified.endAt,
+      reason: `Менее важный гибкий блок сокращён на ${removedMinutes} мин, не затрагивая обязательный минимум.`,
+    } : {
+      id: uniqueId("remove-optional-remainder", original.id),
+      kind: "remove_block",
+      blockId: original.id,
+      title: original.title,
+      reason: "Необязательный гибкий блок освобождён для более важного остатка.",
+    });
+  }
+  for (const block of placements) {
+    changes.push({
+      id: uniqueId("add-remainder", block.id),
+      kind: "add_block",
+      block,
+      reason: "Остаток размещён в выбранном режиме без полной пересборки плана.",
+    });
+  }
+  for (const shortened of shortenedSleep.values()) {
+    const original = sleepPlan.find((candidate) => candidate.wakeDate === shortened.wakeDate)!;
+    sleepChanges.push({
+      wakeDate: shortened.wakeDate,
+      fromMinutes: original.selectedDurationMinutes,
+      toMinutes: shortened.selectedDurationMinutes,
+    });
+    const previous = (input.sleepEvents ?? []).find((event) => event.wakeDate === shortened.wakeDate);
+    changes.push({
+      id: uniqueId("remainder-sleep", shortened.wakeDate, shortened.selectedDurationMinutes),
+      kind: "upsert_sleep_event",
+      event: normalizePlannerSleepEvent({
+        ...previous,
+        wakeDate: shortened.wakeDate,
+        eventKind: "planned_adjustment",
+        state: "planned",
+        plannedStartAt: shortened.startAt,
+        plannedEndAt: shortened.endAt,
+        plannedDurationMinutes: shortened.selectedDurationMinutes,
+        selectionReason: "hard_deadline",
+        borrowedMinutes: original.selectedDurationMinutes - shortened.selectedDurationMinutes,
+      }),
+      reason: "Сон сокращён только в режиме «Дедлайны важнее» и не ниже защищённого минимума.",
+    });
+  }
+  changes.push({
+    id: uniqueId(existing ? "update-remainder" : "add-remainder-queue", remainder.id, remainder.pendingMinutes),
+    kind: existing ? "update_deferred_remainder" : "add_deferred_remainder",
+    remainder,
+    reason: pendingMinutes > 0
+      ? "Неперенесённая часть сохранена в очереди на семь суток или до жёсткого дедлайна."
+      : "Весь выбранный остаток получил время.",
+  });
+
+  const proposal: PlannerProposal = {
+    baseRevision: profile.revision,
+    trigger: "plans_changed",
+    remainderTransfer: { ...transfer, sourceRemainingMinutes, requestedMinutes },
+    changes,
+    conflicts: [],
+    unplaced: [],
+    effectiveFocus: profile.planningPolicy.focus,
+    effectiveFromAt: profile.planningPolicy.effectiveFromAt ?? now.toISOString(),
+    horizonStart: formatDateInTimeZone(now, profile.timezone),
+    horizonEnd: addPlannerDays(formatDateInTimeZone(now, profile.timezone), horizonDays(profile.horizon) - 1),
+    impact: {
+      kind: "remainder_transfer",
+      itemId: item.id,
+      title: item.title,
+      sourceRemainingMinutes,
+      requestedMinutes,
+      scheduledMinutes,
+      queuedMinutes: pendingMinutes,
+      queueExpiresAt: pendingMinutes > 0 ? expiresAt : undefined,
+      placements: placements.map((block) => ({
+        itemId: block.itemId,
+        title: block.title,
+        startAt: block.startAt,
+        endAt: block.endAt,
+      })),
+      moves: Array.from(moved.entries()).flatMap(([blockId, relocated]) => {
+        const original = originalById.get(blockId);
+        const final = trimmed.has(blockId) ? trimmed.get(blockId) : relocated;
+        if (!original || !final || (original.startAt === final.startAt && original.endAt === final.endAt)) return [];
+        return [{
+          itemId: original.itemId,
+          title: original.title,
+          fromStartAt: original.startAt,
+          fromEndAt: original.endAt,
+          toStartAt: final.startAt,
+          toEndAt: final.endAt,
+        }];
+      }),
+      reductions,
+      sleepChanges,
+    },
+  };
+  const applied = applyProposalChanges(input.items, input.blocks, proposal);
+  proposal.deadlineAnalysis = analyzePlannerDeadlines(
+    input.items,
+    applied.blocks,
+    profile,
+    now,
+    input.deferredRemainders
+  );
+  return proposal;
+}
+
+function summarizeProposalImpact(input: PlannerEngineInput, proposal: PlannerProposal): PlannerProposalImpact {
+  const removed = new Map(proposal.changes.flatMap((change) => {
+    if (change.kind !== "remove_block") return [];
+    const block = input.blocks.find((candidate) => candidate.id === change.blockId);
+    return block ? [[change.blockId, block] as const] : [];
+  }));
+  const consumedRemoved = new Set<string>();
+  const placements: PlannerProposalImpact["placements"] = [];
+  const moves: PlannerProposalImpact["moves"] = proposal.changes.flatMap((change) => change.kind === "move_block"
+    && (change.fromStartAt !== change.toStartAt || change.fromEndAt !== change.toEndAt)
+    ? [{
+        itemId: input.blocks.find((block) => block.id === change.blockId)?.itemId,
+        title: change.title,
+        fromStartAt: change.fromStartAt,
+        fromEndAt: change.fromEndAt,
+        toStartAt: change.toStartAt,
+        toEndAt: change.toEndAt,
+      }]
+    : []);
+  for (const change of proposal.changes) {
+    if (change.kind !== "add_block" || change.block.soft) continue;
+    const match = [...removed.values()].find((block) => !consumedRemoved.has(block.id)
+      && block.itemId === change.block.itemId
+      && (block.occurrenceKey ?? "") === (change.block.occurrenceKey ?? ""));
+    if (match) {
+      consumedRemoved.add(match.id);
+      if (match.startAt !== change.block.startAt || match.endAt !== change.block.endAt) {
+        moves.push({
+          itemId: change.block.itemId,
+          title: change.block.title,
+          fromStartAt: match.startAt,
+          fromEndAt: match.endAt,
+          toStartAt: change.block.startAt,
+          toEndAt: change.block.endAt,
+        });
+      }
+    } else {
+      placements.push({
+        itemId: change.block.itemId,
+        title: change.block.title,
+        startAt: change.block.startAt,
+        endAt: change.block.endAt,
+      });
+    }
+  }
+  const sleepChanges = proposal.changes.flatMap((change): PlannerProposalImpact["sleepChanges"] => {
+    if (change.kind !== "upsert_sleep_event" || !change.event.plannedDurationMinutes) return [];
+    const previous = (input.sleepEvents ?? []).find((event) => event.wakeDate === change.event.wakeDate);
+    const fromMinutes = previous?.plannedDurationMinutes;
+    if (fromMinutes === change.event.plannedDurationMinutes) return [];
+    return [{
+      wakeDate: change.event.wakeDate,
+      fromMinutes: fromMinutes ?? change.event.plannedDurationMinutes,
+      toMinutes: change.event.plannedDurationMinutes,
+    }];
+  });
+  return { kind: "general", placements, moves, reductions: [], sleepChanges };
+}
+
 export function buildPlannerProposal(input: PlannerEngineInput): PlannerProposal {
-  return resolveAutomaticWake(input) ?? resolvePreferredSleepDuration(input);
+  if (input.remainderTransfer) return buildRemainderTransferProposal(input);
+  const proposal = resolveAutomaticWake(input) ?? resolvePreferredSleepDuration(input);
+  return { ...proposal, impact: summarizeProposalImpact(input, proposal) };
 }
 
 export function applyProposalChanges(

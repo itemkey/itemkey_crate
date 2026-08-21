@@ -102,6 +102,73 @@ export type PlannerSleepEventKind = "sleep_change" | "check_in" | "planned_adjus
 export type PlannerSleepEventState = "planned" | "tentative" | "confirmed" | "completed";
 export type PlannerPlanningFocus = "sleep" | "work";
 
+export type PlannerRemainderDistribution =
+  | { mode: "asap" }
+  | { mode: "date"; date: string }
+  | { mode: "spread_week" };
+
+export type PlannerRemainderTransferInput = {
+  /** Current block for a new transfer, or the original block retained by an existing queue entry. */
+  blockId: string;
+  /** Present when taking an already deferred remainder back out of the queue. */
+  deferredRemainderId?: string;
+  amount:
+    | { mode: "percent"; percent: 25 | 50 | 75 | 100 }
+    | { mode: "minutes"; minutes: number };
+  distribution: PlannerRemainderDistribution;
+};
+
+export type PlannerDeferredRemainder = {
+  id: string;
+  itemId?: string;
+  sourceBlockId?: string;
+  occurrenceKey?: string;
+  title: string;
+  totalMinutes: number;
+  pendingMinutes: number;
+  scheduledMinutes: number;
+  createdAt: string;
+  expiresAt: string;
+  resolvedAt?: string;
+  resolution?: "scheduled" | "cancelled";
+};
+
+export type PlannerProposalImpact = {
+  kind: "remainder_transfer" | "general";
+  itemId?: string;
+  title?: string;
+  sourceRemainingMinutes?: number;
+  requestedMinutes?: number;
+  scheduledMinutes?: number;
+  queuedMinutes?: number;
+  queueExpiresAt?: string;
+  placements: Array<{
+    itemId?: string;
+    title: string;
+    startAt: string;
+    endAt: string;
+  }>;
+  moves: Array<{
+    itemId?: string;
+    title: string;
+    fromStartAt: string;
+    fromEndAt: string;
+    toStartAt: string;
+    toEndAt: string;
+  }>;
+  reductions: Array<{
+    itemId?: string;
+    title: string;
+    minutes: number;
+    reason: "soft_reserve" | "optional_work";
+  }>;
+  sleepChanges: Array<{
+    wakeDate: string;
+    fromMinutes: number;
+    toMinutes: number;
+  }>;
+};
+
 export type PlannerSleepDurationPreference =
   | {
       mode: "range";
@@ -393,6 +460,12 @@ export type PlannerProposalChange =
       kind: "update_item";
       item: PlannerItem;
       reason: string;
+    }
+  | {
+      id: string;
+      kind: "add_deferred_remainder" | "update_deferred_remainder";
+      remainder: PlannerDeferredRemainder;
+      reason: string;
     };
 
 export type PlannerConflict = {
@@ -463,6 +536,11 @@ export type PlannerProposal = {
   normalizedDrafts?: PlannerDraft[];
   blockExtension?: PlannerProposalInput["blockExtension"];
   missedOccurrence?: PlannerProposalInput["missedOccurrence"];
+  remainderTransfer?: PlannerRemainderTransferInput & {
+    sourceRemainingMinutes: number;
+    requestedMinutes: number;
+  };
+  impact?: PlannerProposalImpact;
   changes: PlannerProposalChange[];
   conflicts: PlannerConflict[];
   unplaced: PlannerUnplaced[];
@@ -502,6 +580,7 @@ export type PlannerBootstrap = {
   blocks: PlannerBlock[];
   sleepEvents: PlannerSleepEvent[];
   sleepBlocks: PlannerSleepBlock[];
+  deferredRemainders: PlannerDeferredRemainder[];
   latestChangeSetId?: string;
   durationSuggestions?: Array<{
     itemId: string;
@@ -537,6 +616,7 @@ export type PlannerProposalInput = {
     blockId: string;
     minutes: number;
   };
+  remainderTransfer?: PlannerRemainderTransferInput;
   missedOccurrence?: {
     blockId: string;
     disposition: Exclude<PlannerMissedOccurrencePolicy, "ask">;

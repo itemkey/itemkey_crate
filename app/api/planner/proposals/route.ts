@@ -26,6 +26,12 @@ export async function POST(request: NextRequest) {
         rememberPolicy?: unknown;
         revisedRemainingMinutes?: unknown;
       };
+      remainderTransfer?: {
+        blockId?: unknown;
+        deferredRemainderId?: unknown;
+        amount?: { mode?: unknown; percent?: unknown; minutes?: unknown };
+        distribution?: { mode?: unknown; date?: unknown };
+      };
     };
     const command = typeof body.command === "string" ? body.command.slice(0, 12_000) : undefined;
     const drafts = Array.isArray(body.drafts) ? body.drafts.slice(0, 100) : undefined;
@@ -43,8 +49,37 @@ export async function POST(request: NextRequest) {
             : undefined,
         } satisfies NonNullable<PlannerProposalInput["missedOccurrence"]>
       : undefined;
+    const transferAmount = body.remainderTransfer?.amount?.mode === "percent"
+      && [25, 50, 75, 100].includes(Number(body.remainderTransfer.amount.percent))
+      ? { mode: "percent" as const, percent: Number(body.remainderTransfer.amount.percent) as 25 | 50 | 75 | 100 }
+      : body.remainderTransfer?.amount?.mode === "minutes"
+        && Number.isFinite(Number(body.remainderTransfer.amount.minutes))
+        ? { mode: "minutes" as const, minutes: Math.max(5, Math.min(600_000, Math.round(Number(body.remainderTransfer.amount.minutes)))) }
+        : undefined;
+    const transferDistribution = body.remainderTransfer?.distribution?.mode === "asap"
+      ? { mode: "asap" as const }
+      : body.remainderTransfer?.distribution?.mode === "spread_week"
+        ? { mode: "spread_week" as const }
+        : body.remainderTransfer?.distribution?.mode === "date"
+          && typeof body.remainderTransfer.distribution.date === "string"
+          && /^\d{4}-\d{2}-\d{2}$/.test(body.remainderTransfer.distribution.date)
+          ? { mode: "date" as const, date: body.remainderTransfer.distribution.date }
+          : undefined;
+    const remainderTransfer = body.remainderTransfer
+      && typeof body.remainderTransfer.blockId === "string"
+      && transferAmount
+      && transferDistribution
+      ? {
+          blockId: body.remainderTransfer.blockId.slice(0, 160),
+          deferredRemainderId: typeof body.remainderTransfer.deferredRemainderId === "string"
+            ? body.remainderTransfer.deferredRemainderId.slice(0, 160)
+            : undefined,
+          amount: transferAmount,
+          distribution: transferDistribution,
+        } satisfies NonNullable<PlannerProposalInput["remainderTransfer"]>
+      : undefined;
     if (!command && !body.draft && !drafts?.length && !body.profilePatch && !body.sleepEvent && !body.blockExtension
-      && !missedOccurrence && body.trigger !== "autoplan" && body.trigger !== "plans_changed"
+      && !missedOccurrence && !remainderTransfer && body.trigger !== "autoplan" && body.trigger !== "plans_changed"
       && body.trigger !== "day_refresh" && body.trigger !== "assistant_update") {
       throw new Error("Запрос не содержит данных для изменения плана.");
     }
@@ -63,6 +98,7 @@ export async function POST(request: NextRequest) {
         ? { blockId: body.blockExtension.blockId.slice(0, 160), minutes: 15 }
         : undefined,
       missedOccurrence,
+      remainderTransfer,
     });
     return Response.json({ data }, { status: 201 });
   } catch (error) {

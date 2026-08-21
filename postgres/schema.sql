@@ -522,6 +522,29 @@ create index planner_blocks_occurrence_idx
   on public.planner_blocks(app_user_id, item_id, occurrence_key)
   where item_id is not null and occurrence_key is not null and status <> 'cancelled';
 
+create table public.planner_deferred_remainders (
+  app_user_id uuid not null references public.app_users(id) on delete cascade,
+  id text not null check (char_length(trim(id)) between 1 and 160),
+  item_id text null,
+  source_block_id text null,
+  occurrence_key text null,
+  title text not null check (char_length(trim(title)) between 1 and 160),
+  total_minutes integer not null check (total_minutes between 1 and 600000),
+  pending_minutes integer not null check (pending_minutes between 0 and 600000),
+  scheduled_minutes integer not null default 0 check (scheduled_minutes between 0 and 600000),
+  expires_at timestamptz not null,
+  resolved_at timestamptz null,
+  resolution text null check (resolution is null or resolution in ('scheduled', 'cancelled')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key (app_user_id, id),
+  constraint planner_deferred_remainders_volume_check
+    check (pending_minutes + scheduled_minutes <= total_minutes)
+);
+
+create index planner_deferred_remainders_user_expiry_idx
+  on public.planner_deferred_remainders(app_user_id, expires_at, resolved_at);
+
 create table public.planner_proposals (
   id uuid primary key default gen_random_uuid(),
   app_user_id uuid not null references public.app_users(id) on delete cascade,
