@@ -2202,13 +2202,38 @@ function autoWakeRequirement(
   }).sort((left, right) => left.minute - right.minute)[0];
 }
 
-function needsAutomaticWakeSearch(items: PlannerItem[]): boolean {
-  return items.some((item) => item.status === "active" && item.kind !== "fixed_event" && (
-    Boolean(item.earliestAt || item.deadlineAt)
-    || item.allowedWindows.length > 0
-    || item.preferredWindows.length > 0
-    || item.uncertaintyPolicy.time.mode !== "any"
-  ));
+function automaticWakeMinute(
+  items: PlannerItem[],
+  profile: PlannerProfile,
+  requirement?: { minute: number }
+): number {
+  let selected = Math.min(9 * 60, requirement?.minute ?? 9 * 60);
+  const beforeTask = (item: PlannerItem) => Math.max(profile.defaultBufferMinutes, plannerBufferBefore(item));
+  const considerLatestBodyEnd = (item: PlannerItem, endMinute: number) => {
+    const duration = item.commitmentLevel === "if_time"
+      ? item.uncertaintyPolicy.duration.minMinutes
+      : item.uncertaintyPolicy.duration.likelyMinutes;
+    selected = Math.min(selected, endMinute - duration - beforeTask(item));
+  };
+  for (const item of items) {
+    if (item.status !== "active" || item.kind === "fixed_event") continue;
+    if (item.deadlineAt) {
+      considerLatestBodyEnd(item, plannerTimeToMinutes(formatTimeInTimeZone(new Date(item.deadlineAt), profile.timezone)));
+    }
+    const timePolicy = item.uncertaintyPolicy.time;
+    if (timePolicy.mode === "exact" && timePolicy.exactStart) {
+      selected = Math.min(selected, plannerTimeToMinutes(timePolicy.exactStart) - beforeTask(item));
+    } else if (timePolicy.mode === "range" && timePolicy.latestEnd) {
+      considerLatestBodyEnd(item, plannerTimeToMinutes(timePolicy.latestEnd));
+    } else if (timePolicy.mode === "preferred" && timePolicy.preferredStart) {
+      selected = Math.min(selected, plannerTimeToMinutes(timePolicy.preferredStart) - beforeTask(item));
+    }
+    for (const window of item.allowedWindows) {
+      considerLatestBodyEnd(item, plannerTimeToMinutes(window.end));
+    }
+  }
+  const minimum = requirement && requirement.minute < 6 * 60 + 30 ? requirement.minute : 6 * 60 + 30;
+  return Math.max(minimum, Math.floor(selected / STEP_MINUTES) * STEP_MINUTES);
 }
 
 function candidateBlocks(proposal: PlannerProposal, input: PlannerEngineInput): PlannerBlock[] {
@@ -2278,20 +2303,6 @@ function measureAutoWakeCandidate(
   };
 }
 
-function compareAutoWakeCandidates(left: AutoWakeCandidate, right: AutoWakeCandidate): number {
-  const comparisons = [
-    left.recurringConflictCount - right.recurringConflictCount,
-    left.deadlineViolations - right.deadlineViolations,
-    left.unplacedMinutes - right.unplacedMinutes,
-    left.peakLoadMinutes - right.peakLoadMinutes,
-    left.energyMismatchMinutes - right.energyMismatchMinutes,
-    right.placedMinutes - left.placedMinutes,
-    Math.abs(left.minute - 9 * 60) - Math.abs(right.minute - 9 * 60),
-    left.minute - right.minute,
-  ];
-  return comparisons.find((value) => value !== 0) ?? 0;
-}
-
 function resolveAutomaticWake(input: PlannerEngineInput): PlannerProposal | null {
   const now = input.now ?? new Date();
   const baseProfile = normalizePlannerProfile(input.profile);
@@ -2318,11 +2329,6 @@ function resolveAutomaticWake(input: PlannerEngineInput): PlannerProposal | null
     ...draftItems,
   ].map((item) => [item.id, item])).values()];
   const requirement = autoWakeRequirement(planningItems, schedule.morningPreparationMinutes);
-  const allCandidateMinutes = Array.from({ length: (12 * 60 - 6 * 60 - 30) / STEP_MINUTES + 1 }, (_, index) => 6 * 60 + 30 + index * STEP_MINUTES)
-    .filter((minute) => !requirement || minute <= requirement.minute);
-  if (requirement && requirement.minute < 6 * 60 + 30) allCandidateMinutes.splice(0, allCandidateMinutes.length, requirement.minute);
-  if (allCandidateMinutes.length === 0) allCandidateMinutes.push(requirement?.minute ?? 9 * 60);
-
   const initialWakeMinute = plannerTimeToMinutes(schedule.wakeAnchor.localTime);
   const derivedAvailability = availabilityFromSleepSchedule(schedule);
   const availabilityFollowsSleep = Boolean(input.profilePatch?.availability)
@@ -2347,24 +2353,7 @@ function resolveAutomaticWake(input: PlannerEngineInput): PlannerProposal | null
     const proposal = resolvePreferredSleepDuration({ ...input, profilePatch });
     return measureAutoWakeCandidate(minute, profilePatch, proposal, input);
   };
-  let candidates: AutoWakeCandidate[];
-  if (!needsAutomaticWakeSearch(planningItems)) {
-    const neutralMinute = requirement?.minute ?? 9 * 60;
-    const candidateMinute = allCandidateMinutes.reduce((best, minute) => (
-      Math.abs(minute - neutralMinute) < Math.abs(best - neutralMinute) ? minute : best
-    ), allCandidateMinutes[0]);
-    candidates = [evaluateCandidate(candidateMinute)];
-  } else {
-    const coarseMinutes = allCandidateMinutes.filter((_, index) => index % 4 === 0);
-    const finalMinute = allCandidateMinutes.at(-1)!;
-    if (!coarseMinutes.includes(finalMinute)) coarseMinutes.push(finalMinute);
-    const coarseCandidates = coarseMinutes.map(evaluateCandidate).sort(compareAutoWakeCandidates);
-    const coarseBest = coarseCandidates[0].minute;
-    const refinementMinutes = allCandidateMinutes.filter((minute) => (
-      Math.abs(minute - coarseBest) <= 45 && !coarseMinutes.includes(minute)
-    ));
-    candidates = [...coarseCandidates, ...refinementMinutes.map(evaluateCandidate)].sort(compareAutoWakeCandidates);
-  }
+  const candidates = [evaluateCandidate(automaticWakeMinute(planningItems, requestedProfile, requirement))];
   const selected = candidates[0];
   const mostImportantFlexible = planningItems.filter((item) => item.kind !== "fixed_event" && item.status === "active")
     .sort((left, right) => priorityWeight[right.priority] - priorityWeight[left.priority]

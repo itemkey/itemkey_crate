@@ -831,6 +831,37 @@ test("automatic wake prepares several unconstrained uncertain items without scan
   assert.ok(proposal.changes.some((change) => change.kind === "add_block"));
 });
 
+test("assistant setup prepares seven ranged recurring items in a single wake calculation", () => {
+  const sleepSchedule = createAdaptiveSleepSchedule({ minMinutes: 7 * 60, maxMinutes: 9 * 60, dayPart: "auto" });
+  const recurringItems = Array.from({ length: 7 }, (_, index) => item({
+    id: `recurring-floating-${index}`,
+    kind: "routine",
+    title: `Регулярное дело ${index + 1}`,
+    estimateMinutes: 90,
+    canSplit: true,
+    minChunkMinutes: 30,
+    recurrence: { frequency: "custom", weekdays: [1, 2, 3, 4, 5], durationMode: "per_occurrence" },
+    uncertaintyPolicy: {
+      outcomeMode: "time_budget",
+      duration: { mode: "range", minMinutes: 60, likelyMinutes: 90, maxMinutes: 150, source: "user" },
+      date: { mode: "any" },
+      time: { mode: "any" },
+      recurrence: { mode: "count_range", period: "week", minOccurrences: 2, likelyOccurrences: 3, maxOccurrences: 4, allowedWeekdays: [1, 2, 3, 4, 5] },
+    },
+  }));
+  const proposal = buildPlannerProposal({
+    profile,
+    profilePatch: { sleepSchedule, availability: availabilityFromSleepSchedule(sleepSchedule), energyWindows: [] },
+    items: recurringItems,
+    blocks: [],
+    trigger: "assistant_setup",
+    rebuildFuture: true,
+    now: new Date("2026-08-17T04:00:00.000Z"),
+  });
+  assert.equal(proposal.wakeAnchorDecision?.candidatesEvaluated, 1);
+  assert.ok(proposal.changes.some((change) => change.kind === "add_block"));
+});
+
 test("automatic wake moves exactly early enough for a recurring morning commitment", () => {
   const sleepSchedule = createAdaptiveSleepSchedule({ minMinutes: 7 * 60, maxMinutes: 9 * 60, dayPart: "auto" });
   const proposal = buildPlannerProposal({
