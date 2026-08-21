@@ -906,7 +906,7 @@ test("automatic wake can move before 06:30 only when a recurring commitment requ
   assert.equal(proposal.wakeAnchorDecision?.reason.code, "recurring_commitment");
 });
 
-test("automatic wake uses workload fit while keeping a single stable anchor", () => {
+test("automatic wake does not move earlier only to fit an ordinary flexible task", () => {
   const sleepSchedule = createAdaptiveSleepSchedule({ minMinutes: 7 * 60, maxMinutes: 9 * 60, dayPart: "auto" });
   const urgent = item({
     id: "early-deadline",
@@ -924,9 +924,8 @@ test("automatic wake uses workload fit while keeping a single stable anchor", ()
     rebuildFuture: true,
     now: new Date("2026-08-19T04:00:00.000Z"),
   });
-  assert.equal(proposal.wakeAnchorDecision?.wakeTime, "06:45");
-  assert.equal(proposal.wakeAnchorDecision?.reason.code, "plan_fit");
-  assert.equal(proposal.wakeAnchorDecision?.reason.relatedTitle, "Утренняя подача");
+  assert.equal(proposal.wakeAnchorDecision?.wakeTime, "09:00");
+  assert.equal(proposal.wakeAnchorDecision?.reason.code, "auto_default");
 });
 
 test("automatic wake reports a recurring fixed conflict instead of applying it", () => {
@@ -951,6 +950,161 @@ test("automatic wake reports a recurring fixed conflict instead of applying it",
   assert.equal(proposal.wakeAnchorDecision?.reason.code, "fixed_conflict");
   assert.ok(proposal.conflicts.some((conflict) => conflict.kind === "fixed_overlap"));
   assert.throws(() => applyProposalChanges([overnight], [], proposal));
+});
+
+test("assistant setup starts a passed bedtime as a debt-free transition night", () => {
+  const sleepSchedule = createAdaptiveSleepSchedule({
+    minMinutes: 9 * 60,
+    maxMinutes: 9 * 60,
+    exactDurationsMinutes: [9 * 60],
+    dayPart: "morning",
+    bedtimePreference: { mode: "exact", time: "21:30", source: "user" },
+    wakePreference: { mode: "exact", time: "06:30", source: "user" },
+    windDownMinutes: 30,
+  });
+  const now = new Date("2026-08-21T18:38:00.000Z");
+  const proposal = buildPlannerProposal({
+    profile,
+    profilePatch: { sleepSchedule, availability: availabilityFromSleepSchedule(sleepSchedule), assistantSetupVersion: 5 },
+    items: [],
+    blocks: [],
+    trigger: "assistant_setup",
+    rebuildFuture: true,
+    now,
+  });
+  assert.equal(proposal.effectiveFromAt, now.toISOString());
+  assert.equal(proposal.sleepPlan?.[0]?.transitionNight, true);
+  assert.equal(proposal.sleepPlan?.[0]?.reason, "activation_transition");
+  assert.equal(formatTimeInTimeZone(new Date(proposal.sleepPlan![0].startAt), profile.timezone), "22:15");
+  assert.equal(proposal.sleepPlan?.[0]?.borrowedMinutes, 0);
+  assert.ok(proposal.sleepPlan!.every((night) => new Date(night.endAt) > now));
+});
+
+test("sleep clock preferences keep approximate tolerance and overnight hard ranges", () => {
+  const schedule = normalizeSleepSchedule(createAdaptiveSleepSchedule({
+    minMinutes: 7 * 60,
+    maxMinutes: 9 * 60,
+    dayPart: "morning",
+    bedtimePreference: { mode: "range", notBefore: "23:30", notAfter: "01:30", source: "user" },
+    wakePreference: { mode: "approximate", time: "09:00", toleranceMinutes: 60, notBefore: "08:00", source: "user" },
+  }));
+  assert.equal(schedule.mode, "adaptive");
+  if (schedule.mode !== "adaptive") return;
+  assert.equal(schedule.wakePreference.toleranceMinutes, 60);
+  assert.equal(schedule.wakePreference.notBefore, "08:00");
+  assert.equal(sleepRuleForWakeDate(schedule, "2026-08-22").bedtime, "00:30");
+});
+
+test("neutral wake uses recent actual history but ignores transition nights", () => {
+  const sleepSchedule = createAdaptiveSleepSchedule({ minMinutes: 8 * 60, maxMinutes: 8 * 60, dayPart: "auto" });
+  const sleepEvents = [
+    { wakeDate: "2026-08-17", eventKind: "sleep_change" as const, state: "completed" as const, actualStartAt: "2026-08-16T23:00:00.000Z", projectedEndAt: "2026-08-17T07:00:00.000Z", actualEndAt: "2026-08-17T07:00:00.000Z" },
+    { wakeDate: "2026-08-18", eventKind: "sleep_change" as const, state: "completed" as const, actualStartAt: "2026-08-17T23:30:00.000Z", projectedEndAt: "2026-08-18T07:30:00.000Z", actualEndAt: "2026-08-18T07:30:00.000Z" },
+    { wakeDate: "2026-08-19", eventKind: "sleep_change" as const, state: "completed" as const, actualStartAt: "2026-08-18T23:15:00.000Z", projectedEndAt: "2026-08-19T07:15:00.000Z", actualEndAt: "2026-08-19T07:15:00.000Z" },
+    { wakeDate: "2026-08-20", eventKind: "planned_adjustment" as const, state: "completed" as const, actualStartAt: "2026-08-19T18:00:00.000Z", projectedEndAt: "2026-08-20T03:00:00.000Z", actualEndAt: "2026-08-20T03:00:00.000Z", transitionNight: true },
+  ];
+  const proposal = buildPlannerProposal({
+    profile,
+    profilePatch: { sleepSchedule, availability: availabilityFromSleepSchedule(sleepSchedule) },
+    items: [],
+    blocks: [],
+    sleepEvents,
+    trigger: "assistant_update",
+    rebuildFuture: true,
+    now: new Date("2026-08-20T12:00:00.000Z"),
+  });
+  assert.equal(proposal.wakeAnchorDecision?.wakeTime, "10:15");
+  assert.equal(proposal.wakeAnchorDecision?.reason.code, "sleep_history");
+});
+
+test("a selected recurring day before setup does not become an unplaced debt", () => {
+  const routine = item({
+    id: "friday-routine",
+    kind: "routine",
+    commitmentLevel: "required",
+    estimateMinutes: 60,
+    recurrence: { frequency: "custom", weekdays: [5], durationMode: "per_occurrence" },
+  });
+  const now = new Date("2026-08-21T18:38:00.000Z");
+  const proposal = buildPlannerProposal({
+    profile,
+    profilePatch: { assistantSetupVersion: 5 },
+    items: [routine],
+    blocks: [],
+    trigger: "assistant_setup",
+    rebuildFuture: true,
+    now,
+  });
+  assert.equal(proposal.unplaced.some((entry) => entry.itemId === routine.id), false);
+});
+
+test("the first weekly count range is prorated to the remaining eligible days", () => {
+  const routine = item({
+    id: "weekly-range",
+    kind: "routine",
+    estimateMinutes: 30,
+    recurrence: { frequency: "daily", durationMode: "per_occurrence" },
+    uncertaintyPolicy: {
+      outcomeMode: "time_budget",
+      duration: { mode: "exact", minMinutes: 30, likelyMinutes: 30, maxMinutes: 30, source: "user" },
+      date: { mode: "any" },
+      time: { mode: "any" },
+      recurrence: { mode: "count_range", period: "week", minOccurrences: 2, likelyOccurrences: 3, maxOccurrences: 4, allowedWeekdays: [1, 2, 3, 4, 5, 6, 7] },
+      deadline: { mode: "none" },
+    },
+  });
+  const proposal = buildPlannerProposal({
+    profile,
+    profilePatch: { assistantSetupVersion: 5 },
+    items: [routine],
+    blocks: [],
+    trigger: "assistant_setup",
+    rebuildFuture: true,
+    now: new Date("2026-08-21T18:38:00.000Z"),
+  });
+  const currentWeekBlocks = proposal.changes.filter((change) => change.kind === "add_block"
+    && change.block.itemId === routine.id
+    && change.block.occurrenceKey?.includes("2026-08-17")
+    && change.block.role !== "uncertainty_reserve");
+  assert.ok(currentWeekBlocks.length <= 2);
+  assert.equal(proposal.unplaced.some((entry) => entry.itemId === routine.id), false);
+});
+
+test("missed occurrence can be cancelled once or carried with a remembered rule", () => {
+  const project = item({ id: "project", estimateMinutes: 60 });
+  const block: PlannerBlock = {
+    id: "project-block",
+    itemId: project.id,
+    title: project.title,
+    startAt: "2026-08-21T10:00:00.000Z",
+    endAt: "2026-08-21T11:00:00.000Z",
+    status: "planned",
+    source: "auto",
+    fixed: false,
+  };
+  const cancelled = buildPlannerProposal({
+    profile,
+    items: [project],
+    blocks: [block],
+    trigger: "plans_changed",
+    rebuildFuture: true,
+    missedOccurrence: { blockId: block.id, disposition: "cancel_occurrence" },
+    now: new Date("2026-08-21T09:00:00.000Z"),
+  });
+  assert.equal(cancelled.changes.some((change) => change.kind === "update_block_status" && change.status === "skipped"), true);
+  assert.equal(cancelled.changes.some((change) => change.kind === "add_block" && change.block.itemId === project.id), false);
+
+  const carried = buildPlannerProposal({
+    profile,
+    items: [project],
+    blocks: [block],
+    trigger: "plans_changed",
+    rebuildFuture: true,
+    missedOccurrence: { blockId: block.id, disposition: "carry_remaining", rememberPolicy: true },
+    now: new Date("2026-08-21T09:00:00.000Z"),
+  });
+  assert.equal(carried.changes.some((change) => change.kind === "add_block" && change.block.itemId === project.id), true);
+  assert.equal(carried.changes.some((change) => change.kind === "update_item" && change.item.uncertaintyPolicy.missedOccurrencePolicy === "carry_remaining"), true);
 });
 
 test("a one-off morning event does not silently replace the permanent automatic anchor", () => {

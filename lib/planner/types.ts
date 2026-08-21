@@ -18,6 +18,7 @@ export type PlannerCommitmentLevel = "must_not_skip" | "required" | "desired" | 
 export type PlannerUncertainDateMode = "exact" | "preferred" | "range" | "any";
 export type PlannerUncertainTimeMode = "exact" | "preferred" | "range" | "any";
 export type PlannerTravelEstimateMode = "exact" | "approximate" | "range";
+export type PlannerMissedOccurrencePolicy = "ask" | "carry_remaining" | "cancel_occurrence" | "reestimate_total";
 
 export type PlannerDurationEstimate = {
   mode: PlannerEstimateMode;
@@ -67,6 +68,8 @@ export type PlannerUncertaintyPolicy = {
     tolerancePercent?: 15 | 30 | 50;
     punctuality: "strict" | "normal" | "flexible";
   };
+  /** What to do after a skipped occurrence. Old items default to asking every time. */
+  missedOccurrencePolicy?: PlannerMissedOccurrencePolicy;
 };
 
 export type PlannerTimeWindow = {
@@ -87,7 +90,7 @@ export type PlannerSleepRule = {
 
 export type PlannerWakeDayPart = "early_morning" | "morning" | "late_morning" | "auto";
 export type PlannerWakeAnchorReason = {
-  code: "preferred_window" | "auto_default" | "recurring_commitment" | "plan_fit" | "fixed_conflict";
+  code: "preferred_window" | "auto_default" | "sleep_history" | "recurring_commitment" | "plan_fit" | "fixed_conflict";
   relatedTitle?: string;
   relatedTime?: string;
   placedMinutes?: number;
@@ -110,6 +113,18 @@ export type PlannerSleepDurationPreference =
       optionsMinutes: number[];
     };
 
+export type PlannerSleepClockPreference = {
+  mode: "exact" | "approximate" | "range" | "any";
+  /** Exact or usual local clock time. */
+  time?: string;
+  /** Soft distance around an approximate time. */
+  toleranceMinutes?: number;
+  /** Hard local-clock bounds. A pair may cross midnight for bedtime. */
+  notBefore?: string;
+  notAfter?: string;
+  source?: "user" | "history" | "neutral_default" | "commitment";
+};
+
 export type PlannerPlanningPolicy = {
   focus: PlannerPlanningFocus;
   minimumNightMinutes: 360;
@@ -117,6 +132,8 @@ export type PlannerPlanningPolicy = {
   maxRollingSevenDayDeficitMinutes: 180;
   recoveryHorizonNights: 3;
   deadlineChainGapMinutes: 0 | 5 | 15;
+  /** First instant covered by the current plan. Time before it never becomes setup debt. */
+  effectiveFromAt?: string;
 };
 
 export type PlannerFixedSleepSchedule = {
@@ -139,6 +156,13 @@ export type PlannerAdaptiveSleepSchedule = {
     localTime: string;
     toleranceMinutes: number;
     selectionReason?: PlannerWakeAnchorReason;
+  };
+  bedtimePreference: PlannerSleepClockPreference;
+  wakePreference: PlannerSleepClockPreference;
+  windDownMinutes: number;
+  weekendOverride?: {
+    bedtimePreference: PlannerSleepClockPreference;
+    wakePreference: PlannerSleepClockPreference;
   };
   morningPreparationMinutes: number;
   recovery: {
@@ -167,9 +191,10 @@ export type PlannerSleepEvent = {
   plannedStartAt?: string;
   plannedEndAt?: string;
   plannedDurationMinutes?: number;
-  selectionReason?: "preference" | "workload" | "hard_deadline" | "recovery" | "manual";
+  selectionReason?: "preference" | "workload" | "hard_deadline" | "recovery" | "manual" | "activation_transition";
   borrowedMinutes?: number;
   recoveryNight?: boolean;
+  transitionNight?: boolean;
   createdAt?: string;
   updatedAt?: string;
 };
@@ -187,9 +212,10 @@ export type PlannerSleepBlock = {
   selectedDurationMinutes: number;
   preferredDurationMatched: boolean;
   borrowedMinutes: number;
-  selectionReason: "preference" | "workload" | "hard_deadline" | "recovery" | "manual";
+  selectionReason: "preference" | "workload" | "hard_deadline" | "recovery" | "manual" | "activation_transition";
   tentative?: boolean;
   recoveryNight?: boolean;
+  transitionNight?: boolean;
   fixed: true;
   locked: true;
   kind: "sleep";
@@ -318,6 +344,16 @@ export type PlannerProposalChange =
     }
   | {
       id: string;
+      kind: "update_block_status";
+      blockId: string;
+      title: string;
+      status: PlannerBlockStatus;
+      actualStartAt?: string;
+      actualEndAt?: string;
+      reason: string;
+    }
+  | {
+      id: string;
       kind: "upsert_sleep_event";
       event: PlannerSleepEvent;
       reason: string;
@@ -409,6 +445,7 @@ export type PlannerSleepPlanSummary = {
   preferredDurationMatched: boolean;
   borrowedMinutes: number;
   reason: PlannerSleepEvent["selectionReason"];
+  transitionNight?: boolean;
 };
 
 export type PlannerProposal = {
@@ -425,12 +462,14 @@ export type PlannerProposal = {
   normalizedDraft?: PlannerDraft;
   normalizedDrafts?: PlannerDraft[];
   blockExtension?: PlannerProposalInput["blockExtension"];
+  missedOccurrence?: PlannerProposalInput["missedOccurrence"];
   changes: PlannerProposalChange[];
   conflicts: PlannerConflict[];
   unplaced: PlannerUnplaced[];
   effectiveFocus?: PlannerPlanningFocus;
   deadlineAnalysis?: PlannerDeadlineAnalysis[];
   sleepPlan?: PlannerSleepPlanSummary[];
+  effectiveFromAt?: string;
   horizonStart: string;
   horizonEnd: string;
   recoveryAdvice?: {
@@ -497,6 +536,12 @@ export type PlannerProposalInput = {
   blockExtension?: {
     blockId: string;
     minutes: number;
+  };
+  missedOccurrence?: {
+    blockId: string;
+    disposition: Exclude<PlannerMissedOccurrencePolicy, "ask">;
+    rememberPolicy?: boolean;
+    revisedRemainingMinutes?: number;
   };
 };
 

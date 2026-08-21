@@ -188,8 +188,8 @@ create table if not exists public.planner_sleep_events (
   estimated_start_to_at timestamptz null,
   planned_start_at timestamptz null,
   planned_end_at timestamptz null,
-  planned_duration_minutes integer null check (planned_duration_minutes is null or planned_duration_minutes between 360 and 900),
-  selection_reason text null check (selection_reason is null or selection_reason in ('preference', 'workload', 'hard_deadline', 'recovery', 'manual')),
+  planned_duration_minutes integer null check (planned_duration_minutes is null or planned_duration_minutes between 15 and 960),
+  selection_reason text null check (selection_reason is null or selection_reason in ('preference', 'workload', 'hard_deadline', 'recovery', 'manual', 'activation_transition')),
   borrowed_minutes integer not null default 0 check (borrowed_minutes between 0 and 120),
   restedness text null check (restedness is null or restedness in ('not_rested', 'okay', 'well_rested')),
   sleepiness_level integer null check (sleepiness_level is null or sleepiness_level between 0 and 4),
@@ -243,11 +243,12 @@ alter table public.planner_sleep_events drop constraint if exists planner_sleep_
 alter table public.planner_sleep_events add constraint planner_sleep_events_restedness_check
   check (restedness is null or restedness in ('not_rested', 'okay', 'well_rested'));
 alter table public.planner_sleep_events drop constraint if exists planner_sleep_events_planned_duration_check;
+alter table public.planner_sleep_events drop constraint if exists planner_sleep_events_planned_duration_minutes_check;
 alter table public.planner_sleep_events add constraint planner_sleep_events_planned_duration_check
-  check (planned_duration_minutes is null or planned_duration_minutes between 360 and 900);
+  check (planned_duration_minutes is null or planned_duration_minutes between 15 and 960);
 alter table public.planner_sleep_events drop constraint if exists planner_sleep_events_selection_reason_check;
 alter table public.planner_sleep_events add constraint planner_sleep_events_selection_reason_check
-  check (selection_reason is null or selection_reason in ('preference', 'workload', 'hard_deadline', 'recovery', 'manual'));
+  check (selection_reason is null or selection_reason in ('preference', 'workload', 'hard_deadline', 'recovery', 'manual', 'activation_transition'));
 alter table public.planner_sleep_events drop constraint if exists planner_sleep_events_borrowed_minutes_check;
 alter table public.planner_sleep_events add constraint planner_sleep_events_borrowed_minutes_check
   check (borrowed_minutes between 0 and 120);

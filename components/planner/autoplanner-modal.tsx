@@ -29,11 +29,20 @@ import {
   type PlannerProposalInput,
   type PlannerSleepParseResult,
   type PlannerSleepSchedule,
+  type PlannerSleepClockPreference,
   type PlannerWakeAnchorReason,
   type PlannerWakeDayPart,
 } from "@/lib/planner/types";
 import { plannerMinutesToTime, plannerTimeToMinutes } from "@/lib/planner/time";
 import styles from "./planner-workspace.module.css";
+
+type SleepClockDraft = {
+  mode: PlannerSleepClockPreference["mode"];
+  time: string;
+  toleranceMinutes: string;
+  notBefore: string;
+  notAfter: string;
+};
 
 type AssistantDraft = {
   timezone: string;
@@ -50,6 +59,11 @@ type AssistantDraft = {
   adaptiveExactDurations: number[];
   planningFocus: "sleep" | "work";
   wakeDayPart: PlannerWakeDayPart;
+  bedtimeClock: SleepClockDraft;
+  wakeClock: SleepClockDraft;
+  weekendBedtimeClock: SleepClockDraft;
+  weekendWakeClock: SleepClockDraft;
+  windDownMinutes: string;
   morningPreparationMinutes: string;
   healthyMinimumConfirmed: boolean;
   commitments: PlannerStructuredCommitment[];
@@ -58,7 +72,7 @@ type AssistantDraft = {
   tasks: string;
 };
 
-const STORAGE_KEY = "itemkey.planner.autoplanner.v3";
+const STORAGE_KEY = "itemkey.planner.autoplanner.v4";
 const LEGACY_STORAGE_KEY = "itemkey.planner.autoplanner.v2";
 
 function initialDraft(profile: PlannerProfile, neutralEnergy = false): AssistantDraft {
@@ -69,13 +83,23 @@ function initialDraft(profile: PlannerProfile, neutralEnergy = false): Assistant
   const highEnergyOffset = highEnergy
     ? (plannerTimeToMinutes(highEnergy.start) - wakeMinute + 24 * 60) % (24 * 60)
     : undefined;
+  const clockDraft = (preference: PlannerSleepClockPreference | undefined, fallback: string): SleepClockDraft => ({
+    mode: preference?.mode ?? "approximate",
+    time: preference?.time ?? fallback,
+    toleranceMinutes: String(preference?.toleranceMinutes ?? 60),
+    notBefore: preference?.notBefore ?? "",
+    notAfter: preference?.notAfter ?? "",
+  });
+  const bedtimePreference = adaptive?.bedtimePreference;
+  const wakePreference = adaptive?.wakePreference;
+  const weekendOverride = adaptive?.weekendOverride;
   return {
     timezone: profile.timezone,
     sleepMode: profile.sleepSchedule.mode,
     sleepText: "",
     weekdayBedtime: fixed.weekdays.bedtime,
     weekdayDuration: String(fixed.weekdays.durationMinutes),
-    separateWeekend: fixed.weekends.bedtime !== fixed.weekdays.bedtime
+    separateWeekend: Boolean(adaptive?.weekendOverride) || fixed.weekends.bedtime !== fixed.weekdays.bedtime
       || fixed.weekends.durationMinutes !== fixed.weekdays.durationMinutes,
     weekendBedtime: fixed.weekends.bedtime,
     weekendDuration: String(fixed.weekends.durationMinutes),
@@ -87,12 +111,28 @@ function initialDraft(profile: PlannerProfile, neutralEnergy = false): Assistant
       : [7 * 60, 9 * 60],
     planningFocus: profile.planningPolicy.focus,
     wakeDayPart: adaptive?.wakeAnchor.dayPart ?? "morning",
+    bedtimeClock: clockDraft(bedtimePreference, fixed.weekdays.bedtime),
+    wakeClock: clockDraft(wakePreference, plannerMinutesToTime(wakeMinute)),
+    weekendBedtimeClock: clockDraft(weekendOverride?.bedtimePreference ?? bedtimePreference, fixed.weekends.bedtime),
+    weekendWakeClock: clockDraft(weekendOverride?.wakePreference ?? wakePreference, plannerMinutesToTime(plannerTimeToMinutes(fixed.weekends.bedtime) + fixed.weekends.durationMinutes)),
+    windDownMinutes: String(adaptive?.windDownMinutes ?? 30),
     morningPreparationMinutes: String(adaptive?.morningPreparationMinutes ?? 60),
     healthyMinimumConfirmed: !adaptive?.requiresHealthyMinimumConfirmation,
     commitments: [],
     energy: neutralEnergy || highEnergyOffset === undefined ? "auto" : highEnergyOffset < 3 * 60 ? "morning" : highEnergyOffset < 8 * 60 ? "day" : "evening",
     reserve: String(Math.round(profile.reserveRatio * 100)),
     tasks: "",
+  };
+}
+
+function clockPreference(value: SleepClockDraft): PlannerSleepClockPreference {
+  return {
+    mode: value.mode,
+    ...(value.mode === "exact" || value.mode === "approximate" ? { time: value.time } : {}),
+    ...(value.mode === "approximate" ? { toleranceMinutes: Number(value.toleranceMinutes) || 60 } : {}),
+    ...(value.notBefore ? { notBefore: value.notBefore } : {}),
+    ...(value.notAfter ? { notAfter: value.notAfter } : {}),
+    source: value.mode === "any" ? "neutral_default" : "user",
   };
 }
 
@@ -106,6 +146,13 @@ function scheduleFromDraft(value: AssistantDraft, commitments: PlannerDraft[] = 
       morningPreparationMinutes: Number(value.morningPreparationMinutes) || 60,
       commitments,
       healthyMinimumConfirmed: value.healthyMinimumConfirmed,
+      bedtimePreference: clockPreference(value.bedtimeClock),
+      wakePreference: clockPreference(value.wakeClock),
+      windDownMinutes: Number(value.windDownMinutes) || 30,
+      weekendOverride: value.separateWeekend ? {
+        bedtimePreference: clockPreference(value.weekendBedtimeClock),
+        wakePreference: clockPreference(value.weekendWakeClock),
+      } : undefined,
     });
   }
   const weekday = {
@@ -135,17 +182,6 @@ function energyWindows(value: AssistantDraft, commitments: PlannerDraft[]): Plan
   return windows.filter((window) => window.start !== window.end);
 }
 
-const WAKE_OPTIONS: Array<{
-  value: PlannerWakeDayPart;
-  ru: { title: string; detail: string };
-  en: { title: string; detail: string };
-}> = [
-  { value: "early_morning", ru: { title: "Раннее утро", detail: "06:30–08:00 · ориентир 07:30" }, en: { title: "Early morning", detail: "06:30–08:00 · starts at 07:30" } },
-  { value: "morning", ru: { title: "Утро", detail: "08:00–10:00 · ориентир 09:00" }, en: { title: "Morning", detail: "08:00–10:00 · starts at 09:00" } },
-  { value: "late_morning", ru: { title: "Ближе к полудню", detail: "10:00–12:00 · ориентир 11:00" }, en: { title: "Near noon", detail: "10:00–12:00 · starts at 11:00" } },
-  { value: "auto", ru: { title: "Без разницы — выбери сам", detail: "Стабильный подъём по обязательствам и нагрузке" }, en: { title: "No preference — choose for me", detail: "A stable wake time based on commitments and workload" } },
-];
-
 function wakeReasonText(reason: PlannerWakeAnchorReason | undefined, ru: boolean): string {
   if (!reason) return ru ? "Время выбрано как осторожная стартовая точка." : "This time is a cautious starting point.";
   if (reason.code === "recurring_commitment") return ru
@@ -154,6 +190,9 @@ function wakeReasonText(reason: PlannerWakeAnchorReason | undefined, ru: boolean
   if (reason.code === "plan_fit") return ru
     ? `Это время оставляет больше подходящих окон для дел${reason.relatedTitle ? `, включая «${reason.relatedTitle}»` : ""}, без ежедневных скачков режима.`
     : `This time leaves better task slots${reason.relatedTitle ? `, including “${reason.relatedTitle}”` : ""}, without daily schedule jumps.`;
+  if (reason.code === "sleep_history") return ru
+    ? "Ориентир взят из медианы последних фактических подъёмов; переходные и восстановительные ночи не учитываются."
+    : "The baseline comes from the median of recent actual wake-ups; transition and recovery nights are excluded.";
   if (reason.code === "fixed_conflict") return ru
     ? "Безопасного варианта пока нет: защищённый сон конфликтует с постоянным обязательством. Конфликт будет показан перед применением."
     : "There is no safe option yet: protected sleep conflicts with a recurring commitment. The conflict will be shown before applying.";
@@ -170,6 +209,40 @@ function ModalFrame({ title, children, onClose, locale }: { title: string; child
     <header><h2>{title}</h2>{onClose && <button type="button" onClick={onClose} aria-label={locale === "ru" ? "Закрыть" : "Close"}>×</button>}</header>
     {children}
   </section></div>;
+}
+
+function SleepClockEditor({ title, value, onChange, locale }: {
+  title: string;
+  value: SleepClockDraft;
+  onChange: (value: SleepClockDraft) => void;
+  locale: Locale;
+}) {
+  const ru = locale === "ru";
+  const patch = (next: Partial<SleepClockDraft>) => onChange({ ...value, ...next });
+  const modes: Array<{ value: SleepClockDraft["mode"]; ru: string; en: string }> = [
+    { value: "exact", ru: "Точно", en: "Exact" },
+    { value: "approximate", ru: "Примерно", en: "Approximate" },
+    { value: "range", ru: "Допустимый диапазон", en: "Allowed range" },
+    { value: "any", ru: "Без разницы — выбери сам", en: "No preference — choose for me" },
+  ];
+  const showBounds = value.mode === "range" || value.mode === "approximate" || value.mode === "any";
+  return <fieldset className={styles.ratingField}>
+    <legend>{title}</legend>
+    <div className={styles.segmented}>{modes.map((mode) => <button type="button" key={mode.value} className={value.mode === mode.value ? styles.segmentedActive : ""} aria-pressed={value.mode === mode.value} onClick={() => patch({ mode: mode.value })}>{ru ? mode.ru : mode.en}</button>)}</div>
+    {(value.mode === "exact" || value.mode === "approximate") && <label>{ru ? "Обычное время" : "Usual time"}<input type="time" required value={value.time} onChange={(event) => patch({ time: event.target.value })} /></label>}
+    {value.mode === "approximate" && <DurationInput label={ru ? "Допустимое отклонение в каждую сторону" : "Tolerance in either direction"} valueMinutes={value.toleranceMinutes} minMinutes={15} maxMinutes={180} minuteStep={15} locale={locale} onChangeMinutes={(minutes) => patch({ toleranceMinutes: String(minutes) })} />}
+    {showBounds && <div className={styles.formGrid}>
+      <label>{ru ? "Не раньше (необязательно)" : "Not before (optional)"}<input type="time" required={value.mode === "range"} value={value.notBefore} onChange={(event) => patch({ notBefore: event.target.value })} /></label>
+      <label>{ru ? "Не позже (необязательно)" : "Not after (optional)"}<input type="time" required={value.mode === "range"} value={value.notAfter} onChange={(event) => patch({ notAfter: event.target.value })} /></label>
+    </div>}
+    <small>{value.mode === "exact"
+      ? (ru ? "Жёсткое ограничение." : "Hard constraint.")
+      : value.mode === "range"
+        ? (ru ? "Планировщик не выйдет за эти границы." : "The planner stays inside these bounds.")
+        : value.mode === "approximate"
+          ? (ru ? "Мягкое предпочтение; границы ниже остаются жёсткими." : "Soft preference; optional bounds remain hard.")
+          : (ru ? "Без мягкого предпочтения; при необходимости можно оставить только жёсткие границы." : "No soft preference; optional hard bounds may still be set.")}</small>
+  </fieldset>;
 }
 
 export default function AutoplannerModal({
@@ -227,6 +300,10 @@ export default function AutoplannerModal({
         timer = window.setTimeout(() => setValue((current) => ({
           ...current,
           ...restored,
+          bedtimeClock: { ...current.bedtimeClock, ...(restored.bedtimeClock ?? {}) },
+          wakeClock: { ...current.wakeClock, ...(restored.wakeClock ?? {}) },
+          weekendBedtimeClock: { ...current.weekendBedtimeClock, ...(restored.weekendBedtimeClock ?? {}) },
+          weekendWakeClock: { ...current.weekendWakeClock, ...(restored.weekendWakeClock ?? {}) },
           energy: restored.energy === "morning" || restored.energy === "day" || restored.energy === "evening"
             ? restored.energy
             : "auto",
@@ -264,7 +341,7 @@ export default function AutoplannerModal({
       energyWindows: energyWindows(value, planningDrafts),
       reserveRatio: Math.min(0.6, Math.max(0, Number(value.reserve) / 100 || 0.2)),
       planningPolicy: { ...profile.planningPolicy, focus: value.planningFocus },
-      assistantSetupVersion: 4,
+      assistantSetupVersion: 5,
       onboardingCompleted: true,
     };
   }, [planningDrafts, profile.planningPolicy, value]);
@@ -276,7 +353,10 @@ export default function AutoplannerModal({
     try {
       const result = await onParseSleep(value.sleepText);
       if (result.mode) update("sleepMode", result.mode);
-      if (result.bedtime) update("weekdayBedtime", result.bedtime);
+      if (result.bedtime) {
+        update("weekdayBedtime", result.bedtime);
+        update("bedtimeClock", { ...value.bedtimeClock, mode: "approximate", time: result.bedtime });
+      }
       if (result.durationMinutes) update("weekdayDuration", String(result.durationMinutes));
       if (result.durationRange) {
         update("adaptiveDurationMode", "range");
@@ -290,7 +370,11 @@ export default function AutoplannerModal({
         update("healthyMinimumConfirmed", result.exactDurationsMinutes.some((minutes) => minutes >= 7 * 60));
       }
       if (result.planningFocus) update("planningFocus", result.planningFocus);
-      if (result.wakeDayPart) update("wakeDayPart", result.wakeDayPart);
+      if (result.wakeDayPart) {
+        update("wakeDayPart", result.wakeDayPart);
+        const wakeTime = result.wakeDayPart === "auto" ? "09:00" : result.wakeDayPart === "early_morning" ? "07:30" : result.wakeDayPart === "late_morning" ? "11:00" : "09:00";
+        update("wakeClock", { ...value.wakeClock, mode: result.wakeDayPart === "auto" ? "any" : "approximate", time: wakeTime });
+      }
       if (result.ambiguities.length) setLocalError(ru
         ? result.ambiguities.join(" ")
         : "Confirm both the regular bedtime and the usual sleep duration below.");
@@ -433,11 +517,15 @@ export default function AutoplannerModal({
             <button type="button" className={value.planningFocus === "sleep" ? styles.segmentedActive : ""} onClick={() => { update("planningFocus", "sleep"); setProfileChanged(true); }}>{ru ? "Сон важнее" : "Sleep first"}<small>{ru ? "Сон — абсолютное ограничение" : "Sleep is an absolute constraint"}</small></button>
             <button type="button" className={value.planningFocus === "work" ? styles.segmentedActive : ""} onClick={() => { update("planningFocus", "work"); setProfileChanged(true); }}>{ru ? "Дедлайны важнее" : "Deadlines first"}<small>{ru ? "Иногда короче, затем восстановление" : "Sometimes shorter, followed by recovery"}</small></button>
           </div>
-          <div><p className={styles.fieldTitle}>{ru ? "Когда удобнее вставать?" : "When is waking up most comfortable?"}</p><p className={styles.fieldHelp}>{ru ? "Это предпочтительный диапазон, а не жёсткий будильник. Конкретный подъём будет показан и объяснён перед применением." : "This is a preferred range, not a strict alarm. The exact wake time will be shown and explained before anything is applied."}</p><div className={styles.wakeChoices}>{WAKE_OPTIONS.map((option) => {
-            const copy = ru ? option.ru : option.en;
-            return <button type="button" key={option.value} className={value.wakeDayPart === option.value ? styles.segmentedActive : ""} aria-pressed={value.wakeDayPart === option.value} onClick={() => { update("wakeDayPart", option.value); setProfileChanged(true); }}><strong>{copy.title}</strong><small>{copy.detail}</small></button>;
-          })}</div></div>
-          <div className={styles.wakePreview} aria-live="polite"><span>{ru ? "Предварительный режим" : "Preliminary schedule"}</span><strong>{ru ? "Подъём" : "Wake"} {draftWakeTime} · {ru ? "сон с" : "sleep from"} {draftSleepRule.bedtime}</strong><p>{wakeReasonText(draftSleepSchedule.mode === "adaptive" ? draftSleepSchedule.wakeAnchor.selectionReason : undefined, ru)}</p>{value.wakeDayPart === "auto" && <small>{ru ? "Окончательный автовыбор появится после анализа постоянных обязательств и списка дел." : "The final automatic choice appears after recurring commitments and tasks are analyzed."}</small>}</div>
+          <SleepClockEditor title={ru ? "Когда вы обычно засыпаете?" : "When do you usually fall asleep?"} value={value.bedtimeClock} locale={locale} onChange={(clock) => { update("bedtimeClock", clock); setProfileChanged(true); }} />
+          <SleepClockEditor title={ru ? "Когда вы обычно просыпаетесь?" : "When do you usually wake up?"} value={value.wakeClock} locale={locale} onChange={(clock) => { update("wakeClock", clock); update("wakeDayPart", clock.mode === "any" ? "auto" : "morning"); setProfileChanged(true); }} />
+          <DurationInput label={ru ? "От решения лечь до фактического сна" : "From deciding to sleep until falling asleep"} valueMinutes={value.windDownMinutes} minMinutes={0} maxMinutes={240} minuteStep={5} locale={locale} onChangeMinutes={(minutes) => { update("windDownMinutes", String(minutes)); setProfileChanged(true); }} />
+          <label className={styles.choiceCheck}><input type="checkbox" checked={value.separateWeekend} onChange={(event) => { update("separateWeekend", event.target.checked); setProfileChanged(true); }} />{ru ? "На выходных сон и подъём отличаются" : "Use different sleep and wake preferences on weekends"}</label>
+          {value.separateWeekend && <>
+            <SleepClockEditor title={ru ? "Засыпание перед выходными" : "Weekend bedtime"} value={value.weekendBedtimeClock} locale={locale} onChange={(clock) => { update("weekendBedtimeClock", clock); setProfileChanged(true); }} />
+            <SleepClockEditor title={ru ? "Подъём в выходные" : "Weekend wake-up"} value={value.weekendWakeClock} locale={locale} onChange={(clock) => { update("weekendWakeClock", clock); setProfileChanged(true); }} />
+          </>}
+          <div className={styles.wakePreview} aria-live="polite"><span>{ru ? "Обычный ориентир" : "Usual baseline"}</span><strong>{ru ? "Подъём" : "Wake"} {draftWakeTime} · {ru ? "сон с" : "sleep from"} {draftSleepRule.bedtime}</strong><p>{value.wakeClock.mode === "any" ? (ru ? "Без истории используется нейтральный подъём 09:00. Обычные гибкие дела не сдвинут его раньше." : "Without history the neutral wake-up is 09:00. Ordinary flexible work will not move it earlier.") : (ru ? "Точное время и допустимые границы жёсткие; примерное время остаётся мягким предпочтением." : "Exact time and allowed bounds are hard; approximate time remains a soft preference.")}</p></div>
           {healthyMinimumNeedsConfirmation && <label className={styles.choiceCheck}><input type="checkbox" checked={value.healthyMinimumConfirmed} onChange={(event) => update("healthyMinimumConfirmed", event.target.checked)} />{ru ? "Все указанные варианты короче 7 часов. Я согласен использовать 7 часов как пробную цель; для регулярного более короткого сна перейду в ручной режим." : "All options are below 7 hours. Use 7 hours as a trial target; regular shorter sleep requires manual mode."}</label>}
         </>}
       </section>}

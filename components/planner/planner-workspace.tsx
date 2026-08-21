@@ -36,6 +36,7 @@ import {
   type PlannerHorizon,
   type PlannerItem,
   type PlannerItemKind,
+  type PlannerMissedOccurrencePolicy,
   type PlannerPriority,
   type PlannerProfile,
   type PlannerProposal,
@@ -60,7 +61,7 @@ import {
 import styles from "./planner-workspace.module.css";
 
 type PlannerView = "day" | "week" | "month" | "agenda";
-type Modal = "quick" | "item" | "proposal" | "settings" | "stats" | "import" | "assistant" | "sleep" | "hierarchy" | null;
+type Modal = "quick" | "item" | "proposal" | "settings" | "stats" | "import" | "assistant" | "sleep" | "hierarchy" | "missed" | null;
 type CalendarBlock = PlannerBlock | PlannerSleepBlock;
 
 function isSleepBlock(block: CalendarBlock): block is PlannerSleepBlock {
@@ -532,6 +533,7 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
   const [quickTrigger, setQuickTrigger] = useState<PlannerProposal["trigger"]>("quick_add");
   const [itemForm, setItemForm] = useState(() => defaultItemForm(selectedDate));
   const [proposal, setProposal] = useState<PlannerProposal | null>(null);
+  const [missedBlock, setMissedBlock] = useState<PlannerBlock | null>(null);
   const [legacySources, setLegacySources] = useState<LegacySource[]>([]);
   const [legacyLoading, setLegacyLoading] = useState(initialLegacyImport);
   const [now, setNow] = useState(() => new Date());
@@ -706,6 +708,7 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
       trigger: current.trigger,
       rebuildFuture: current.trigger === "sleep_changed" || current.trigger === "assistant_setup" || current.trigger === "assistant_update",
       blockExtension: current.blockExtension,
+      missedOccurrence: current.missedOccurrence,
     };
   }
 
@@ -736,6 +739,21 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
   }
 
   async function blockAction(block: PlannerBlock, action: string, minutes?: number) {
+    if (action === "skip") {
+      const item = block.itemId ? items.find((candidate) => candidate.id === block.itemId) : undefined;
+      const remembered = item?.uncertaintyPolicy.missedOccurrencePolicy;
+      if (remembered && remembered !== "ask") {
+        await run(() => createProposal({
+          trigger: "plans_changed",
+          rebuildFuture: true,
+          missedOccurrence: { blockId: block.id, disposition: remembered },
+        }));
+      } else {
+        setMissedBlock(block);
+        setModal("missed");
+      }
+      return true;
+    }
     let succeeded = false;
     await run(async () => {
       await api(`/api/planner/blocks/${encodeURIComponent(block.id)}/action`, { method: "POST", body: JSON.stringify({ action, minutes, expectedRevision: profile.revision }) });
@@ -893,7 +911,7 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
   if (loading) return <div className={styles.loading}>Собираем ваш план…</div>;
   if (!data) return <div className={styles.fatal}><p>{error}</p><button onClick={() => void load()}>Повторить</button></div>;
 
-  const showAssistantSetup = profile.assistantSetupVersion < 4 && modal !== "proposal" && modal !== "import";
+  const showAssistantSetup = profile.assistantSetupVersion < 5 && modal !== "proposal" && modal !== "import";
 
   return (
     <main className={styles.root}>
@@ -1057,6 +1075,14 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
         })}
       />}
       {modal === "sleep" && <SleepChangedModal profile={profile} locale={locale} busy={busy} initialMode={sleepModalMode} initialWakeDate={sleepModalWakeDate} onClose={() => setModal(null)} onSubmit={(sleepEvent: PlannerSleepEvent) => run(() => createProposal({ sleepEvent, trigger: "sleep_changed", rebuildFuture: Boolean(sleepEvent.actualStartAt) }))} onCheckIn={checkInSleep} onParseFeedback={(textValue) => api<PlannerSleepParseResult>("/api/planner/assistant/parse", { method: "POST", body: JSON.stringify({ mode: "sleep", text: textValue }) })} />}
+      {modal === "missed" && missedBlock && <MissedOccurrenceModal
+        block={missedBlock}
+        item={missedBlock.itemId ? items.find((item) => item.id === missedBlock.itemId) : undefined}
+        locale={locale}
+        busy={busy}
+        onClose={() => { setMissedBlock(null); setModal(null); }}
+        onReview={(missedOccurrence) => run(() => createProposal({ trigger: "plans_changed", rebuildFuture: true, missedOccurrence }))}
+      />}
       {modal === "quick" && <QuickModal command={quickCommand} setCommand={setQuickCommand} onSubmit={submitQuick} onClose={() => setModal(null)} trigger={quickTrigger} busy={busy} locale={locale} />}
       {modal === "item" && <ItemModal value={itemForm} setValue={setItemForm} items={items} profile={profile} now={now} onSubmit={submitItem} onClose={() => setModal(null)} busy={busy} locale={locale} />}
       {modal === "hierarchy" && <PlannerHierarchyModal items={items} locale={locale} busy={busy} onClose={() => setModal(null)} onReview={(drafts) => run(() => createProposal({ drafts, trigger: "plans_changed", rebuildFuture: true }))} />}
@@ -1114,7 +1140,7 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
           if (!await blockAction(block, "pause")) return;
           await run(() => createProposal(replayProposalInput(proposal)));
         }} />}
-      {modal === "settings" && <SettingsModal profile={profile} locale={locale} busy={busy} onClose={() => setModal(null)} onSave={(profilePatch) => run(() => createProposal({ profilePatch, trigger: "assistant_update", rebuildFuture: true }))} />}
+      {modal === "settings" && <SettingsModal profile={profile} locale={locale} busy={busy} onClose={() => setModal(null)} onOpenSleepSettings={() => setModal("assistant")} onSave={(profilePatch) => run(() => createProposal({ profilePatch, trigger: "assistant_update", rebuildFuture: true }))} />}
       {modal === "stats" && <StatsModal blocks={blocks} items={items} profile={profile} locale={locale} onClose={() => setModal(null)} />}
       {modal === "import" && <LegacyImportModal key={legacySources.map((source) => `${source.sourceKey}:${source.alreadyImported}`).join("|")} sources={legacySources} locale={locale} busy={busy} loading={legacyLoading} onClose={() => setModal(null)} onImport={importLegacy} />}
     </main>
@@ -1380,9 +1406,43 @@ function PlannerHierarchyModal({ items, locale, busy, onClose, onReview }: {
   </ModalShell>;
 }
 
+function MissedOccurrenceModal({ block, item, locale, busy, onClose, onReview }: {
+  block: PlannerBlock;
+  item?: PlannerItem;
+  locale: Locale;
+  busy: boolean;
+  onClose: () => void;
+  onReview: (value: NonNullable<PlannerProposalInput["missedOccurrence"]>) => Promise<void>;
+}) {
+  const ru = locale === "ru";
+  const suggested: Exclude<PlannerMissedOccurrencePolicy, "ask"> = item?.uncertaintyPolicy.outcomeMode === "deliverable"
+    ? "carry_remaining"
+    : "cancel_occurrence";
+  const [disposition, setDisposition] = useState<Exclude<PlannerMissedOccurrencePolicy, "ask">>(suggested);
+  const [rememberPolicy, setRememberPolicy] = useState(false);
+  const [remainingMinutes, setRemainingMinutes] = useState(String(item?.estimateMinutes ?? isoDurationMinutes(block.startAt, block.endAt)));
+  return <ModalShell title={ru ? "Что делать с пропущенным делом?" : "What should happen to this missed item?"} onClose={onClose} locale={locale}>
+    <div className={styles.form}>
+      <p className={styles.modalLead}>{ru
+        ? `«${block.title}» не будет отмечено долгом автоматически. Сначала выберите реальный смысл пропуска.`
+        : `“${block.title}” will not silently become debt. Choose what the missed occurrence means.`}</p>
+      <div className={styles.assistantChoices}>
+        <button type="button" className={disposition === "carry_remaining" ? styles.segmentedActive : ""} onClick={() => setDisposition("carry_remaining")}><strong>{ru ? "Перенести оставшуюся работу" : "Carry remaining work"}</strong><small>{ru ? "Вернуть объём в будущий план" : "Return the volume to the future plan"}</small></button>
+        <button type="button" className={disposition === "cancel_occurrence" ? styles.segmentedActive : ""} onClick={() => setDisposition("cancel_occurrence")}><strong>{ru ? "Отменить только это выполнение" : "Cancel this occurrence"}</strong><small>{ru ? "Следующие повторения останутся" : "Future occurrences remain"}</small></button>
+        <button type="button" className={disposition === "reestimate_total" ? styles.segmentedActive : ""} onClick={() => setDisposition("reestimate_total")}><strong>{ru ? "Уточнить общий остаток" : "Re-estimate total"}</strong><small>{ru ? "Задать, сколько работы осталось сейчас" : "Enter how much work remains now"}</small></button>
+      </div>
+      {disposition === "reestimate_total" && <DurationInput label={ru ? "Теперь осталось" : "Remaining now"} valueMinutes={remainingMinutes} minMinutes={5} maxMinutes={600_000} minuteStep={5} locale={locale} onChangeMinutes={(minutes) => setRemainingMinutes(String(minutes))} />}
+      {item && <label className={styles.choiceCheck}><input type="checkbox" checked={rememberPolicy} onChange={(event) => setRememberPolicy(event.target.checked)} />{ru ? "Запомнить этот выбор только для данного дела" : "Remember this choice for this item"}</label>}
+      <p className={styles.fieldHelp}>{ru ? "На следующем экране будут только затронутые переносы. Пока ничего не изменится." : "The next screen previews affected moves. Nothing changes yet."}</p>
+      <div className={styles.modalActions}><button type="button" onClick={onClose}>{ru ? "Не пропускать" : "Keep item"}</button><button type="button" className={styles.primaryButton} disabled={busy} onClick={() => void onReview({ blockId: block.id, disposition, rememberPolicy, revisedRemainingMinutes: disposition === "reestimate_total" ? Number(remainingMinutes) : undefined })}>{ru ? "Показать последствия" : "Review consequences"}</button></div>
+    </div>
+  </ModalShell>;
+}
+
 function proposalChangeReason(change: PlannerProposal["changes"][number], locale: Locale): string {
   if (locale === "ru") return change.reason;
   if (change.kind === "update_profile") return "Planner settings were confirmed in the reviewed assistant flow.";
+  if (change.kind === "update_block_status") return "The missed occurrence was recorded with the selected carry or cancellation rule.";
   if (change.kind === "upsert_sleep_event") return "This night was adjusted without changing the regular sleep schedule.";
   if (change.kind === "add_item") return "The new item was confirmed from the reviewed form.";
   if (change.kind === "update_item") return change.item.unplacedReason
@@ -1397,6 +1457,7 @@ function proposalChangeReason(change: PlannerProposal["changes"][number], locale
 
 function proposalChangeTitle(change: PlannerProposal["changes"][number], locale: Locale): string {
   if (change.kind === "update_profile") return locale === "ru" ? "Настройки плана" : "Planner settings";
+  if (change.kind === "update_block_status") return change.title;
   if (change.kind === "upsert_sleep_event") return locale === "ru" ? `Сон перед ${change.event.wakeDate}` : `Sleep before ${change.event.wakeDate}`;
   if (change.kind === "add_block") return change.block.title;
   if (change.kind === "move_block" || change.kind === "remove_block") return change.title;
@@ -1413,6 +1474,9 @@ function wakeDecisionReason(proposal: PlannerProposal, locale: Locale): string {
   if (reason.code === "plan_fit") return ru
     ? `Этот устойчивый подъём оставляет более подходящие окна для нагрузки${reason.relatedTitle ? `, включая «${reason.relatedTitle}»` : ""}. Размещено ${formatDuration(reason.placedMinutes ?? 0, locale)}, останется в очереди ${formatDuration(reason.unplacedMinutes ?? 0, locale)}.`
     : `This stable wake time leaves better workload slots${reason.relatedTitle ? `, including “${reason.relatedTitle}”` : ""}. ${formatDuration(reason.placedMinutes ?? 0, locale)} placed; ${formatDuration(reason.unplacedMinutes ?? 0, locale)} remains in the inbox.`;
+  if (reason.code === "sleep_history") return ru
+    ? "Подъём выбран по медиане последних фактических ночей. Переходные и восстановительные ночи не влияют на этот ориентир."
+    : "Wake-up follows the median of recent actual nights. Transition and recovery nights do not affect it.";
   if (reason.code === "fixed_conflict") return ru
     ? "Защищённый сон конфликтует с постоянным обязательством. План нельзя применить, пока вы не измените вводные."
     : "Protected sleep conflicts with a recurring commitment. The plan cannot be applied until the input is changed.";
@@ -1427,18 +1491,64 @@ function ProposalModal({ proposal, profile, locale, busy, onClose, onApply, onEd
   onAddRecoveryNap: (nap: NonNullable<PlannerProposal["recoveryAdvice"]>["nap"] & {}) => Promise<void>;
   onSwitchFocus: (focus: "sleep" | "work") => Promise<void>;
 }) {
+  const [showAllChanges, setShowAllChanges] = useState(false);
+  const compact = proposal.trigger === "sleep_changed" || Boolean(proposal.missedOccurrence);
+  const activation = new Date(proposal.effectiveFromAt ?? zonedPlannerDateTimeToUtc(proposal.horizonStart, "00:00", profile.timezone));
+  const activationDate = formatDateInTimeZone(activation, profile.timezone);
+  const compactEnd = addPlannerDays(activationDate, 1);
+  const changeDate = (change: PlannerProposal["changes"][number]): string | undefined => {
+    const at = change.kind === "add_block" ? change.block.startAt
+      : change.kind === "move_block" ? change.toStartAt
+        : change.kind === "upsert_sleep_event" ? change.event.actualStartAt ?? change.event.plannedStartAt
+          : undefined;
+    return at ? formatDateInTimeZone(new Date(at), profile.timezone) : undefined;
+  };
+  const scopedChanges = compact && !showAllChanges
+    ? proposal.changes.filter((change) => !changeDate(change) || changeDate(change)! <= compactEnd)
+    : proposal.changes;
+  const groupedChanges = scopedChanges.reduce<Array<{ change: PlannerProposal["changes"][number]; count: number }>>((groups, change) => {
+    if (change.kind !== "add_block" || !change.block.soft) return [...groups, { change, count: 1 }];
+    const date = localDate(change.block, profile.timezone);
+    const existing = groups.find((group) => group.change.kind === "add_block"
+      && group.change.block.soft
+      && group.change.block.itemId === change.block.itemId
+      && group.change.block.role === change.block.role
+      && localDate(group.change.block, profile.timezone) === date);
+    if (existing) existing.count += 1;
+    else groups.push({ change, count: 1 });
+    return groups;
+  }, []);
+  const hiddenChanges = proposal.changes.length - scopedChanges.length;
+  const nextWork = proposal.changes.flatMap((change) => change.kind === "add_block" && !change.block.soft && new Date(change.block.startAt) >= activation ? [change.block] : [])
+    .sort((left, right) => left.startAt.localeCompare(right.startAt))[0];
+  const proposedProfile = proposal.changes.find((change) => change.kind === "update_profile");
+  const proposedSchedule = proposedProfile?.kind === "update_profile" ? proposedProfile.profile.sleepSchedule : profile.sleepSchedule;
+  const wakePreferenceLabel = proposedSchedule.mode === "adaptive"
+    ? proposedSchedule.wakePreference.source === "history"
+      ? (locale === "ru" ? "по фактической истории сна" : "from actual sleep history")
+      : proposedSchedule.wakePreference.source === "commitment"
+        ? (locale === "ru" ? "из-за фиксированного обязательства" : "from a fixed commitment")
+        : proposedSchedule.wakePreference.mode === "exact"
+          ? (locale === "ru" ? "точное время пользователя" : "user exact time")
+          : proposedSchedule.wakePreference.mode === "range"
+            ? (locale === "ru" ? "в жёстком диапазоне пользователя" : "inside the user's hard range")
+            : proposedSchedule.wakePreference.mode === "approximate"
+              ? (locale === "ru" ? "примерное время пользователя" : "user approximate time")
+              : (locale === "ru" ? "нейтральный автоматический выбор" : "neutral automatic choice")
+    : (locale === "ru" ? "фиксированный режим" : "fixed schedule");
   return <ModalShell title={locale === "ru" ? "Предпросмотр нового плана" : "Plan preview"} onClose={onClose} locale={locale}>
     <div className={styles.proposal}>
+      <section className={styles.wakeDecision}><span>{locale === "ru" ? "План начинается с реальной текущей ситуации" : "The plan starts from real life now"}</span><div><strong>{formatDay(activationDate, locale)} · {formatTimeInTimeZone(activation, profile.timezone)}</strong>{nextWork && <strong>{locale === "ru" ? "Первое дело" : "First item"}: {nextWork.title} · {formatTimeInTimeZone(new Date(nextWork.startAt), profile.timezone)}</strong>}</div><p>{locale === "ru" ? "Время до этого момента не считается долгом. Разовые проекты и жёсткие сроки сохраняют свой реальный оставшийся объём." : "Time before this instant is not debt. One-time projects and hard deadlines keep their real remaining volume."}</p></section>
       {proposal.normalizedDraft && <section className={styles.parsed}><span>{locale === "ru" ? "Распознано — проверьте перед созданием" : "Parsed — review before creating"}</span><strong>{proposal.normalizedDraft.title}</strong><p>{kindLabel[locale][proposal.normalizedDraft.kind ?? "flexible_task"]} · {formatDuration(proposal.normalizedDraft.estimateMinutes ?? 60, locale)}{proposal.normalizedDraft.date ? ` · ${formatDay(proposal.normalizedDraft.date, locale)}` : ""}{proposal.normalizedDraft.start ? ` · ${proposal.normalizedDraft.start}` : ""}{proposal.normalizedDraft.end ? `–${proposal.normalizedDraft.end}` : ""} · {locale === "ru" ? "приоритет" : "priority"}: {priorityLabel[locale][proposal.normalizedDraft.priority ?? "normal"]}</p><button onClick={onEdit}>{locale === "ru" ? "Изменить поля" : "Edit fields"}</button></section>}
       {proposal.wakeAnchorDecision && <section className={styles.wakeDecision}><span>{locale === "ru" ? "Автоматически выбран устойчивый режим" : "Stable schedule selected automatically"}</span><div><strong>{locale === "ru" ? "Подъём" : "Wake"} {proposal.wakeAnchorDecision.wakeTime}</strong><strong>{locale === "ru" ? "Сон с" : "Sleep from"} {proposal.wakeAnchorDecision.bedtime}</strong><strong>{formatDuration(proposal.wakeAnchorDecision.targetDurationMinutes, locale)}</strong></div><p>{wakeDecisionReason(proposal, locale)}</p><small>{locale === "ru" ? `Проверено вариантов: ${proposal.wakeAnchorDecision.candidatesEvaluated}. Диапазон сна: ${formatDuration(proposal.wakeAnchorDecision.durationRange.minMinutes, locale)}–${formatDuration(proposal.wakeAnchorDecision.durationRange.maxMinutes, locale)}. Это предложение ещё не применено.` : `${proposal.wakeAnchorDecision.candidatesEvaluated} options checked. Sleep range: ${formatDuration(proposal.wakeAnchorDecision.durationRange.minMinutes, locale)}–${formatDuration(proposal.wakeAnchorDecision.durationRange.maxMinutes, locale)}. This proposal has not been applied.`}</small></section>}
       {proposal.effectiveFocus && <section className={styles.focusOverride}><h3>{locale === "ru" ? "Приоритет только для этого предпросмотра" : "Priority for this preview only"}</h3><p>{locale === "ru" ? "Переключение пересчитает предложение, но не изменит постоянную настройку." : "Switching recalculates this proposal without changing your saved preference."}</p><div className={styles.segmented}><button type="button" disabled={busy} className={proposal.effectiveFocus === "sleep" ? styles.segmentedActive : ""} onClick={() => void onSwitchFocus("sleep")}>{locale === "ru" ? "Сон важнее" : "Sleep first"}</button><button type="button" disabled={busy} className={proposal.effectiveFocus === "work" ? styles.segmentedActive : ""} onClick={() => void onSwitchFocus("work")}>{locale === "ru" ? "Дедлайны важнее" : "Deadlines first"}</button></div></section>}
-      {proposal.sleepPlan?.length ? <section><h3>{locale === "ru" ? "Защищённый сон" : "Protected sleep"}</h3><div className={styles.sleepPlanList}>{proposal.sleepPlan.map((night) => <article key={night.wakeDate}><strong>{night.wakeDate} · {formatDuration(night.durationMinutes, locale)}</strong><span>{night.borrowedMinutes > 0 ? (locale === "ru" ? `Сокращение на ${formatDuration(night.borrowedMinutes, locale)} ради жёсткого срока` : `${formatDuration(night.borrowedMinutes, locale)} borrowed for a hard deadline`) : night.reason === "workload" ? (locale === "ru" ? "Более короткий допустимый вариант улучшает план" : "A shorter allowed option improves the plan") : night.reason === "recovery" ? (locale === "ru" ? "Восстановительная ночь" : "Recovery night") : (locale === "ru" ? "Предпочтительный вариант" : "Preferred option")}</span><small>{formatTimeInTimeZone(new Date(night.startAt), profile.timezone)}–{formatTimeInTimeZone(new Date(night.endAt), profile.timezone)}</small></article>)}</div></section> : null}
+      {proposal.sleepPlan?.length ? <section><h3>{locale === "ru" ? "Защищённый сон" : "Protected sleep"}</h3><p className={styles.fieldHelp}>{locale === "ru" ? "Источник подъёма" : "Wake-up source"}: {wakePreferenceLabel}</p><div className={styles.sleepPlanList}>{proposal.sleepPlan.map((night) => <article key={night.wakeDate}><strong>{night.wakeDate} · {formatDuration(night.durationMinutes, locale)}</strong><span>{night.transitionNight ? (locale === "ru" ? `Переходная ночь: обычное время уже прошло, поэтому сон начинается только после подготовки. Долг и восстановительный штраф не создаются.${night.durationMinutes < profile.planningPolicy.minimumNightMinutes ? " Эта ночь короче вашего защищённого минимума; применение плана подтверждает это только один раз." : ""}` : `Transition night: the usual bedtime has passed, so sleep starts after wind-down. No debt or recovery penalty is created.${night.durationMinutes < profile.planningPolicy.minimumNightMinutes ? " This night is below your protected minimum; applying confirms it once only." : ""}`) : night.borrowedMinutes > 0 ? (locale === "ru" ? `Сокращение на ${formatDuration(night.borrowedMinutes, locale)} ради жёсткого срока` : `${formatDuration(night.borrowedMinutes, locale)} borrowed for a hard deadline`) : night.reason === "workload" ? (locale === "ru" ? "Более короткий допустимый вариант улучшает план" : "A shorter allowed option improves the plan") : night.reason === "recovery" ? (locale === "ru" ? "Восстановительная ночь" : "Recovery night") : (locale === "ru" ? "Предпочтительный вариант" : "Preferred option")}</span><small>{formatTimeInTimeZone(new Date(night.startAt), profile.timezone)}–{formatTimeInTimeZone(new Date(night.endAt), profile.timezone)}</small></article>)}</div></section> : null}
       {proposal.deadlineAnalysis?.length ? <section><h3>{locale === "ru" ? "Сроки и риск" : "Deadlines and risk"}</h3><div className={styles.deadlineList}>{proposal.deadlineAnalysis.map((entry) => <article key={entry.itemId} data-risk={entry.risk}><div><strong>{entry.title}</strong><span>{entry.risk === "on_track" ? (locale === "ru" ? "Успеваем" : "On track") : entry.risk === "tight" ? (locale === "ru" ? "Плотно" : "Tight") : entry.risk === "at_risk" ? (locale === "ru" ? "Под угрозой" : "At risk") : (locale === "ru" ? "Физически не помещается" : "Cannot physically fit")}</span></div><p>{locale === "ru" ? "Внутренняя цель" : "Internal target"}: {formatDay(formatDateInTimeZone(new Date(entry.targetFinishAt), profile.timezone), locale)} {formatTimeInTimeZone(new Date(entry.targetFinishAt), profile.timezone)} · {locale === "ru" ? "жёсткий срок" : "deadline"}: {formatDay(formatDateInTimeZone(new Date(entry.deadlineAt), profile.timezone), locale)} {formatTimeInTimeZone(new Date(entry.deadlineAt), profile.timezone)}</p><small>{locale === "ru" ? "Осталось работы" : "Work remaining"}: {formatDuration(entry.remainingMinutes, locale)} · {locale === "ru" ? "доступно" : "available"}: {formatDuration(entry.availableMinutes, locale)}{entry.latestSafeStartAt ? ` · ${locale === "ru" ? "последний безопасный старт" : "latest safe start"}: ${formatDay(formatDateInTimeZone(new Date(entry.latestSafeStartAt), profile.timezone), locale)} ${formatTimeInTimeZone(new Date(entry.latestSafeStartAt), profile.timezone)}` : ""}</small>{entry.likelyScenario && entry.maximumScenario && <small>{locale === "ru" ? "Обычный сценарий" : "Likely scenario"}: {entry.likelyScenario.risk} · {locale === "ru" ? "максимальный сценарий" : "maximum scenario"}: {entry.maximumScenario.risk} ({formatDuration(entry.maximumScenario.remainingMinutes, locale)})</small>}{entry.nextItemTitle && <p>{locale === "ru" ? "Следом" : "Next"}: {entry.nextItemTitle}</p>}</article>)}</div></section> : null}
       {proposal.conflicts.length > 0 && <section className={styles.conflicts}><h3>{locale === "ru" ? "Нужно ваше решение" : "Your decision is needed"}</h3>{proposal.conflicts.map((conflict) => <article key={conflict.id}><strong>{conflict.title}</strong><p>{locale === "ru" ? conflict.message : conflict.kind === "active_overlap" ? "The protected time overlaps work already in progress. Pause it, finish first, or edit the new input." : conflict.blockIds.some((id) => id.startsWith("sleep-")) ? "A fixed event overlaps protected sleep. Edit the event or sleep input." : "Two fixed events overlap and cannot be moved automatically."}</p>{conflict.kind === "active_overlap" ? <div><button onClick={() => void onPause(conflict.blockIds[0])}>{locale === "ru" ? "Поставить текущее на паузу" : "Pause current"}</button><button onClick={() => void onFinishFirst(conflict.blockIds[0], conflict.blockIds[1])}>{locale === "ru" ? "Закончить текущее сначала" : "Finish current first"}</button><button onClick={onEdit}>{proposal.trigger === "sleep_changed" ? (locale === "ru" ? "Исправить сон" : "Edit sleep") : (locale === "ru" ? "Изменить вводные" : "Edit input")}</button></div> : <div><button onClick={onEdit}>{locale === "ru" ? "Исправить конфликт" : "Edit conflict"}</button></div>}</article>)}</section>}
-      <section><h3>{locale === "ru" ? "Изменения" : "Changes"}</h3><div className={styles.changeList}>{proposal.changes.map((change) => <article key={change.id}>
-        <span>{change.kind === "add_block" ? "+" : change.kind === "move_block" ? "→" : change.kind === "remove_block" ? "−" : change.kind === "upsert_sleep_event" ? "■" : "•"}</span>
-        <div><strong>{proposalChangeTitle(change, locale)}</strong><p>{proposalChangeReason(change, locale)}</p>{change.kind === "add_block" && <small>{formatDay(localDate(change.block, profile.timezone), locale)} · {formatTimeInTimeZone(new Date(change.block.startAt), profile.timezone)}–{formatTimeInTimeZone(new Date(change.block.endAt), profile.timezone)}</small>}{change.kind === "move_block" && <small>{formatTimeInTimeZone(new Date(change.fromStartAt), profile.timezone)} → {formatDay(formatDateInTimeZone(new Date(change.toStartAt), profile.timezone), locale)} {formatTimeInTimeZone(new Date(change.toStartAt), profile.timezone)}</small>}{change.kind === "upsert_sleep_event" && <small>{change.event.plannedStartAt && change.event.plannedEndAt ? `${locale === "ru" ? "запланировано" : "planned"} · ${formatTimeInTimeZone(new Date(change.event.plannedStartAt), profile.timezone)}–${formatTimeInTimeZone(new Date(change.event.plannedEndAt), profile.timezone)} · ${formatDuration(change.event.plannedDurationMinutes ?? isoDurationMinutes(change.event.plannedStartAt, change.event.plannedEndAt), locale)}` : change.event.actualStartAt && (change.event.actualEndAt ?? change.event.projectedEndAt) ? `${change.event.state === "tentative" ? (locale === "ru" ? "предварительно · " : "tentative · ") : ""}${formatTimeInTimeZone(new Date(change.event.actualStartAt), profile.timezone)}–${formatTimeInTimeZone(new Date(change.event.actualEndAt ?? change.event.projectedEndAt!), profile.timezone)}` : (locale === "ru" ? "Время неизвестно: расписание пока не перестраивается" : "Time unknown: schedule is not rebuilt yet")}</small>}</div>
-      </article>)}</div></section>
+      <section><h3>{compact ? (locale === "ru" ? "Изменения сегодня и завтра" : "Changes today and tomorrow") : (locale === "ru" ? "Изменения" : "Changes")}</h3><div className={styles.changeList}>{groupedChanges.map(({ change, count }) => <article key={change.id}>
+        <span>{change.kind === "add_block" ? "+" : change.kind === "move_block" ? "→" : change.kind === "remove_block" ? "−" : change.kind === "upsert_sleep_event" || change.kind === "update_block_status" ? "■" : "•"}</span>
+        <div><strong>{proposalChangeTitle(change, locale)}{count > 1 ? ` ×${count}` : ""}</strong><p>{proposalChangeReason(change, locale)}</p>{change.kind === "add_block" && <small>{formatDay(localDate(change.block, profile.timezone), locale)} · {formatTimeInTimeZone(new Date(change.block.startAt), profile.timezone)}–{formatTimeInTimeZone(new Date(change.block.endAt), profile.timezone)}</small>}{change.kind === "move_block" && <small>{formatTimeInTimeZone(new Date(change.fromStartAt), profile.timezone)} → {formatDay(formatDateInTimeZone(new Date(change.toStartAt), profile.timezone), locale)} {formatTimeInTimeZone(new Date(change.toStartAt), profile.timezone)}</small>}{change.kind === "upsert_sleep_event" && <small>{change.event.plannedStartAt && change.event.plannedEndAt ? `${locale === "ru" ? "запланировано" : "planned"} · ${formatTimeInTimeZone(new Date(change.event.plannedStartAt), profile.timezone)}–${formatTimeInTimeZone(new Date(change.event.plannedEndAt), profile.timezone)} · ${formatDuration(change.event.plannedDurationMinutes ?? isoDurationMinutes(change.event.plannedStartAt, change.event.plannedEndAt), locale)}` : change.event.actualStartAt && (change.event.actualEndAt ?? change.event.projectedEndAt) ? `${change.event.state === "tentative" ? (locale === "ru" ? "предварительно · " : "tentative · ") : ""}${formatTimeInTimeZone(new Date(change.event.actualStartAt), profile.timezone)}–${formatTimeInTimeZone(new Date(change.event.actualEndAt ?? change.event.projectedEndAt!), profile.timezone)}` : (locale === "ru" ? "Время неизвестно: расписание пока не перестраивается" : "Time unknown: schedule is not rebuilt yet")}</small>}</div>
+      </article>)}</div>{compact && (hiddenChanges > 0 || showAllChanges) && <button type="button" onClick={() => setShowAllChanges((current) => !current)}>{showAllChanges ? (locale === "ru" ? "Скрыть дальние изменения" : "Hide later changes") : (locale === "ru" ? `Показать ещё ${hiddenChanges}` : `Show ${hiddenChanges} later changes`)}</button>}</section>
       {proposal.unplaced.length > 0 && <section className={styles.unplaced}><h3>{locale === "ru" ? "Останется в очереди" : "Will stay in inbox"}</h3>{proposal.unplaced.map((item, index) => <article key={`${item.itemId}-${item.remainingMinutes}-${index}`}><strong>{item.title} · {formatDuration(item.remainingMinutes, locale)}</strong><p>{locale === "ru" ? item.reason : "No free slot satisfies availability, buffers and the protected reserve. The duration was not shortened."}</p></article>)}</section>}
       {proposal.recoveryAdvice && <section className={styles.recoveryPanel}><h3>{locale === "ru" ? "Восстановление" : "Recovery"}</h3><p>{locale === "ru" ? `Недосып относительно цели: ${formatDuration(proposal.recoveryAdvice.deficitMinutes, locale)}. Дополнительное время распределяется максимум на ${proposal.recoveryAdvice.recoveryNights} ночи.` : `Sleep below target: ${formatDuration(proposal.recoveryAdvice.deficitMinutes, locale)}. Extra sleep opportunity is spread across up to ${proposal.recoveryAdvice.recoveryNights} nights.`}</p>{proposal.recoveryAdvice.nap ? <article><strong>{locale === "ru" ? "Можно добавить короткий сон" : "A short nap is available"}</strong><small>{formatDay(formatDateInTimeZone(new Date(proposal.recoveryAdvice.nap.startAt), profile.timezone), locale)} · {formatTimeInTimeZone(new Date(proposal.recoveryAdvice.nap.startAt), profile.timezone)}–{formatTimeInTimeZone(new Date(proposal.recoveryAdvice.nap.endAt), profile.timezone)}</small><p>{locale === "ru" ? proposal.recoveryAdvice.nap.reason : "The slot ends before 15:00 and stays at least six hours away from night sleep."}</p><button type="button" onClick={() => void onAddRecoveryNap(proposal.recoveryAdvice!.nap!)}>{locale === "ru" ? "Добавить в этот план" : "Add to this plan"}</button></article> : <p>{locale === "ru" ? "Безопасного окна для короткого дневного сна сейчас нет — оно не будет добавлено автоматически." : "There is no suitable short-nap window, so none will be added automatically."}</p>}</section>}
       <div className={styles.modalActions}><button onClick={onClose}>{locale === "ru" ? "Не применять" : "Cancel"}</button><button className={styles.primaryButton} disabled={busy || proposal.conflicts.length > 0} onClick={() => void onApply()}>{locale === "ru" ? "Применить весь план" : "Apply full plan"}</button></div>
@@ -1446,7 +1556,7 @@ function ProposalModal({ proposal, profile, locale, busy, onClose, onApply, onEd
   </ModalShell>;
 }
 
-function SettingsModal({ profile, locale, busy, onClose, onSave }: { profile: PlannerProfile; locale: Locale; busy: boolean; onClose: () => void; onSave: (patch: Partial<PlannerProfile>) => Promise<void> }) {
+function SettingsModal({ profile, locale, busy, onClose, onOpenSleepSettings, onSave }: { profile: PlannerProfile; locale: Locale; busy: boolean; onClose: () => void; onOpenSleepSettings: () => void; onSave: (patch: Partial<PlannerProfile>) => Promise<void> }) {
   const fixedSleep = fixedScheduleView(profile.sleepSchedule);
   const [sleepTouched, setSleepTouched] = useState(false);
   const [availabilityTouched, setAvailabilityTouched] = useState(false);
@@ -1480,11 +1590,11 @@ function SettingsModal({ profile, locale, busy, onClose, onSave }: { profile: Pl
       ? { mode: "fixed" as const, weekdays: { bedtime: form.weekdayBedtime, durationMinutes: Number(form.weekdaySleep) }, weekends: { bedtime: form.weekendBedtime, durationMinutes: Number(form.weekendSleep) } }
       : profile.sleepSchedule;
     void onSave({ timezone: form.timezone, horizon: form.horizon, reserveRatio: Number(form.reserve) / 100, defaultBufferMinutes: Number(form.buffer), availability: sleepTouched && !availabilityTouched ? availabilityFromSleepSchedule(sleepSchedule) : form.availability, energyWindows: form.energyWindows, sleepSchedule });
-  }}>{profile.sleepSchedule.mode === "adaptive" && <p className={styles.sleepHint}>{locale === "ru" ? "Сейчас включён адаптивный сон. Изменение точных полей ниже переключит режим на фиксированный; остальные настройки можно менять без переключения." : "Adaptive sleep is active. Editing the exact sleep fields below switches to fixed mode; other settings keep adaptive mode."}</p>}<div className={styles.formGrid}>
+  }}>{profile.sleepSchedule.mode === "adaptive" && <div className={styles.fieldExplanation}><strong>{locale === "ru" ? "Адаптивный сон" : "Adaptive sleep"}</strong><p>{locale === "ru" ? "Точное, примерное, диапазонное и нейтральное время сна и подъёма настраиваются в отдельном понятном экране." : "Exact, approximate, ranged and neutral bedtime and wake-up preferences use the dedicated sleep editor."}</p><button type="button" onClick={onOpenSleepSettings}>{locale === "ru" ? "Изменить сон и подъём" : "Edit sleep and wake-up"}</button></div>}<div className={styles.formGrid}>
     <label>{locale === "ru" ? "Часовой пояс" : "Time zone"}<input value={form.timezone} onChange={(e) => setForm((v) => ({ ...v, timezone: e.target.value }))} /></label><label>{locale === "ru" ? "Горизонт" : "Horizon"}<select value={form.horizon} onChange={(e) => setForm((v) => ({ ...v, horizon: e.target.value as PlannerHorizon }))}><option value="week">{locale === "ru" ? "7 дней" : "7 days"}</option><option value="two_weeks">{locale === "ru" ? "14 дней" : "14 days"}</option><option value="month">{locale === "ru" ? "30 дней" : "30 days"}</option></select></label>
     <label>{locale === "ru" ? "Резерв, %" : "Reserve, %"}<input type="number" min="0" max="60" value={form.reserve} onChange={(e) => setForm((v) => ({ ...v, reserve: e.target.value }))} /></label><DurationInput label={locale === "ru" ? "Буфер между делами" : "Buffer between items"} valueMinutes={form.buffer} maxMinutes={120} locale={locale} onChangeMinutes={(minutes) => setForm((value) => ({ ...value, buffer: String(minutes) }))} />
-    <label>{locale === "ru" ? "Сон перед буднями" : "Weekday bedtime"}<input type="time" value={form.weekdayBedtime} onChange={(e) => { setSleepTouched(true); setForm((v) => ({ ...v, weekdayBedtime: e.target.value })); }} /></label><DurationInput label={locale === "ru" ? "Длительность сна" : "Sleep duration"} valueMinutes={form.weekdaySleep} minMinutes={180} maxMinutes={960} minuteStep={15} locale={locale} onChangeMinutes={(minutes) => { setSleepTouched(true); setForm((value) => ({ ...value, weekdaySleep: String(minutes) })); }} />
-    <label>{locale === "ru" ? "Сон перед выходными" : "Weekend bedtime"}<input type="time" value={form.weekendBedtime} onChange={(e) => { setSleepTouched(true); setForm((v) => ({ ...v, weekendBedtime: e.target.value })); }} /></label><DurationInput label={locale === "ru" ? "Длительность сна" : "Sleep duration"} valueMinutes={form.weekendSleep} minMinutes={180} maxMinutes={960} minuteStep={15} locale={locale} onChangeMinutes={(minutes) => { setSleepTouched(true); setForm((value) => ({ ...value, weekendSleep: String(minutes) })); }} />
+    {profile.sleepSchedule.mode === "fixed" && <><label>{locale === "ru" ? "Сон перед буднями" : "Weekday bedtime"}<input type="time" value={form.weekdayBedtime} onChange={(e) => { setSleepTouched(true); setForm((v) => ({ ...v, weekdayBedtime: e.target.value })); }} /></label><DurationInput label={locale === "ru" ? "Длительность сна" : "Sleep duration"} valueMinutes={form.weekdaySleep} minMinutes={180} maxMinutes={960} minuteStep={15} locale={locale} onChangeMinutes={(minutes) => { setSleepTouched(true); setForm((value) => ({ ...value, weekdaySleep: String(minutes) })); }} />
+    <label>{locale === "ru" ? "Сон перед выходными" : "Weekend bedtime"}<input type="time" value={form.weekendBedtime} onChange={(e) => { setSleepTouched(true); setForm((v) => ({ ...v, weekendBedtime: e.target.value })); }} /></label><DurationInput label={locale === "ru" ? "Длительность сна" : "Sleep duration"} valueMinutes={form.weekendSleep} minMinutes={180} maxMinutes={960} minuteStep={15} locale={locale} onChangeMinutes={(minutes) => { setSleepTouched(true); setForm((value) => ({ ...value, weekendSleep: String(minutes) })); }} /></>}
   </div><details open><summary>{locale === "ru" ? "Доступные часы" : "Available hours"}</summary><div className={styles.availabilityRows}>{weekdays.map((label, index) => { const day = String(index + 1); const window = form.availability[day]?.[0] ?? { start: "08:00", end: "22:00" }; return <div key={day}><strong>{label}</strong><input type="time" value={window.start} onChange={(event) => updateAvailability(day, "start", event.target.value)} /><span>—</span><input type="time" value={window.end} onChange={(event) => updateAvailability(day, "end", event.target.value)} /></div>; })}</div></details>
   <details><summary>{locale === "ru" ? "Энергия в течение дня" : "Energy throughout the day"}</summary><div className={styles.energyRows}>{form.energyWindows.map((window, index) => <div key={window.energy}><strong>{window.energy === "high" ? (locale === "ru" ? "Высокая" : "High") : window.energy === "normal" ? (locale === "ru" ? "Обычная" : "Normal") : (locale === "ru" ? "Низкая" : "Low")}</strong><input type="time" value={window.start} onChange={(event) => updateEnergy(index, "start", event.target.value)} /><span>—</span><input type="time" value={window.end} onChange={(event) => updateEnergy(index, "end", event.target.value)} /></div>)}</div></details>
   <div className={styles.modalActions}><button type="button" onClick={onClose}>{locale === "ru" ? "Отмена" : "Cancel"}</button><button className={styles.primaryButton} disabled={busy}>{locale === "ru" ? "Сохранить" : "Save"}</button></div></form></ModalShell>;

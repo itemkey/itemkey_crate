@@ -161,6 +161,15 @@ async function ensurePlannerSchema(executor: SqlExecutor): Promise<void> {
       alter table if exists public.planner_items add constraint planner_items_buffer_after_minutes_check
         check (buffer_after_minutes between 0 and 1440)
     `);
+    await executor.query(`
+      alter table if exists public.planner_sleep_events drop constraint if exists planner_sleep_events_planned_duration_minutes_check;
+      alter table if exists public.planner_sleep_events drop constraint if exists planner_sleep_events_planned_duration_check;
+      alter table if exists public.planner_sleep_events add constraint planner_sleep_events_planned_duration_check
+        check (planned_duration_minutes is null or planned_duration_minutes between 15 and 960);
+      alter table if exists public.planner_sleep_events drop constraint if exists planner_sleep_events_selection_reason_check;
+      alter table if exists public.planner_sleep_events add constraint planner_sleep_events_selection_reason_check
+        check (selection_reason is null or selection_reason in ('preference', 'workload', 'hard_deadline', 'recovery', 'manual', 'activation_transition'))
+    `);
   })().catch((error) => {
     plannerSchemaPromise = null;
     throw error;
@@ -210,6 +219,7 @@ function sleepEventFromRow(row: SleepEventRow): PlannerSleepEvent {
     sleepinessLevel: row.sleepiness_level ?? undefined,
     feedbackText: row.feedback_text || undefined,
     recoveryNight: row.recovery_night,
+    transitionNight: row.selection_reason === "activation_transition",
     createdAt: toIso(row.created_at),
     updatedAt: toIso(row.updated_at),
   };

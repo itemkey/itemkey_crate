@@ -95,6 +95,7 @@ test("planner upgrade is idempotent and fresh installs include protected sleep",
   assert.match(plannerUpgrade, /add column if not exists soft/);
   assert.match(plannerUpgrade, /add column if not exists planned_duration_minutes/);
   assert.match(plannerUpgrade, /add column if not exists sleepiness_level/);
+  assert.match(plannerUpgrade, /activation_transition/);
   assert.match(plannerUpgrade, /planner_reset/);
   assert.doesNotMatch(plannerUpgrade, /drop table if exists public\.planner_(?:profiles|items|blocks|sleep_events)/);
   assert.match(freshSchema, /create table public\.planner_sleep_events/);
@@ -107,12 +108,15 @@ test("planner upgrade is idempotent and fresh installs include protected sleep",
   assert.match(freshSchema, /commitment_level text not null default 'required'/);
   assert.match(freshSchema, /role text not null default 'work'/);
   assert.match(freshSchema, /sleepiness_level integer null/);
+  assert.match(freshSchema, /activation_transition/);
 });
 
 test("planner store repairs additive schema changes before serving requests", () => {
   assert.match(store, /async function ensurePlannerSchema/);
   assert.match(store, /alter table if exists public\.planner_items/);
   assert.match(store, /add column if not exists allowed_windows/);
+  assert.match(store, /planner_sleep_events_selection_reason_check/);
+  assert.match(store, /activation_transition/);
   assert.match(store, /add column if not exists uncertainty_policy/);
   assert.match(store, /add column if not exists commitment_level/);
   assert.match(store, /add column if not exists role/);

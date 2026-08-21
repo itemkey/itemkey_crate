@@ -29,6 +29,7 @@ import {
   preferredSleepDurations,
   sleepDurationBounds,
   sleepWindowForWakeDate,
+  validateAdaptiveSleepSchedule,
 } from "./sleep.ts";
 import {
   addIsoMinutes,
@@ -128,6 +129,9 @@ export function normalizePlannerProfile(value: Partial<PlannerProfile>): Planner
     maxRollingSevenDayDeficitMinutes: 180,
     recoveryHorizonNights: 3,
     deadlineChainGapMinutes: rawPolicy?.deadlineChainGapMinutes === 0 || rawPolicy?.deadlineChainGapMinutes === 15 ? rawPolicy.deadlineChainGapMinutes : 5,
+    effectiveFromAt: rawPolicy?.effectiveFromAt && Number.isFinite(new Date(rawPolicy.effectiveFromAt).getTime())
+      ? new Date(rawPolicy.effectiveFromAt).toISOString()
+      : undefined,
   };
   return {
     userId: value.userId,
@@ -272,6 +276,11 @@ export function normalizePlannerItem(value: Partial<PlannerItem> & { id: string;
           : "normal" as const,
       };
     })() : undefined,
+    missedOccurrencePolicy: rawUncertainty?.missedOccurrencePolicy === "carry_remaining"
+      || rawUncertainty?.missedOccurrencePolicy === "cancel_occurrence"
+      || rawUncertainty?.missedOccurrencePolicy === "reestimate_total"
+      ? rawUncertainty.missedOccurrencePolicy
+      : rawUncertainty?.missedOccurrencePolicy === "ask" ? "ask" : undefined,
   };
   const normalizedCommitment = value.commitmentLevel === "must_not_skip" || value.commitmentLevel === "desired" || value.commitmentLevel === "if_time"
     ? value.commitmentLevel
@@ -941,11 +950,13 @@ function buildPlacementRequests(
   blocks: PlannerBlock[],
   startDate: string,
   endDate: string,
-  timezone: string
+  timezone: string,
+  effectiveFromAt?: string
 ): PlacementRequest[] {
   const requests: PlacementRequest[] = [];
   const activeBlocks = blocks.filter((block) => block.status !== "cancelled" && block.status !== "skipped" && !block.soft);
   const recurrenceBlocks = blocks.filter((block) => block.status !== "cancelled" && !block.soft);
+  const activationDate = effectiveFromAt ? formatDateInTimeZone(new Date(effectiveFromAt), timezone) : undefined;
   const mandatoryMinimum = (item: PlannerItem) => item.deadlineType === "hard"
     || item.commitmentLevel === "must_not_skip"
     || item.commitmentLevel === "required";
@@ -954,12 +965,20 @@ function buildPlacementRequests(
     occurrenceKey: string,
     alreadyPlanned: number,
     constraints: Pick<PlacementRequest, "targetDate" | "allowedDates">,
-    occurrenceTier?: "likely" | "extra"
+    occurrenceTier?: "likely" | "extra",
+    volumeScale = 1,
+    mandatoryOverride?: boolean
   ) => {
     const estimate = item.uncertaintyPolicy.duration;
+    const scaleMinutes = (minutes: number) => volumeScale === 1
+      ? minutes
+      : Math.max(0, Math.round(minutes * volumeScale / STEP_MINUTES) * STEP_MINUTES);
+    const scaledMinimum = scaleMinutes(estimate.minMinutes);
+    const scaledLikely = Math.max(scaledMinimum, scaleMinutes(estimate.likelyMinutes));
+    const scaledMaximum = Math.max(scaledLikely, scaleMinutes(estimate.maxMinutes));
     const role = estimate.mode === "unknown" ? "calibration" as const : "work" as const;
     if (occurrenceTier) {
-      const target = estimate.likelyMinutes;
+      const target = scaledLikely;
       const remaining = Math.max(0, target - alreadyPlanned);
       if (remaining > 0) requests.push({
         item,
@@ -973,18 +992,18 @@ function buildPlacementRequests(
       return;
     }
     const legacySpareMinimum = item.recurrence?.schedulingMode === "spare_time"
-      ? Math.min(estimate.minMinutes, item.recurrence.minimumMinutes ?? estimate.minMinutes)
-      : estimate.minMinutes;
+      ? Math.min(scaledMinimum, scaleMinutes(item.recurrence.minimumMinutes ?? estimate.minMinutes))
+      : scaledMinimum;
     const minimumRemaining = Math.max(0, legacySpareMinimum - alreadyPlanned);
-    const likelyRemaining = Math.max(0, estimate.likelyMinutes - Math.max(alreadyPlanned, legacySpareMinimum));
-    const reserveRemaining = Math.max(0, estimate.maxMinutes - Math.max(alreadyPlanned, estimate.likelyMinutes));
+    const likelyRemaining = Math.max(0, scaledLikely - Math.max(alreadyPlanned, legacySpareMinimum));
+    const reserveRemaining = Math.max(0, scaledMaximum - Math.max(alreadyPlanned, scaledLikely));
     if (minimumRemaining > 0) requests.push({
       item,
       occurrenceKey: estimate.mode === "exact" ? occurrenceKey : `${occurrenceKey}:minimum`,
       durationMinutes: minimumRemaining,
       tier: "minimum",
       role,
-      mandatory: mandatoryMinimum(item),
+      mandatory: mandatoryOverride ?? mandatoryMinimum(item),
       ...constraints,
     });
     if (likelyRemaining > 0) requests.push({
@@ -1005,6 +1024,30 @@ function buildPlacementRequests(
       mandatory: false,
       ...constraints,
     });
+  };
+  const partialPeriod = (item: PlannerItem, period: "week" | "month", periodKey: string): {
+    scale: number;
+    min: number;
+    likely: number;
+    max: number;
+  } => {
+    const policy = item.uncertaintyPolicy.recurrence;
+    if (!activationDate) return { scale: 1, min: policy.minOccurrences, likely: policy.likelyOccurrences, max: policy.maxOccurrences };
+    const activationKey = period === "month" ? activationDate.slice(0, 7) : calendarWeekStart(activationDate);
+    if (activationKey !== periodKey) return { scale: 1, min: policy.minOccurrences, likely: policy.likelyOccurrences, max: policy.maxOccurrences };
+    const periodStart = period === "month" ? `${periodKey}-01` : periodKey;
+    const periodStartDate = new Date(`${periodStart}T00:00:00Z`);
+    const nextMonth = new Date(Date.UTC(periodStartDate.getUTCFullYear(), periodStartDate.getUTCMonth() + 1, 1))
+      .toISOString().slice(0, 10);
+    const periodEnd = period === "month" ? addPlannerDays(nextMonth, -1) : addPlannerDays(periodStart, 6);
+    const eligible = getRoutineDates(item, periodStart, periodEnd)
+      .filter((date) => !policy.allowedWeekdays.length || policy.allowedWeekdays.includes(plannerWeekday(date)));
+    const remaining = eligible.filter((date) => date >= activationDate).length;
+    const scale = eligible.length ? remaining / eligible.length : 1;
+    const maximum = Math.min(remaining, Math.ceil(policy.maxOccurrences * scale));
+    const minimum = Math.min(maximum, Math.floor(policy.minOccurrences * scale));
+    const likely = Math.min(maximum, Math.max(minimum, Math.round(policy.likelyOccurrences * scale)));
+    return { scale, min: minimum, likely, max: maximum };
   };
   const datesInPolicyRange = (item: PlannerItem): string[] | undefined => {
     const policy = item.uncertaintyPolicy.date;
@@ -1056,19 +1099,20 @@ function buildPlacementRequests(
         continue;
       }
       for (const [periodKey, periodDates] of periods) {
-        const maximum = Math.min(policy.maxOccurrences, periodDates.length);
+        const partial = partialPeriod(item, policy.period, periodKey);
+        const maximum = Math.min(partial.max, periodDates.length);
         for (let index = 0; index < maximum; index += 1) {
           const occurrenceKey = `${item.id}:count:${periodKey}:${index + 1}`;
           const targetDate = periodDates[Math.min(periodDates.length - 1, Math.floor(index * periodDates.length / Math.max(1, maximum)))];
           const alreadyPlanned = recurrenceBlocks
             .filter((block) => block.itemId === item.id && block.occurrenceKey?.startsWith(occurrenceKey))
             .reduce((sum, block) => sum + accountedBlockMinutes(block), 0);
-          const occurrenceTier = index < policy.minOccurrences
+          const occurrenceTier = index < partial.min
             ? undefined
-            : index < policy.likelyOccurrences
+            : index < partial.likely
               ? "likely" as const
               : "extra" as const;
-          pushVolumeRequests(item, occurrenceKey, alreadyPlanned, { targetDate }, occurrenceTier);
+          pushVolumeRequests(item, occurrenceKey, alreadyPlanned, { targetDate }, occurrenceTier, 1, targetDate === activationDate ? false : undefined);
         }
       }
       continue;
@@ -1090,7 +1134,9 @@ function buildPlacementRequests(
               return monthly ? date.startsWith(periodKey) : calendarWeekStart(date) === periodKey;
             })
             .reduce((sum, block) => sum + accountedBlockMinutes(block), 0);
-          pushVolumeRequests(item, `${item.id}:cycle:${periodKey}`, alreadyPlanned, { allowedDates });
+          const partial = partialPeriod(item, monthly ? "month" : "week", periodKey);
+          const scale = item.uncertaintyPolicy.outcomeMode === "time_budget" ? partial.scale : 1;
+          pushVolumeRequests(item, `${item.id}:cycle:${periodKey}`, alreadyPlanned, { allowedDates }, undefined, scale);
         }
         continue;
       }
@@ -1099,7 +1145,7 @@ function buildPlacementRequests(
         const alreadyPlanned = recurrenceBlocks
           .filter((block) => block.itemId === item.id && blockLocalDate(block, timezone) === date)
           .reduce((sum, block) => sum + accountedBlockMinutes(block), 0);
-        pushVolumeRequests(item, key, alreadyPlanned, { targetDate: date });
+        pushVolumeRequests(item, key, alreadyPlanned, { targetDate: date }, undefined, 1, date === activationDate ? false : undefined);
       }
       continue;
     }
@@ -1359,23 +1405,37 @@ function recurringFixedBlocks(
 }
 
 function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposal {
+  const now = input.now ?? new Date();
+  const trigger = input.trigger ?? (input.command || input.draft || input.drafts?.length ? "quick_add" : "autoplan");
   const baseProfile = normalizePlannerProfile(input.profile);
+  const requestedProfilePatch = input.profilePatch && trigger === "assistant_setup"
+    ? {
+        ...input.profilePatch,
+        planningPolicy: {
+          ...baseProfile.planningPolicy,
+          ...input.profilePatch.planningPolicy,
+          effectiveFromAt: now.toISOString(),
+        },
+      }
+    : input.profilePatch;
   const storedProfile = normalizePlannerProfile({
     ...baseProfile,
-    ...(input.profilePatch ?? {}),
+    ...(requestedProfilePatch ?? {}),
     revision: baseProfile.revision,
   });
   const profile = input.calculationProfile
-    ? normalizePlannerProfile({ ...input.calculationProfile, revision: baseProfile.revision })
+    ? normalizePlannerProfile({
+        ...input.calculationProfile,
+        planningPolicy: storedProfile.planningPolicy,
+        revision: baseProfile.revision,
+      })
     : storedProfile;
   const effectiveFocus = input.planningFocusOverride ?? storedProfile.planningPolicy.focus;
   if (storedProfile.sleepSchedule.mode === "adaptive" && storedProfile.sleepSchedule.requiresHealthyMinimumConfirmation) {
     throw new Error("Подтвердите пробную цель 7 часов или выберите ручной фиксированный режим.");
   }
-  const now = input.now ?? new Date();
   const startDate = formatDateInTimeZone(now, profile.timezone);
   const endDate = addPlannerDays(startDate, horizonDays(profile.horizon) - 1);
-  const trigger = input.trigger ?? (input.command || input.draft || input.drafts?.length ? "quick_add" : "autoplan");
   const normalizedDrafts = input.drafts?.length
     ? input.drafts
     : input.draft
@@ -1390,8 +1450,19 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
   const items = input.items.map((item) => normalizePlannerItem(item));
   const movableBlocks = new Map<string, PlannerBlock>();
   let workingBlocks = [...input.blocks];
+  let carryMissedBlockId: string | undefined;
 
-  if (input.profilePatch) {
+  for (const [index, message] of validateAdaptiveSleepSchedule(storedProfile.sleepSchedule).entries()) {
+    conflicts.push({
+      id: uniqueId("sleep-settings", index, message),
+      kind: "fixed_overlap",
+      title: "Настройки сна противоречат друг другу",
+      message,
+      blockIds: [],
+    });
+  }
+
+  if (requestedProfilePatch) {
     changes.push({
       id: uniqueId("change-profile", baseProfile.revision, trigger),
       kind: "update_profile",
@@ -1425,17 +1496,19 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
       normalizedDraft,
       normalizedDrafts: normalizedDrafts.length > 1 ? normalizedDrafts : undefined,
       blockExtension: input.blockExtension,
+      missedOccurrence: input.missedOccurrence,
       changes,
       conflicts,
       unplaced,
       effectiveFocus,
+      effectiveFromAt: storedProfile.planningPolicy.effectiveFromAt ?? now.toISOString(),
       horizonStart: startDate,
       horizonEnd: endDate,
     };
   }
 
   const durationBounds = sleepDurationBounds(profile.sleepSchedule);
-  const calculatedSleepBlocks = buildPlannerSleepBlocks(profile, sleepEvents, startDate, endDate).map((block) => ({
+  const calculatedSleepBlocks = buildPlannerSleepBlocks(profile, sleepEvents, startDate, endDate, now).map((block) => ({
     ...block,
     selectionReason: input.calculatedSleepReason && block.selectionReason === "preference"
       ? input.calculatedSleepReason
@@ -1480,6 +1553,7 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
         selectionReason: block.selectionReason,
         borrowedMinutes: block.borrowedMinutes,
         recoveryNight: block.recoveryNight,
+        transitionNight: block.transitionNight,
       });
       changes.push({
         id: uniqueId("planned-sleep", block.wakeDate, block.selectedDurationMinutes),
@@ -1491,6 +1565,81 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
             ? "Выбран более короткий допустимый вариант сна, потому что он реально улучшает план."
             : "Выбранная длительность этой ночи зафиксирована в подтверждаемом плане.",
       });
+    }
+  }
+
+  if (input.missedOccurrence) {
+    const missed = workingBlocks.find((block) => block.id === input.missedOccurrence!.blockId);
+    if (!missed || missed.fixed && !missed.itemId || ["done", "skipped", "cancelled"].includes(missed.status)) {
+      throw new Error("Пропускаемое дело не найдено или уже завершено.");
+    }
+    const actualEndAt = now.toISOString();
+    workingBlocks = workingBlocks.map((block) => block.id === missed.id
+      ? { ...block, status: "skipped", actualEndAt }
+      : block);
+    changes.push({
+      id: uniqueId("skip", missed.id, input.missedOccurrence.disposition),
+      kind: "update_block_status",
+      blockId: missed.id,
+      title: missed.title,
+      status: "skipped",
+      actualStartAt: missed.actualStartAt,
+      actualEndAt,
+      reason: input.missedOccurrence.disposition === "cancel_occurrence"
+        ? "Отменено только это выполнение; оно не создаёт долг и не появится повторно."
+        : input.missedOccurrence.disposition === "reestimate_total"
+          ? "Выполнение пропущено, а общий оставшийся объём уточнён перед пересборкой."
+          : "Выполнение пропущено; оставшаяся работа возвращена в будущий план.",
+    });
+    carryMissedBlockId = input.missedOccurrence.disposition === "cancel_occurrence" ? undefined : missed.id;
+    const itemIndex = missed.itemId ? items.findIndex((item) => item.id === missed.itemId) : -1;
+    if (itemIndex >= 0) {
+      const currentItem = items[itemIndex];
+      let nextItem = currentItem;
+      if (input.missedOccurrence.disposition === "cancel_occurrence"
+        && currentItem.kind !== "routine"
+        && (!currentItem.recurrence || currentItem.recurrence.frequency === "once")) {
+        nextItem = { ...currentItem, status: "completed" };
+      }
+      if (input.missedOccurrence.disposition === "reestimate_total") {
+        const revised = Math.round(Number(input.missedOccurrence.revisedRemainingMinutes));
+        if (!Number.isFinite(revised) || revised < 5) throw new Error("Укажите новый оставшийся объём работы.");
+        nextItem = normalizePlannerItem({
+          ...currentItem,
+          estimateMinutes: revised,
+          uncertaintyPolicy: {
+            ...currentItem.uncertaintyPolicy,
+            duration: {
+              ...currentItem.uncertaintyPolicy.duration,
+              mode: "exact",
+              minMinutes: revised,
+              likelyMinutes: revised,
+              maxMinutes: revised,
+              source: "user",
+            },
+          },
+        });
+      }
+      if (input.missedOccurrence.rememberPolicy) {
+        nextItem = {
+          ...nextItem,
+          uncertaintyPolicy: {
+            ...nextItem.uncertaintyPolicy,
+            missedOccurrencePolicy: input.missedOccurrence.disposition,
+          },
+        };
+      }
+      if (nextItem !== currentItem) {
+        items[itemIndex] = nextItem;
+        changes.push({
+          id: uniqueId("missed-policy", nextItem.id, input.missedOccurrence.disposition),
+          kind: "update_item",
+          item: nextItem,
+          reason: input.missedOccurrence.rememberPolicy
+            ? "Выбранное действие сохранено как правило этого дела."
+            : "Общий оставшийся объём дела обновлён.",
+        });
+      }
     }
   }
 
@@ -1640,13 +1789,13 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
     const fixedBlocks = item.recurrence?.startTime
       ? recurringFixedBlocks(item, profile, startDate, endDate)
       : [blockFromDraft(draft, item, profile)].filter((block): block is PlannerBlock => Boolean(block));
-    fixedBlocks.forEach((block) => considerFixedBlock(block, item.recurrence
+    fixedBlocks.filter((block) => !item.recurrence?.startTime || new Date(block.endAt) > now).forEach((block) => considerFixedBlock(block, item.recurrence
       ? "Создано повторение постоянного обязательства."
       : "Фиксированное событие занимает выбранное время."));
   });
 
   for (const item of items.filter((candidate) => candidate.kind === "fixed_event" && candidate.recurrence?.startTime)) {
-    for (const block of recurringFixedBlocks(item, profile, startDate, endDate)) {
+    for (const block of recurringFixedBlocks(item, profile, startDate, endDate).filter((candidate) => new Date(candidate.endAt) > now)) {
       if (workingBlocks.some((candidate) => candidate.itemId === item.id && candidate.occurrenceKey === block.occurrenceKey)) continue;
       considerFixedBlock(block, "Добавлено недостающее повторение постоянного обязательства.");
     }
@@ -1696,10 +1845,11 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
 
   const requests = buildPlacementRequests(
     items,
-    [...workingBlocks, ...movableBlocks.values()],
+    [...workingBlocks.filter((block) => block.id !== carryMissedBlockId), ...movableBlocks.values()],
     startDate,
     endDate,
-    profile.timezone
+    profile.timezone,
+    storedProfile.planningPolicy.effectiveFromAt
   );
   for (const block of movableBlocks.values()) {
     const item = items.find((candidate) => candidate.id === block.itemId);
@@ -1946,6 +2096,7 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
     normalizedDraft,
     normalizedDrafts: normalizedDrafts.length > 1 ? normalizedDrafts : undefined,
     blockExtension: input.blockExtension,
+    missedOccurrence: input.missedOccurrence,
     changes,
     conflicts,
     unplaced,
@@ -1959,7 +2110,9 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
       preferredDurationMatched: block.preferredDurationMatched,
       borrowedMinutes: block.borrowedMinutes,
       reason: block.selectionReason,
+      transitionNight: block.transitionNight,
     })),
+    effectiveFromAt: storedProfile.planningPolicy.effectiveFromAt ?? now.toISOString(),
     horizonStart: startDate,
     horizonEnd: endDate,
     recoveryAdvice,
@@ -2205,9 +2358,10 @@ function autoWakeRequirement(
 function automaticWakeMinute(
   items: PlannerItem[],
   profile: PlannerProfile,
-  requirement?: { minute: number }
+  requirement?: { minute: number },
+  neutralMinute = 9 * 60
 ): number {
-  let selected = Math.min(9 * 60, requirement?.minute ?? 9 * 60);
+  let selected = Math.min(neutralMinute, requirement?.minute ?? neutralMinute);
   const beforeTask = (item: PlannerItem) => Math.max(profile.defaultBufferMinutes, plannerBufferBefore(item));
   const considerLatestBodyEnd = (item: PlannerItem, endMinute: number) => {
     const duration = item.commitmentLevel === "if_time"
@@ -2217,6 +2371,7 @@ function automaticWakeMinute(
   };
   for (const item of items) {
     if (item.status !== "active" || item.kind === "fixed_event") continue;
+    if (item.deadlineType !== "hard" && item.commitmentLevel !== "must_not_skip") continue;
     if (item.deadlineAt) {
       considerLatestBodyEnd(item, plannerTimeToMinutes(formatTimeInTimeZone(new Date(item.deadlineAt), profile.timezone)));
     }
@@ -2234,6 +2389,25 @@ function automaticWakeMinute(
   }
   const minimum = requirement && requirement.minute < 6 * 60 + 30 ? requirement.minute : 6 * 60 + 30;
   return Math.max(minimum, Math.floor(selected / STEP_MINUTES) * STEP_MINUTES);
+}
+
+function historicalWakeMinute(events: PlannerSleepEvent[], profile: PlannerProfile): number | undefined {
+  const values = events.flatMap((event) => {
+    const endAt = event.actualEndAt;
+    if (!endAt || event.recoveryNight || event.transitionNight) return [];
+    return [plannerTimeToMinutes(formatTimeInTimeZone(new Date(endAt), profile.timezone))];
+  }).slice(-14).sort((left, right) => left - right);
+  return values.length >= 3 ? values[Math.floor(values.length / 2)] : undefined;
+}
+
+function constrainWakeMinute(minute: number, schedule: Extract<PlannerProfile["sleepSchedule"], { mode: "adaptive" }>): number {
+  const preference = schedule.wakePreference;
+  const before = preference.notBefore ? plannerTimeToMinutes(preference.notBefore) : undefined;
+  const after = preference.notAfter ? plannerTimeToMinutes(preference.notAfter) : undefined;
+  if (before !== undefined && after !== undefined && before <= after) return clamp(minute, before, after);
+  if (before !== undefined && minute < before) return before;
+  if (after !== undefined && minute > after) return after;
+  return minute;
 }
 
 function candidateBlocks(proposal: PlannerProposal, input: PlannerEngineInput): PlannerBlock[] {
@@ -2312,7 +2486,7 @@ function resolveAutomaticWake(input: PlannerEngineInput): PlannerProposal | null
     revision: baseProfile.revision,
   });
   const schedule = requestedProfile.sleepSchedule;
-  if (schedule.mode !== "adaptive" || schedule.wakeAnchor.dayPart !== "auto") return null;
+  if (schedule.mode !== "adaptive" || schedule.wakePreference.mode !== "any") return null;
   const trigger = input.trigger ?? (input.command || input.draft || input.drafts?.length ? "quick_add" : "autoplan");
   const shouldResolve = Boolean(input.profilePatch?.sleepSchedule)
     || Boolean(input.rebuildFuture && ["autoplan", "assistant_setup", "assistant_update"].includes(trigger));
@@ -2353,7 +2527,12 @@ function resolveAutomaticWake(input: PlannerEngineInput): PlannerProposal | null
     const proposal = resolvePreferredSleepDuration({ ...input, profilePatch });
     return measureAutoWakeCandidate(minute, profilePatch, proposal, input);
   };
-  const candidates = [evaluateCandidate(automaticWakeMinute(planningItems, requestedProfile, requirement))];
+  const historyMinute = historicalWakeMinute(input.sleepEvents ?? [], requestedProfile);
+  const neutralMinute = historyMinute ?? 9 * 60;
+  const candidates = [evaluateCandidate(constrainWakeMinute(
+    automaticWakeMinute(planningItems, requestedProfile, requirement, neutralMinute),
+    schedule
+  ))];
   const selected = candidates[0];
   const mostImportantFlexible = planningItems.filter((item) => item.kind !== "fixed_event" && item.status === "active")
     .sort((left, right) => priorityWeight[right.priority] - priorityWeight[left.priority]
@@ -2376,6 +2555,12 @@ function resolveAutomaticWake(input: PlannerEngineInput): PlannerProposal | null
       placedMinutes: selected.placedMinutes,
       unplacedMinutes: selected.unplacedMinutes,
     };
+  } else if (historyMinute !== undefined && selected.minute === historyMinute) {
+    reason = {
+      code: "sleep_history",
+      placedMinutes: selected.placedMinutes,
+      unplacedMinutes: selected.unplacedMinutes,
+    };
   } else if (selected.minute === 9 * 60) {
     reason = {
       code: "auto_default",
@@ -2395,6 +2580,12 @@ function resolveAutomaticWake(input: PlannerEngineInput): PlannerProposal | null
   const finalSchedule = {
     ...selectedSchedule,
     wakeAnchor: { ...selectedSchedule.wakeAnchor, selectionReason: reason },
+    wakePreference: {
+      ...selectedSchedule.wakePreference,
+      source: reason.code === "sleep_history" ? "history" as const
+        : reason.code === "recurring_commitment" ? "commitment" as const
+        : "neutral_default" as const,
+    },
   };
   const finalProfilePatch = { ...selected.profilePatch, sleepSchedule: finalSchedule };
   const proposal = resolvePreferredSleepDuration({ ...input, profilePatch: finalProfilePatch });
@@ -2432,6 +2623,16 @@ export function applyProposalChanges(
         ? { ...block, startAt: change.toStartAt, endAt: change.toEndAt, source: "auto" }
         : block);
     } else if (change.kind === "remove_block") nextBlocks = nextBlocks.filter((block) => block.id !== change.blockId);
+    else if (change.kind === "update_block_status") {
+      nextBlocks = nextBlocks.map((block) => block.id === change.blockId
+        ? {
+            ...block,
+            status: change.status,
+            actualStartAt: change.actualStartAt ?? block.actualStartAt,
+            actualEndAt: change.actualEndAt ?? block.actualEndAt,
+          }
+        : block);
+    }
   }
   return { items: nextItems, blocks: nextBlocks };
 }
