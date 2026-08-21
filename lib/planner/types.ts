@@ -152,7 +152,7 @@ export type PlannerProfile = {
 };
 
 export type PlannerRecurrence = {
-  frequency: "daily" | "weekly" | "custom";
+  frequency: "once" | "daily" | "weekly" | "custom";
   weekdays?: number[];
   startDate?: string;
   startTime?: string;
@@ -196,6 +196,7 @@ export type PlannerItem = {
   estimateConfidence: PlannerEstimateConfidence;
   deadlinePolicy: PlannerDeadlinePolicy;
   milestones: PlannerMilestone[];
+  allowedWindows: PlannerTimeWindow[];
   preferredWindows: PlannerTimeWindow[];
   avoidedWindows: PlannerTimeWindow[];
   canSplit: boolean;

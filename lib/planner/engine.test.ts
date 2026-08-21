@@ -49,6 +49,7 @@ function item(overrides: Partial<PlannerItem> = {}): PlannerItem {
     estimateConfidence: "normal",
     deadlinePolicy: { chainMode: "inherit" },
     milestones: [],
+    allowedWindows: [],
     preferredWindows: [],
     avoidedWindows: [],
     canSplit: false,
@@ -379,6 +380,134 @@ test("full future rebuild keeps every task minute or reports it in the queue", (
     .reduce((sum, entry) => sum + entry.remainingMinutes, 0);
   assert.equal(scheduledMinutes + queuedMinutes, 60);
   assert.equal(applied.items.find((entry) => entry.id === "task-1")?.estimateMinutes, 60);
+});
+
+test("a flexible recurring item stays on its weekday and inside its allowed window", () => {
+  const school = item({
+    id: "free-school",
+    kind: "routine",
+    title: "Свободное посещение",
+    energy: "normal",
+    estimateMinutes: 180,
+    allowedWindows: [{ start: "10:00", end: "18:00" }],
+    bufferBeforeMinutes: 45,
+    bufferAfterMinutes: 35,
+    recurrence: { frequency: "weekly", weekdays: [5] },
+  });
+  const proposal = buildPlannerProposal({
+    profile: { ...profile, reserveRatio: 0 },
+    items: [school],
+    blocks: [],
+    now: new Date("2026-08-19T04:00:00.000Z"),
+  });
+  const blocks = proposal.changes.flatMap((change) =>
+    change.kind === "add_block" && change.block.itemId === school.id ? [change.block] : []
+  );
+  assert.equal(blocks.length, 1);
+  assert.equal(formatDateInTimeZone(new Date(blocks[0].startAt), profile.timezone), "2026-08-21");
+  const start = plannerTimeToMinutes(formatTimeInTimeZone(new Date(blocks[0].startAt), profile.timezone));
+  const end = plannerTimeToMinutes(formatTimeInTimeZone(new Date(blocks[0].endAt), profile.timezone));
+  assert.ok(start >= 10 * 60);
+  assert.ok(end <= 18 * 60);
+  assert.equal(blocks[0].occurrenceKey, "free-school:2026-08-21");
+});
+
+test("a one-time flexible item with a date cannot move to another day", () => {
+  const dated = item({
+    id: "dated-flexible",
+    title: "Разовое дело",
+    energy: "normal",
+    recurrence: { frequency: "once", startDate: "2026-08-20" },
+  });
+  const proposal = buildPlannerProposal({
+    profile,
+    items: [dated],
+    blocks: [],
+    now: new Date("2026-08-19T04:00:00.000Z"),
+  });
+  const added = proposal.changes.find((change) => change.kind === "add_block" && change.block.itemId === dated.id);
+  assert.ok(added && added.kind === "add_block");
+  assert.equal(formatDateInTimeZone(new Date(added.block.startAt), profile.timezone), "2026-08-20");
+  assert.equal(added.block.occurrenceKey, "dated-flexible:2026-08-20");
+});
+
+test("travel may sit outside the item window but remains inside daily availability", () => {
+  const visit = item({
+    id: "opening-hours",
+    title: "Учёба",
+    energy: "normal",
+    estimateMinutes: 180,
+    allowedWindows: [{ start: "10:00", end: "13:00" }],
+    bufferBeforeMinutes: 60,
+    bufferAfterMinutes: 30,
+    recurrence: { frequency: "once", startDate: "2026-08-20" },
+  });
+  const proposal = buildPlannerProposal({
+    profile: { ...profile, reserveRatio: 0 },
+    items: [visit],
+    blocks: [],
+    now: new Date("2026-08-19T04:00:00.000Z"),
+  });
+  const added = proposal.changes.find((change) => change.kind === "add_block" && change.block.itemId === visit.id);
+  assert.ok(added && added.kind === "add_block");
+  assert.equal(formatTimeInTimeZone(new Date(added.block.startAt), profile.timezone), "10:00");
+  assert.equal(formatTimeInTimeZone(new Date(added.block.endAt), profile.timezone), "13:00");
+});
+
+test("return travel creates a conflict even when fixed item bodies do not overlap", () => {
+  const first = item({
+    id: "first-fixed",
+    kind: "fixed_event",
+    title: "Первое место",
+    autoPlan: false,
+    bufferAfterMinutes: 30,
+  });
+  const firstBlock: PlannerBlock = {
+    id: "first-block",
+    itemId: first.id,
+    title: first.title,
+    startAt: "2026-08-19T07:00:00.000Z",
+    endAt: "2026-08-19T08:00:00.000Z",
+    status: "planned",
+    source: "manual",
+    fixed: true,
+  };
+  const proposal = buildPlannerProposal({
+    profile,
+    items: [first],
+    blocks: [firstBlock],
+    now: new Date("2026-08-19T04:00:00.000Z"),
+    draft: {
+      title: "Второе место",
+      kind: "fixed_event",
+      date: "2026-08-19",
+      start: "11:15",
+      end: "12:00",
+      estimateMinutes: 45,
+    },
+  });
+  assert.ok(proposal.conflicts.some((conflict) => conflict.kind === "fixed_overlap"));
+});
+
+test("empty energy windows do not favor a time of day", () => {
+  const neutralProfile = {
+    ...profile,
+    reserveRatio: 0,
+    energyWindows: [],
+  };
+  const eveningProfile = {
+    ...neutralProfile,
+    energyWindows: [{ start: "18:00", end: "22:00", energy: "high" as const }],
+  };
+  const hardWork = item({ id: "hard-work", energy: "high", estimateMinutes: 60 });
+  const input = { items: [hardWork], blocks: [], now: new Date("2026-08-19T04:00:00.000Z") };
+  const neutral = buildPlannerProposal({ profile: neutralProfile, ...input });
+  const evening = buildPlannerProposal({ profile: eveningProfile, ...input });
+  const neutralBlock = neutral.changes.find((change) => change.kind === "add_block");
+  const eveningBlock = evening.changes.find((change) => change.kind === "add_block");
+  assert.ok(neutralBlock?.kind === "add_block" && eveningBlock?.kind === "add_block");
+  assert.equal(formatTimeInTimeZone(new Date(neutralBlock.block.startAt), profile.timezone), "08:00");
+  assert.equal(formatTimeInTimeZone(new Date(eveningBlock.block.startAt), profile.timezone), "18:00");
 });
 
 test("recurring fixed commitments fill missing occurrences without duplicates", () => {

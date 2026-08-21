@@ -467,6 +467,7 @@ create table public.planner_items (
   estimate_confidence text not null default 'normal' check (estimate_confidence in ('high', 'normal', 'low')),
   deadline_policy jsonb not null default '{"chainMode":"inherit"}'::jsonb,
   milestones jsonb not null default '[]'::jsonb,
+  allowed_windows jsonb not null default '[]'::jsonb,
   preferred_windows jsonb not null default '[]'::jsonb,
   avoided_windows jsonb not null default '[]'::jsonb,
   can_split boolean not null default false,

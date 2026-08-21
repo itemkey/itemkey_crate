@@ -81,6 +81,7 @@ type ItemRow = {
   estimate_confidence: PlannerItem["estimateConfidence"];
   deadline_policy: PlannerItem["deadlinePolicy"];
   milestones: PlannerItem["milestones"];
+  allowed_windows: PlannerItem["allowedWindows"];
   preferred_windows: PlannerItem["preferredWindows"];
   avoided_windows: PlannerItem["avoidedWindows"];
   can_split: boolean;
@@ -121,7 +122,7 @@ type ProposalRow = {
 
 const ITEM_COLUMNS = `id,kind,title,notes,area,location,priority,energy,estimate_minutes,
   earliest_at,deadline_at,deadline_type,target_finish_at,target_finish_mode,estimate_confidence,
-  deadline_policy,milestones,preferred_windows,avoided_windows,can_split,min_chunk_minutes,
+  deadline_policy,milestones,allowed_windows,preferred_windows,avoided_windows,can_split,min_chunk_minutes,
   buffer_before_minutes,buffer_after_minutes,recurrence,auto_plan,status,unplaced_reason,created_at,updated_at`;
 const BLOCK_COLUMNS = `id,item_id,title,start_at,end_at,status,source,fixed,occurrence_key,
   actual_start_at,actual_end_at,created_at,updated_at`;
@@ -191,6 +192,7 @@ function itemFromRow(row: ItemRow): PlannerItem {
     estimateConfidence: row.estimate_confidence,
     deadlinePolicy: row.deadline_policy,
     milestones: row.milestones,
+    allowedWindows: row.allowed_windows,
     preferredWindows: row.preferred_windows,
     avoidedWindows: row.avoided_windows,
     canSplit: row.can_split,
@@ -337,13 +339,13 @@ async function insertItem(executor: SqlExecutor, userId: string, value: PlannerI
     `insert into public.planner_items (
        app_user_id,id,kind,title,notes,area,location,priority,energy,estimate_minutes,
        earliest_at,deadline_at,deadline_type,target_finish_at,target_finish_mode,estimate_confidence,
-       deadline_policy,milestones,preferred_windows,avoided_windows,can_split,min_chunk_minutes,
+       deadline_policy,milestones,allowed_windows,preferred_windows,avoided_windows,can_split,min_chunk_minutes,
        buffer_before_minutes,buffer_after_minutes,recurrence,auto_plan,status,unplaced_reason
      ) values (
        $1::uuid,$2::text,$3::text,$4::text,$5::text,$6::text,$7::text,$8::text,$9::text,$10::integer,
        $11::timestamptz,$12::timestamptz,$13::text,$14::timestamptz,$15::text,$16::text,
-       $17::jsonb,$18::jsonb,$19::jsonb,$20::jsonb,$21::boolean,$22::integer,
-       $23::integer,$24::integer,$25::jsonb,$26::boolean,$27::text,$28::text
+       $17::jsonb,$18::jsonb,$19::jsonb,$20::jsonb,$21::jsonb,$22::boolean,$23::integer,
+       $24::integer,$25::integer,$26::jsonb,$27::boolean,$28::text,$29::text
      ) on conflict (app_user_id,id) do update set
        kind=excluded.kind,title=excluded.title,notes=excluded.notes,area=excluded.area,
        location=excluded.location,priority=excluded.priority,energy=excluded.energy,
@@ -351,7 +353,8 @@ async function insertItem(executor: SqlExecutor, userId: string, value: PlannerI
        deadline_at=excluded.deadline_at,deadline_type=excluded.deadline_type,
        target_finish_at=excluded.target_finish_at,target_finish_mode=excluded.target_finish_mode,
        estimate_confidence=excluded.estimate_confidence,deadline_policy=excluded.deadline_policy,
-       milestones=excluded.milestones,preferred_windows=excluded.preferred_windows,
+       milestones=excluded.milestones,allowed_windows=excluded.allowed_windows,
+       preferred_windows=excluded.preferred_windows,
        avoided_windows=excluded.avoided_windows,can_split=excluded.can_split,
        min_chunk_minutes=excluded.min_chunk_minutes,buffer_before_minutes=excluded.buffer_before_minutes,
        buffer_after_minutes=excluded.buffer_after_minutes,recurrence=excluded.recurrence,
@@ -360,7 +363,7 @@ async function insertItem(executor: SqlExecutor, userId: string, value: PlannerI
       userId, item.id, item.kind, item.title, item.notes ?? "", item.area ?? "", item.location ?? "",
       item.priority, item.energy, item.estimateMinutes, item.earliestAt ?? null, item.deadlineAt ?? null,
       item.deadlineType,item.targetFinishAt ?? null,item.targetFinishMode,item.estimateConfidence,
-      JSON.stringify(item.deadlinePolicy),JSON.stringify(item.milestones),
+      JSON.stringify(item.deadlinePolicy),JSON.stringify(item.milestones),JSON.stringify(item.allowedWindows),
       JSON.stringify(item.preferredWindows), JSON.stringify(item.avoidedWindows), item.canSplit,
       item.minChunkMinutes, item.bufferBeforeMinutes, item.bufferAfterMinutes,
       item.recurrence ? JSON.stringify(item.recurrence) : null, item.autoPlan, item.status, item.unplacedReason ?? "",

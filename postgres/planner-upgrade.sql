@@ -45,6 +45,7 @@ create table if not exists public.planner_items (
   estimate_confidence text not null default 'normal' check (estimate_confidence in ('high', 'normal', 'low')),
   deadline_policy jsonb not null default '{"chainMode":"inherit"}'::jsonb,
   milestones jsonb not null default '[]'::jsonb,
+  allowed_windows jsonb not null default '[]'::jsonb,
   preferred_windows jsonb not null default '[]'::jsonb,
   avoided_windows jsonb not null default '[]'::jsonb,
   can_split boolean not null default false,
@@ -65,7 +66,8 @@ alter table public.planner_items
   add column if not exists target_finish_mode text not null default 'auto',
   add column if not exists estimate_confidence text not null default 'normal',
   add column if not exists deadline_policy jsonb not null default '{"chainMode":"inherit"}'::jsonb,
-  add column if not exists milestones jsonb not null default '[]'::jsonb;
+  add column if not exists milestones jsonb not null default '[]'::jsonb,
+  add column if not exists allowed_windows jsonb not null default '[]'::jsonb;
 
 update public.planner_items
 set deadline_type = 'target'

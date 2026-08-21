@@ -113,6 +113,8 @@ type ItemForm = {
   energy: PlannerEnergy;
   canSplit: boolean;
   minChunkMinutes: string;
+  allowedStart: string;
+  allowedEnd: string;
   preferredStart: string;
   preferredEnd: string;
   avoidedStart: string;
@@ -271,7 +273,8 @@ function defaultItemForm(date: string): ItemForm {
     targetFinishMode: "auto", targetFinishDate: "", targetFinishTime: "23:59",
     estimateConfidence: "normal", deadlineChainMode: "inherit", deadlineChainGap: "5",
     nextItemId: "", createMilestones: false, priority: "normal", energy: "normal",
-    canSplit: false, minChunkMinutes: "25", preferredStart: "", preferredEnd: "",
+    canSplit: false, minChunkMinutes: "25", allowedStart: "", allowedEnd: "",
+    preferredStart: "", preferredEnd: "",
     avoidedStart: "", avoidedEnd: "", location: "", area: "", notes: "",
     bufferBeforeMinutes: "0", bufferAfterMinutes: "0", recurrenceFrequency: "daily",
     recurrenceWeekdays: [plannerWeekday(date)],
@@ -282,6 +285,7 @@ function formFromDraft(draft: PlannerDraft, date: string, timezone: string): Ite
   const form = defaultItemForm(date);
   const preferred = draft.preferredWindows?.[0];
   const avoided = draft.avoidedWindows?.[0];
+  const allowed = draft.allowedWindows?.[0];
   return {
     ...form,
     id: draft.id ?? "",
@@ -306,6 +310,8 @@ function formFromDraft(draft: PlannerDraft, date: string, timezone: string): Ite
     energy: draft.energy ?? "normal",
     canSplit: draft.canSplit ?? false,
     minChunkMinutes: String(draft.minChunkMinutes ?? 25),
+    allowedStart: allowed?.start ?? "",
+    allowedEnd: allowed?.end ?? "",
     preferredStart: preferred?.start ?? "",
     preferredEnd: preferred?.end ?? "",
     avoidedStart: avoided?.start ?? "",
@@ -315,7 +321,7 @@ function formFromDraft(draft: PlannerDraft, date: string, timezone: string): Ite
     notes: draft.notes ?? "",
     bufferBeforeMinutes: String(draft.bufferBeforeMinutes ?? 0),
     bufferAfterMinutes: String(draft.bufferAfterMinutes ?? 0),
-    recurrenceFrequency: draft.recurrence?.frequency ?? "daily",
+    recurrenceFrequency: draft.recurrence?.frequency === "once" ? "daily" : draft.recurrence?.frequency ?? "daily",
     recurrenceWeekdays: draft.recurrence?.weekdays ?? form.recurrenceWeekdays,
   };
 }
@@ -370,6 +376,7 @@ function asDraft(form: ItemForm, profile: PlannerProfile, locale: Locale): Plann
     })),
     priority: form.priority, energy: form.energy, canSplit: form.canSplit,
     minChunkMinutes: Number(form.minChunkMinutes) || 25,
+    allowedWindows: form.allowedStart && form.allowedEnd ? [{ start: form.allowedStart, end: form.allowedEnd }] : [],
     preferredWindows: form.preferredStart && form.preferredEnd ? [{ start: form.preferredStart, end: form.preferredEnd }] : [],
     avoidedWindows: form.avoidedStart && form.avoidedEnd ? [{ start: form.avoidedStart, end: form.avoidedEnd }] : [],
     location: form.location.trim() || undefined, area: form.area.trim() || undefined,
@@ -1086,6 +1093,7 @@ function ItemModal({ value, setValue, items, profile, now, onSubmit, onClose, bu
           <label>{locale === "ru" ? "Перерыв в цепочке" : "Chain break"}<select value={value.deadlineChainGap} onChange={(e) => update("deadlineChainGap", e.target.value as ItemForm["deadlineChainGap"])}><option value="0">0 {locale === "ru" ? "мин" : "min"}</option><option value="5">5 {locale === "ru" ? "мин" : "min"}</option><option value="15">15 {locale === "ru" ? "мин" : "min"}</option></select></label>
           {Number(value.estimateMinutes) >= 120 && <label className={`${styles.checkbox} ${styles.wide}`}><input type="checkbox" checked={value.createMilestones} onChange={(e) => update("createMilestones", e.target.checked)} />{locale === "ru" ? `Создать ${Math.min(5, Math.max(2, Math.ceil(Number(value.estimateMinutes) / 120)))} редактируемых этапа после подтверждения` : `Create ${Math.min(5, Math.max(2, Math.ceil(Number(value.estimateMinutes) / 120)))} editable milestones after confirmation`}</label>}
         </>}
+        <label>{locale === "ru" ? "Допустимо с" : "Allowed from"}<input type="time" value={value.allowedStart} onChange={(e) => update("allowedStart", e.target.value)} /></label><label>{locale === "ru" ? "до" : "to"}<input type="time" value={value.allowedEnd} onChange={(e) => update("allowedEnd", e.target.value)} /></label>
         <label>{locale === "ru" ? "Предпочитать с" : "Prefer from"}<input type="time" value={value.preferredStart} onChange={(e) => update("preferredStart", e.target.value)} /></label><label>{locale === "ru" ? "до" : "to"}<input type="time" value={value.preferredEnd} onChange={(e) => update("preferredEnd", e.target.value)} /></label>
         <label>{locale === "ru" ? "Не ставить с" : "Avoid from"}<input type="time" value={value.avoidedStart} onChange={(e) => update("avoidedStart", e.target.value)} /></label><label>{locale === "ru" ? "до" : "to"}<input type="time" value={value.avoidedEnd} onChange={(e) => update("avoidedEnd", e.target.value)} /></label>
         <label>{locale === "ru" ? "Буфер до, мин" : "Buffer before"}<input type="number" min="0" value={value.bufferBeforeMinutes} onChange={(e) => update("bufferBeforeMinutes", e.target.value)} /></label><label>{locale === "ru" ? "Буфер после, мин" : "Buffer after"}<input type="number" min="0" value={value.bufferAfterMinutes} onChange={(e) => update("bufferAfterMinutes", e.target.value)} /></label>

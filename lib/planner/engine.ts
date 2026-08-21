@@ -62,6 +62,7 @@ type PlacementRequest = {
   item: PlannerItem;
   occurrenceKey: string;
   durationMinutes: number;
+  targetDate?: string;
   sourceBlock?: PlannerBlock;
 };
 
@@ -203,6 +204,7 @@ export function normalizePlannerItem(value: Partial<PlannerItem> & { id: string;
       nextItemId: chainMode === "pinned" ? value.deadlinePolicy?.nextItemId?.slice(0, 160) : undefined,
     },
     milestones,
+    allowedWindows: normalizeWindows(value.allowedWindows),
     preferredWindows: normalizeWindows(value.preferredWindows),
     avoidedWindows: normalizeWindows(value.avoidedWindows),
     canSplit: Boolean(value.canSplit),
@@ -354,6 +356,7 @@ export function parsePlannerCommand(
     end: range?.end,
     canSplit: kind === "flexible_task" && duration >= 60,
     minChunkMinutes: 25,
+    allowedWindows: [],
     preferredWindows: [],
     avoidedWindows: [],
     recurrence: recurrence ? {
@@ -491,6 +494,23 @@ function windowOverlapsRange(window: PlannerTimeWindow, startMinute: number, end
   if (windowEnd <= windowStart) windowEnd += 1440;
   return rangesOverlap({ start: startMinute, end: endMinute }, { start: windowStart, end: windowEnd })
     || rangesOverlap({ start: startMinute + 1440, end: endMinute + 1440 }, { start: windowStart, end: windowEnd });
+}
+
+function rangeInsideWindow(window: PlannerTimeWindow, startMinute: number, endMinute: number): boolean {
+  const windowStart = plannerTimeToMinutes(window.start);
+  let windowEnd = plannerTimeToMinutes(window.end);
+  if (windowEnd <= windowStart) windowEnd += 1440;
+  return [startMinute, startMinute + 1440].some((candidateStart) =>
+    candidateStart >= windowStart && candidateStart + (endMinute - startMinute) <= windowEnd
+  );
+}
+
+function requiredPlannerGap(defaultMinutes: number, afterMinutes: number, beforeMinutes: number): number {
+  return Math.max(defaultMinutes, Math.max(0, afterMinutes) + Math.max(0, beforeMinutes));
+}
+
+function placementFootprintMinutes(item: PlannerItem, durationMinutes: number): number {
+  return durationMinutes + item.bufferBeforeMinutes + item.bufferAfterMinutes;
 }
 
 function energyAt(profile: PlannerProfile, minute: number): PlannerEnergy {
@@ -650,7 +670,9 @@ function getRoutineDates(item: PlannerItem, startDate: string, endDate: string):
   const dates: string[] = [];
   for (let date = startDate; date <= endDate; date = addPlannerDays(date, 1)) {
     if (item.recurrence?.startDate && date < item.recurrence.startDate) continue;
-    if (!item.recurrence || item.recurrence.frequency === "daily") dates.push(date);
+    if (item.recurrence?.frequency === "once") {
+      if (item.recurrence.startDate === date) dates.push(date);
+    } else if (!item.recurrence || item.recurrence.frequency === "daily") dates.push(date);
     else if (item.recurrence.frequency === "weekly" && plannerWeekday(date) === (item.recurrence.weekdays?.[0] ?? 1)) dates.push(date);
     else if (item.recurrence.frequency === "custom" && item.recurrence.weekdays?.includes(plannerWeekday(date))) dates.push(date);
   }
@@ -667,11 +689,11 @@ function buildPlacementRequests(
   const activeBlocks = blocks.filter((block) => block.status !== "cancelled" && block.status !== "skipped");
   for (const item of items) {
     if (item.status !== "active" || !item.autoPlan || item.kind === "fixed_event") continue;
-    if (item.kind === "routine") {
+    if (item.kind === "routine" || item.recurrence?.frequency === "once") {
       for (const date of getRoutineDates(item, startDate, endDate)) {
         const key = `${item.id}:${date}`;
         if (blocks.some((block) => block.itemId === item.id && block.occurrenceKey === key)) continue;
-        requests.push({ item, occurrenceKey: key, durationMinutes: item.estimateMinutes });
+        requests.push({ item, occurrenceKey: key, durationMinutes: item.estimateMinutes, targetDate: date });
       }
       continue;
     }
@@ -737,16 +759,22 @@ function findPlacement(
   let best: { startAt: string; endAt: string; date: string; score: number } | null = null;
   const horizonStartMs = new Date(zonedPlannerDateTimeToUtc(startDate, "00:00", profile.timezone)).getTime();
   for (let date = startDate; date <= endDate; date = addPlannerDays(date, 1)) {
+    if (request.targetDate && date !== request.targetDate) continue;
     const windows = availabilityForDate(profile, date);
     const totalAvailable = windows.reduce((sum, window) => sum + durationForLocalRange(window.start, window.end), 0);
     const fixedMinutes = occupied
       .filter((block) => block.fixed && !["cancelled", "skipped"].includes(block.status))
-      .reduce((sum, block) => sum + windows.reduce(
-        (windowSum, window) => windowSum + blockMinutesInsideWindow(block, date, window, profile.timezone),
-        0
-      ), 0);
+      .reduce((sum, block) => {
+        const bodyMinutes = windows.reduce(
+          (windowSum, window) => windowSum + blockMinutesInsideWindow(block, date, window, profile.timezone),
+          0
+        );
+        if (!bodyMinutes) return sum;
+        const blockItem = block.itemId ? itemById.get(block.itemId) : undefined;
+        return sum + bodyMinutes + (blockItem?.bufferBeforeMinutes ?? 0) + (blockItem?.bufferAfterMinutes ?? 0);
+      }, 0);
     const capacity = Math.floor(Math.max(0, totalAvailable - fixedMinutes) * (1 - profile.reserveRatio));
-    if ((autoMinutesByDate.get(date) ?? 0) + durationMinutes > capacity) continue;
+    if ((autoMinutesByDate.get(date) ?? 0) + placementFootprintMinutes(request.item, durationMinutes) > capacity) continue;
     for (const window of windows) {
       const windowStart = plannerTimeToMinutes(window.start);
       let windowEnd = plannerTimeToMinutes(window.end);
@@ -754,6 +782,10 @@ function findPlacement(
       for (let minute = Math.ceil(windowStart / STEP_MINUTES) * STEP_MINUTES; minute + durationMinutes <= windowEnd; minute += STEP_MINUTES) {
         const localDate = minute >= 1440 ? addPlannerDays(date, 1) : date;
         const localMinute = minute % 1440;
+        if (request.item.allowedWindows.length > 0
+          && !request.item.allowedWindows.some((candidate) => rangeInsideWindow(candidate, localMinute, localMinute + durationMinutes))) continue;
+        if (minute - request.item.bufferBeforeMinutes < windowStart
+          || minute + durationMinutes + request.item.bufferAfterMinutes > windowEnd) continue;
         if (request.item.avoidedWindows.some((candidate) => windowOverlapsRange(candidate, localMinute, localMinute + durationMinutes))) continue;
         const startAt = zonedPlannerDateTimeToUtc(
           localDate,
@@ -764,24 +796,30 @@ function findPlacement(
         if (request.item.deadlineType === "hard" && request.item.deadlineAt
           && new Date(endAt).getTime() > new Date(request.item.deadlineAt).getTime()) continue;
         const candidate = { start: new Date(startAt).getTime(), end: new Date(endAt).getTime() };
-        const candidateBefore = Math.max(profile.defaultBufferMinutes, request.item.bufferBeforeMinutes);
-        const candidateAfter = Math.max(profile.defaultBufferMinutes, request.item.bufferAfterMinutes);
-        if (candidate.start < nowMs) continue;
+        if (candidate.start - request.item.bufferBeforeMinutes * 60_000 < nowMs) continue;
         if (request.item.earliestAt && candidate.start < new Date(request.item.earliestAt).getTime()) continue;
         if (occupied.some((block) => {
           if (block.status === "cancelled" || block.status === "skipped") return false;
           const interval = blockInterval(block);
           const occupiedItem = block.itemId ? itemById.get(block.itemId) : undefined;
-          const occupiedBefore = Math.max(profile.defaultBufferMinutes, occupiedItem?.bufferBeforeMinutes ?? 0);
-          const occupiedAfter = Math.max(profile.defaultBufferMinutes, occupiedItem?.bufferAfterMinutes ?? 0);
+          const occupiedBefore = occupiedItem?.bufferBeforeMinutes ?? 0;
+          const occupiedAfter = occupiedItem?.bufferAfterMinutes ?? 0;
           if (candidate.end <= interval.start) {
-            return candidate.end + Math.max(candidateAfter, occupiedBefore) * 60_000 > interval.start;
+            return candidate.end + requiredPlannerGap(
+              profile.defaultBufferMinutes,
+              request.item.bufferAfterMinutes,
+              occupiedBefore
+            ) * 60_000 > interval.start;
           }
           if (candidate.start >= interval.end) {
             if (chain?.previousBlockId === block.id) {
               return candidate.start - chain.gapMinutes * 60_000 < interval.end;
             }
-            return candidate.start - Math.max(candidateBefore, occupiedAfter) * 60_000 < interval.end;
+            return candidate.start - requiredPlannerGap(
+              profile.defaultBufferMinutes,
+              occupiedAfter,
+              request.item.bufferBeforeMinutes
+            ) * 60_000 < interval.end;
           }
           return true;
         })) continue;
@@ -1032,9 +1070,20 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
   }
 
   const considerFixedBlock = (fixedBlock: PlannerBlock, reason: string) => {
-    const incoming = blockInterval(fixedBlock);
+    const fixedItem = fixedBlock.itemId ? items.find((item) => item.id === fixedBlock.itemId) : undefined;
+    const rawIncoming = blockInterval(fixedBlock);
+    const incoming = {
+      start: rawIncoming.start - (fixedItem?.bufferBeforeMinutes ?? 0) * 60_000,
+      end: rawIncoming.end + (fixedItem?.bufferAfterMinutes ?? 0) * 60_000,
+    };
     for (const block of [...workingBlocks, ...sleepBlocks]) {
-      if (block.id === fixedBlock.id || block.status === "cancelled" || block.status === "skipped" || !rangesOverlap(incoming, blockInterval(block))) continue;
+      const occupiedItem = block.itemId ? items.find((item) => item.id === block.itemId) : undefined;
+      const rawOccupied = blockInterval(block);
+      const occupied = {
+        start: rawOccupied.start - (occupiedItem?.bufferBeforeMinutes ?? 0) * 60_000,
+        end: rawOccupied.end + (occupiedItem?.bufferAfterMinutes ?? 0) * 60_000,
+      };
+      if (block.id === fixedBlock.id || block.status === "cancelled" || block.status === "skipped" || !rangesOverlap(incoming, occupied)) continue;
       if (block.status === "in_progress") {
         conflicts.push({
           id: uniqueId("conflict-active", block.id, fixedBlock.id),
@@ -1136,7 +1185,13 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
 
   for (const sleep of sleepBlocks) {
     for (const block of workingBlocks.filter((candidate) => (candidate.fixed || candidate.status === "in_progress") && candidate.status !== "cancelled" && candidate.status !== "skipped")) {
-      if (!rangesOverlap(blockInterval(sleep), blockInterval(block))) continue;
+      const blockItem = block.itemId ? items.find((item) => item.id === block.itemId) : undefined;
+      const rawBlock = blockInterval(block);
+      const protectedBlock = {
+        start: rawBlock.start - (blockItem?.bufferBeforeMinutes ?? 0) * 60_000,
+        end: rawBlock.end + (blockItem?.bufferAfterMinutes ?? 0) * 60_000,
+      };
+      if (!rangesOverlap(blockInterval(sleep), protectedBlock)) continue;
       if (conflicts.some((conflict) => conflict.blockIds.includes(sleep.id) && conflict.blockIds.includes(block.id))) continue;
       conflicts.push({
         id: uniqueId("conflict-sleep", sleep.id, block.id),
@@ -1177,6 +1232,7 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
   }
 
   const autoMinutesByDate = new Map<string, number>();
+  const itemById = new Map(items.map((item) => [item.id, item]));
   for (const block of workingBlocks.filter((candidate) => !candidate.fixed && !["cancelled", "skipped", "done"].includes(candidate.status))) {
     const date = formatDateInTimeZone(new Date(block.startAt), profile.timezone);
     const windows = availabilityForDate(profile, date);
@@ -1184,9 +1240,10 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
       (sum, window) => sum + blockMinutesInsideWindow(block, date, window, profile.timezone),
       0
     );
-    autoMinutesByDate.set(date, (autoMinutesByDate.get(date) ?? 0) + minutes);
+    const blockItem = block.itemId ? itemById.get(block.itemId) : undefined;
+    const footprint = blockItem ? placementFootprintMinutes(blockItem, minutes) : minutes;
+    autoMinutesByDate.set(date, (autoMinutesByDate.get(date) ?? 0) + footprint);
   }
-  const itemById = new Map(items.map((item) => [item.id, item]));
   const chainByItemId = new Map<string, { startAt: string; previousBlockId: string; gapMinutes: number }>();
   for (const request of requests) {
     let remaining = request.durationMinutes;
@@ -1248,7 +1305,10 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
         });
       }
       workingBlocks.push(block);
-      autoMinutesByDate.set(placement.date, (autoMinutesByDate.get(placement.date) ?? 0) + duration);
+      autoMinutesByDate.set(
+        placement.date,
+        (autoMinutesByDate.get(placement.date) ?? 0) + placementFootprintMinutes(request.item, duration)
+      );
       remaining -= duration;
       if (!request.item.canSplit) break;
     }

@@ -57,6 +57,7 @@ export function convertLegacyScheduleSource(
       estimateConfidence: "normal",
       deadlinePolicy: { chainMode: "inherit" },
       milestones: [],
+      allowedWindows: [],
       preferredWindows: task.preferredTimeOfDay ? [{ start: task.preferredTimeOfDay, end: task.approximateEnd ?? "23:59" }] : [],
       avoidedWindows: task.avoidedTimeOfDay ? [{ start: task.avoidedTimeOfDay, end: "23:59" }] : [],
       canSplit: task.canSplit ?? false,
@@ -86,6 +87,7 @@ export function convertLegacyScheduleSource(
       estimateConfidence: "normal",
       deadlinePolicy: { chainMode: "inherit" },
       milestones: [],
+      allowedWindows: [],
       preferredWindows: [], avoidedWindows: [], canSplit: event.canSplit ?? false,
       minChunkMinutes: 25, bufferBeforeMinutes: 0, bufferAfterMinutes: 0,
       recurrence: event.recurrenceRule?.mode === "custom"
