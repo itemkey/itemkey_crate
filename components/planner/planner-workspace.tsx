@@ -17,6 +17,7 @@ import { useI18n } from "@/components/i18n-provider";
 import AutoplannerModal from "@/components/planner/autoplanner-modal";
 import SleepChangedModal, { type SleepMode } from "@/components/planner/sleep-changed-modal";
 import type { Locale } from "@/lib/i18n";
+import type { PlannerTravelEstimateResult } from "@/lib/planner/commitments";
 import { availabilityFromSleepSchedule, buildPlannerSleepBlocks, createPlannerSleepEvent, fixedScheduleView } from "@/lib/planner/sleep";
 import {
   createDefaultPlannerProfile,
@@ -827,12 +828,16 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
         busy={busy}
         onClose={showAssistantSetup ? undefined : () => setModal(null)}
         onParseTasks={(textValue) => api<PlannerAssistantParseResult>("/api/planner/assistant/parse", { method: "POST", body: JSON.stringify({ mode: "tasks", text: textValue }) })}
+        onEstimateTravel={(input) => api<PlannerTravelEstimateResult>("/api/planner/travel/estimate", { method: "POST", body: JSON.stringify(input) })}
         onParseSleep={(textValue) => api<PlannerSleepParseResult>("/api/planner/assistant/parse", { method: "POST", body: JSON.stringify({ mode: "sleep", text: textValue }) })}
         onPrepare={(input) => run(() => createProposal(input))}
         onOpenSleep={() => openSleep("later")}
         onReset={(password) => run(async () => {
           await api("/api/planner/reset", { method: "POST", body: JSON.stringify({ password, expectedRevision: profile.revision }) });
-          try { window.localStorage.removeItem("itemkey.planner.autoplanner.v2"); } catch { /* optional draft storage */ }
+          try {
+            window.localStorage.removeItem("itemkey.planner.autoplanner.v2");
+            window.localStorage.removeItem("itemkey.planner.saved-places.v1");
+          } catch { /* optional draft storage */ }
           setModal(null);
           await load(true);
         })}
