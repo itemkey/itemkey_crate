@@ -88,6 +88,11 @@ test("planner upgrade is idempotent and fresh installs include protected sleep",
   assert.match(plannerUpgrade, /set deadline_type = 'target'/);
   assert.match(plannerUpgrade, /add column if not exists milestones/);
   assert.match(plannerUpgrade, /add column if not exists allowed_windows/);
+  assert.match(plannerUpgrade, /add column if not exists uncertainty_policy/);
+  assert.match(plannerUpgrade, /add column if not exists commitment_level/);
+  assert.match(plannerUpgrade, /add column if not exists planning_rank/);
+  assert.match(plannerUpgrade, /add column if not exists role/);
+  assert.match(plannerUpgrade, /add column if not exists soft/);
   assert.match(plannerUpgrade, /add column if not exists planned_duration_minutes/);
   assert.match(plannerUpgrade, /add column if not exists sleepiness_level/);
   assert.match(plannerUpgrade, /planner_reset/);
@@ -98,6 +103,9 @@ test("planner upgrade is idempotent and fresh installs include protected sleep",
   assert.match(freshSchema, /planning_policy jsonb not null/);
   assert.match(freshSchema, /deadline_type text not null default 'none'/);
   assert.match(freshSchema, /allowed_windows jsonb not null default '\[\]'/);
+  assert.match(freshSchema, /uncertainty_policy jsonb not null default '\{\}'/);
+  assert.match(freshSchema, /commitment_level text not null default 'required'/);
+  assert.match(freshSchema, /role text not null default 'work'/);
   assert.match(freshSchema, /sleepiness_level integer null/);
 });
 
@@ -105,5 +113,8 @@ test("planner store repairs additive schema changes before serving requests", ()
   assert.match(store, /async function ensurePlannerSchema/);
   assert.match(store, /alter table if exists public\.planner_items/);
   assert.match(store, /add column if not exists allowed_windows/);
+  assert.match(store, /add column if not exists uncertainty_policy/);
+  assert.match(store, /add column if not exists commitment_level/);
+  assert.match(store, /add column if not exists role/);
   assert.match(store, /await ensurePlannerSchema\(getPostgresPool\(\)\)/);
 });

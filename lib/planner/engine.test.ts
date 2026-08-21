@@ -4,12 +4,14 @@ import test from "node:test";
 import {
   applyProposalChanges,
   analyzePlannerDeadlines,
+  annotateTentativeBlocks,
   buildPlannerProposal,
   normalizePlannerItem,
   parsePlannerCommand,
   parsePlannerCommands,
   parseSleepCommand,
   plannerCompletionSuggestion,
+  plannerCompletionRangeSuggestion,
   resolvePlannerTargetFinish,
   suggestPlannerMilestones,
 } from "./engine.ts";
@@ -28,7 +30,7 @@ import {
   normalizeSleepSchedule,
 } from "./sleep.ts";
 import { createDefaultPlannerProfile, type PlannerBlock, type PlannerItem } from "./types.ts";
-import { formatDateInTimeZone, formatTimeInTimeZone, plannerTimeToMinutes, zonedPlannerDateTimeToUtc } from "./time.ts";
+import { addIsoMinutes, formatDateInTimeZone, formatTimeInTimeZone, isoDurationMinutes, plannerTimeToMinutes, zonedPlannerDateTimeToUtc } from "./time.ts";
 
 const profile = {
   ...createDefaultPlannerProfile("Europe/Minsk"),
@@ -37,7 +39,7 @@ const profile = {
 };
 
 function item(overrides: Partial<PlannerItem> = {}): PlannerItem {
-  return {
+  return normalizePlannerItem({
     id: "task-1",
     kind: "flexible_task",
     title: "Сделать важную работу",
@@ -59,7 +61,7 @@ function item(overrides: Partial<PlannerItem> = {}): PlannerItem {
     autoPlan: true,
     status: "active",
     ...overrides,
-  };
+  });
 }
 
 test("quick command extracts date, time and fixed event", () => {
@@ -1181,4 +1183,143 @@ test("repeated extreme sleep changes produce a neutral health notice", () => {
     actualEndAt: `2026-08-${String(day).padStart(2, "0")}T04:00:00.000Z`,
   }));
   assert.match(plannerSleepHealthNotice(adaptiveProfile, events, "2026-08-19") ?? "", /специалист/i);
+});
+
+test("old items normalize to an exact uncertainty policy without changing behavior", () => {
+  const legacy = normalizePlannerItem({ id: "legacy-exact", title: "Старое дело", estimateMinutes: 75 });
+  assert.deepEqual(legacy.uncertaintyPolicy.duration, {
+    mode: "exact",
+    minMinutes: 75,
+    likelyMinutes: 75,
+    maxMinutes: 75,
+    tolerancePercent: undefined,
+    calibrationMinutes: undefined,
+    source: "user",
+  });
+  assert.equal(legacy.commitmentLevel, "required");
+});
+
+test("text commands recognize approximate and ranged work without confusing hours with clock time", () => {
+  const approximate = parsePlannerCommand("Монтаж примерно 3 часа, желательно", profile, new Date("2026-08-19T04:00:00.000Z"));
+  assert.equal(approximate.kind, "flexible_task");
+  assert.equal(approximate.uncertaintyPolicy?.duration.mode, "approximate");
+  assert.equal(approximate.uncertaintyPolicy?.duration.likelyMinutes, 180);
+  assert.equal(approximate.commitmentLevel, "desired");
+  const ranged = parsePlannerCommand("Творческая работа 2–5 часов в свободное время", profile, new Date("2026-08-19T04:00:00.000Z"));
+  assert.equal(ranged.kind, "flexible_task");
+  assert.equal(ranged.uncertaintyPolicy?.duration.mode, "range");
+  assert.deepEqual([ranged.uncertaintyPolicy?.duration.minMinutes, ranged.uncertaintyPolicy?.duration.maxMinutes], [120, 300]);
+  assert.equal(ranged.commitmentLevel, "if_time");
+});
+
+test("range duration plans the likely volume and adds a non-blocking reserve to the maximum", () => {
+  const creative = item({
+    id: "creative-range",
+    title: "Монтаж",
+    estimateMinutes: 180,
+    canSplit: true,
+    minChunkMinutes: 30,
+    uncertaintyPolicy: {
+      outcomeMode: "deliverable",
+      duration: { mode: "range", minMinutes: 120, likelyMinutes: 180, maxMinutes: 300, source: "user" },
+      date: { mode: "any" },
+      time: { mode: "any" },
+      recurrence: { mode: "exact_days", period: "week", minOccurrences: 1, likelyOccurrences: 1, maxOccurrences: 1, allowedWeekdays: [] },
+    },
+  });
+  const proposal = buildPlannerProposal({ profile: { ...profile, reserveRatio: 0 }, items: [creative], blocks: [], now: new Date("2026-08-19T04:00:00.000Z") });
+  const added = proposal.changes.flatMap((change) => change.kind === "add_block" ? [change.block] : []);
+  assert.equal(added.filter((block) => !block.soft).reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0), 180);
+  assert.equal(added.filter((block) => block.soft).reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0), 120);
+  assert.ok(added.filter((block) => block.soft).every((block) => block.role === "uncertainty_reserve"));
+});
+
+test("a two-to-four-times weekly routine places minimum, likely and optional occurrences once each", () => {
+  const routine = item({
+    id: "routine-count-range",
+    kind: "routine",
+    title: "Творческая практика",
+    estimateMinutes: 30,
+    recurrence: { frequency: "custom", weekdays: [1, 2, 3, 4, 5], durationMode: "per_occurrence" },
+    uncertaintyPolicy: {
+      outcomeMode: "time_budget",
+      duration: { mode: "exact", minMinutes: 30, likelyMinutes: 30, maxMinutes: 30, source: "user" },
+      date: { mode: "any" },
+      time: { mode: "any" },
+      recurrence: { mode: "count_range", period: "week", minOccurrences: 2, likelyOccurrences: 3, maxOccurrences: 4, allowedWeekdays: [1, 2, 3, 4, 5] },
+    },
+  });
+  const proposal = buildPlannerProposal({ profile: { ...profile, reserveRatio: 0 }, items: [routine], blocks: [], now: new Date("2026-08-17T04:00:00.000Z") });
+  const blocks = proposal.changes.flatMap((change) => change.kind === "add_block" && !change.block.soft ? [change.block] : []);
+  assert.equal(blocks.length, 4);
+  assert.equal(new Set(blocks.map((block) => formatDateInTimeZone(new Date(block.startAt), profile.timezone))).size, 4);
+});
+
+test("unknown recurring duration creates one calibration session and never repeats it automatically", () => {
+  const unknown = item({
+    id: "unknown-calibration",
+    kind: "routine",
+    title: "Новый вид работы",
+    estimateMinutes: 30,
+    recurrence: { frequency: "daily", durationMode: "per_occurrence" },
+    uncertaintyPolicy: {
+      outcomeMode: "time_budget",
+      duration: { mode: "unknown", minMinutes: 30, likelyMinutes: 30, maxMinutes: 30, calibrationMinutes: 30, source: "user" },
+      date: { mode: "any" },
+      time: { mode: "any" },
+      recurrence: { mode: "exact_days", period: "week", minOccurrences: 7, likelyOccurrences: 7, maxOccurrences: 7, allowedWeekdays: [1, 2, 3, 4, 5, 6, 7] },
+    },
+  });
+  const first = buildPlannerProposal({ profile, items: [unknown], blocks: [], now: new Date("2026-08-19T04:00:00.000Z") });
+  const calibration = first.changes.find((change) => change.kind === "add_block" && change.block.role === "calibration");
+  assert.ok(calibration?.kind === "add_block");
+  const second = buildPlannerProposal({ profile, items: [unknown], blocks: [calibration.block], now: new Date("2026-08-19T04:00:00.000Z") });
+  assert.ok(!second.changes.some((change) => change.kind === "add_block" && change.block.itemId === unknown.id));
+});
+
+test("lower-priority work inside a higher-priority soft reserve is marked tentative", () => {
+  const important = item({ id: "important", commitmentLevel: "must_not_skip", planningRank: 0 });
+  const optional = item({ id: "optional", commitmentLevel: "if_time", planningRank: 0 });
+  const annotated = annotateTentativeBlocks([important, optional], [{
+    id: "reserve", itemId: important.id, title: important.title, startAt: "2026-08-19T10:00:00.000Z", endAt: "2026-08-19T12:00:00.000Z",
+    status: "planned", source: "auto", fixed: false, role: "uncertainty_reserve", soft: true,
+  }, {
+    id: "optional-block", itemId: optional.id, title: optional.title, startAt: "2026-08-19T11:00:00.000Z", endAt: "2026-08-19T12:00:00.000Z",
+    status: "planned", source: "auto", fixed: false, role: "work", soft: false,
+  }]);
+  assert.equal(annotated.find((block) => block.id === "optional-block")?.tentative, true);
+});
+
+test("hard deadline analysis reports separate likely and maximum risks", () => {
+  const deadline = item({
+    id: "deadline-range",
+    title: "Сдать монтаж",
+    estimateMinutes: 60,
+    deadlineType: "hard",
+    deadlineAt: "2026-08-19T07:00:00.000Z",
+    uncertaintyPolicy: {
+      outcomeMode: "deliverable",
+      duration: { mode: "range", minMinutes: 45, likelyMinutes: 60, maxMinutes: 240, source: "user" },
+      date: { mode: "any" },
+      time: { mode: "any" },
+      recurrence: { mode: "exact_days", period: "week", minOccurrences: 1, likelyOccurrences: 1, maxOccurrences: 1, allowedWeekdays: [] },
+    },
+  });
+  const deadlineProfile = { ...profile, availability: { ...profile.availability, "3": [{ start: "08:00", end: "10:00" }] } };
+  const analysis = analyzePlannerDeadlines([deadline], [], deadlineProfile, new Date("2026-08-19T04:00:00.000Z"))[0];
+  assert.notEqual(analysis.likelyScenario?.risk, "impossible");
+  assert.equal(analysis.maximumScenario?.risk, "impossible");
+});
+
+test("three comparable completions suggest a range but never apply it automatically", () => {
+  const learned = item({ id: "learned-range", estimateMinutes: 60 });
+  const samples: PlannerBlock[] = [45, 70, 95].map((minutes, index) => ({
+    id: `sample-${index}`, itemId: learned.id, title: learned.title,
+    startAt: `2026-08-${16 + index}T10:00:00.000Z`, endAt: `2026-08-${16 + index}T11:00:00.000Z`,
+    actualStartAt: `2026-08-${16 + index}T10:00:00.000Z`, actualEndAt: addIsoMinutes(`2026-08-${16 + index}T10:00:00.000Z`, minutes),
+    status: "done", source: "auto", fixed: false,
+  }));
+  const suggestion = plannerCompletionRangeSuggestion(learned, samples);
+  assert.ok(suggestion);
+  assert.equal(learned.uncertaintyPolicy.duration.mode, "exact");
 });

@@ -16,6 +16,7 @@ import {
   type PlannerSleepEvent,
   type PlannerSleepParseResult,
   type PlannerTimeWindow,
+  type PlannerUncertaintyPolicy,
   type PlannerUnplaced,
   type PlannerWakeAnchorReason,
 } from "./types.ts";
@@ -62,7 +63,9 @@ type PlacementRequest = {
   item: PlannerItem;
   occurrenceKey: string;
   durationMinutes: number;
-  tier?: "required" | "minimum" | "extra";
+  tier?: "required" | "minimum" | "likely" | "reserve" | "extra";
+  role?: PlannerBlock["role"];
+  mandatory?: boolean;
   targetDate?: string;
   allowedDates?: string[];
   sourceBlock?: PlannerBlock;
@@ -180,6 +183,99 @@ export function normalizePlannerItem(value: Partial<PlannerItem> & { id: string;
         }];
       })
     : [];
+  const legacyLikelyMinutes = clamp(Math.round(Number(value.estimateMinutes ?? 60)), 5, 600_000);
+  const rawDuration = value.uncertaintyPolicy?.duration;
+  const durationMode = rawDuration?.mode === "approximate" || rawDuration?.mode === "range" || rawDuration?.mode === "unknown"
+    ? rawDuration.mode
+    : "exact";
+  const tolerancePercent = rawDuration?.tolerancePercent === 15 || rawDuration?.tolerancePercent === 50 ? rawDuration.tolerancePercent : 30;
+  const calibrationMinutes = clamp(Math.round(Number(rawDuration?.calibrationMinutes ?? rawDuration?.likelyMinutes ?? 30)), 5, 24 * 60);
+  const likelyMinutes = durationMode === "unknown"
+    ? calibrationMinutes
+    : clamp(Math.round(Number(rawDuration?.likelyMinutes ?? legacyLikelyMinutes)), 5, 600_000);
+  const calculatedMinimum = Math.max(5, Math.round(likelyMinutes * (1 - tolerancePercent / 100)));
+  const calculatedMaximum = Math.max(likelyMinutes, Math.round(likelyMinutes * (1 + tolerancePercent / 100)));
+  const minMinutes = durationMode === "exact" || durationMode === "unknown"
+    ? likelyMinutes
+    : clamp(Math.round(Number(rawDuration?.minMinutes ?? calculatedMinimum)), 5, likelyMinutes);
+  const maxMinutes = durationMode === "exact" || durationMode === "unknown"
+    ? likelyMinutes
+    : clamp(Math.round(Number(rawDuration?.maxMinutes ?? calculatedMaximum)), likelyMinutes, 600_000);
+  const rawUncertainty = value.uncertaintyPolicy;
+  const allowedWeekdays = (rawUncertainty?.recurrence?.allowedWeekdays ?? value.recurrence?.weekdays ?? [])
+    .map(Number)
+    .filter((day, index, days) => day >= 1 && day <= 7 && days.indexOf(day) === index)
+    .sort();
+  const defaultOccurrences = Math.max(1, allowedWeekdays.length || 1);
+  const recurrenceMinimum = clamp(Math.round(Number(rawUncertainty?.recurrence?.minOccurrences ?? defaultOccurrences)), 0, 31);
+  const recurrenceLikely = clamp(Math.round(Number(rawUncertainty?.recurrence?.likelyOccurrences ?? defaultOccurrences)), recurrenceMinimum, 31);
+  const recurrenceMaximum = clamp(Math.round(Number(rawUncertainty?.recurrence?.maxOccurrences ?? defaultOccurrences)), recurrenceLikely, 31);
+  const uncertaintyPolicy: PlannerUncertaintyPolicy = {
+    outcomeMode: value.recurrence?.durationMode === "per_occurrence"
+      || (rawUncertainty?.outcomeMode === "time_budget" && value.recurrence?.durationMode !== "per_cycle")
+      || (!rawUncertainty && Boolean(value.recurrence) && value.recurrence?.durationMode !== "per_cycle")
+      ? "time_budget"
+      : "deliverable",
+    duration: {
+      mode: durationMode,
+      minMinutes,
+      likelyMinutes,
+      maxMinutes,
+      tolerancePercent: durationMode === "approximate" ? tolerancePercent : undefined,
+      calibrationMinutes: durationMode === "unknown" ? calibrationMinutes : undefined,
+      source: rawDuration?.source === "calibration" || rawDuration?.source === "statistics" ? rawDuration.source : "user",
+    },
+    date: {
+      mode: rawUncertainty?.date?.mode === "preferred" || rawUncertainty?.date?.mode === "range" || rawUncertainty?.date?.mode === "any"
+        ? rawUncertainty.date.mode
+        : "exact",
+      exactDate: rawUncertainty?.date?.exactDate,
+      preferredDate: rawUncertainty?.date?.preferredDate,
+      earliestDate: rawUncertainty?.date?.earliestDate,
+      latestDate: rawUncertainty?.date?.latestDate,
+    },
+    time: {
+      mode: rawUncertainty?.time?.mode === "preferred" || rawUncertainty?.time?.mode === "range" || rawUncertainty?.time?.mode === "any"
+        ? rawUncertainty.time.mode
+        : "exact",
+      exactStart: normalizePlannerTime(rawUncertainty?.time?.exactStart),
+      preferredStart: normalizePlannerTime(rawUncertainty?.time?.preferredStart),
+      earliestStart: normalizePlannerTime(rawUncertainty?.time?.earliestStart),
+      latestEnd: normalizePlannerTime(rawUncertainty?.time?.latestEnd),
+    },
+    recurrence: {
+      mode: rawUncertainty?.recurrence?.mode === "count_range" ? "count_range" : "exact_days",
+      period: rawUncertainty?.recurrence?.period === "month" ? "month" : "week",
+      minOccurrences: recurrenceMinimum,
+      likelyOccurrences: recurrenceLikely,
+      maxOccurrences: recurrenceMaximum,
+      allowedWeekdays,
+    },
+    deadline: deadlineType === "none" ? { mode: "none" } : {
+      mode: deadlineType === "hard" ? "hard" : "preferred_range",
+      preferredFromAt: rawUncertainty?.deadline?.preferredFromAt,
+      latestAt: rawUncertainty?.deadline?.latestAt ?? value.deadlineAt,
+    },
+    travel: rawUncertainty?.travel ? (() => {
+      const travelMode = rawUncertainty.travel!.mode === "approximate" || rawUncertainty.travel!.mode === "range"
+        ? rawUncertainty.travel!.mode
+        : "exact";
+      const travelLikely = clamp(Math.round(Number(rawUncertainty.travel!.likelyMinutes ?? 0)), 0, 24 * 60);
+      return {
+        mode: travelMode,
+        minMinutes: travelMode === "exact" ? travelLikely : clamp(Math.round(Number(rawUncertainty.travel!.minMinutes ?? travelLikely)), 0, travelLikely),
+        likelyMinutes: travelLikely,
+        maxMinutes: travelMode === "exact" ? travelLikely : clamp(Math.round(Number(rawUncertainty.travel!.maxMinutes ?? travelLikely)), travelLikely, 24 * 60),
+        tolerancePercent: rawUncertainty.travel!.tolerancePercent,
+        punctuality: rawUncertainty.travel!.punctuality === "strict" || rawUncertainty.travel!.punctuality === "flexible"
+          ? rawUncertainty.travel!.punctuality
+          : "normal" as const,
+      };
+    })() : undefined,
+  };
+  const normalizedCommitment = value.commitmentLevel === "must_not_skip" || value.commitmentLevel === "desired" || value.commitmentLevel === "if_time"
+    ? value.commitmentLevel
+    : "required";
   return {
     id: value.id,
     kind:
@@ -193,7 +289,10 @@ export function normalizePlannerItem(value: Partial<PlannerItem> & { id: string;
         ? value.priority
         : "normal",
     energy: value.energy === "low" || value.energy === "high" ? value.energy : "normal",
-    estimateMinutes: clamp(Math.round(Number(value.estimateMinutes ?? 60)), 5, 24 * 60),
+    estimateMinutes: uncertaintyPolicy.duration.likelyMinutes,
+    uncertaintyPolicy,
+    commitmentLevel: deadlineType === "hard" ? "must_not_skip" : normalizedCommitment,
+    planningRank: clamp(Math.round(Number(value.planningRank ?? 0)), 0, 1_000_000),
     earliestAt: value.earliestAt,
     deadlineAt: deadlineType === "none" ? undefined : value.deadlineAt,
     deadlineType,
@@ -211,8 +310,8 @@ export function normalizePlannerItem(value: Partial<PlannerItem> & { id: string;
     avoidedWindows: normalizeWindows(value.avoidedWindows),
     canSplit: Boolean(value.canSplit),
     minChunkMinutes: clamp(Math.round(Number(value.minChunkMinutes ?? 25)), 5, 24 * 60),
-    bufferBeforeMinutes: clamp(Math.round(Number(value.bufferBeforeMinutes ?? 0)), 0, 240),
-    bufferAfterMinutes: clamp(Math.round(Number(value.bufferAfterMinutes ?? 0)), 0, 240),
+    bufferBeforeMinutes: clamp(Math.round(Number(value.bufferBeforeMinutes ?? 0)), 0, 24 * 60),
+    bufferAfterMinutes: clamp(Math.round(Number(value.bufferAfterMinutes ?? 0)), 0, 24 * 60),
     recurrence: value.recurrence
       ? {
           ...value.recurrence,
@@ -222,7 +321,7 @@ export function normalizePlannerItem(value: Partial<PlannerItem> & { id: string;
             ? clamp(
                 Math.round(Number(value.recurrence.minimumMinutes ?? 30)),
                 5,
-                clamp(Math.round(Number(value.estimateMinutes ?? 60)), 5, 24 * 60)
+                uncertaintyPolicy.duration.likelyMinutes
               )
             : undefined,
         }
@@ -263,6 +362,53 @@ function parseDuration(text: string): number | undefined {
   if (hours) return Math.round(Number(hours.replace(",", ".")) * 60);
   if (minutes) return Number(minutes);
   return undefined;
+}
+
+function parseWorkDurationEstimate(text: string): {
+  mode: "exact" | "approximate" | "range" | "unknown";
+  minMinutes: number;
+  likelyMinutes: number;
+  maxMinutes: number;
+  tolerancePercent?: 30;
+  calibrationMinutes?: number;
+} | undefined {
+  const unknown = /(?:не знаю|неизвестн|не могу оценить|сколько получится|unknown|not sure|cannot estimate)/i.test(text);
+  if (unknown) return { mode: "unknown", minMinutes: 30, likelyMinutes: 30, maxMinutes: 30, calibrationMinutes: 30 };
+  const unitFactor = /(?:ч(?:ас(?:а|ов)?)?|h(?:ours?)?)/i.test(text) ? 60 : 1;
+  const unit = "(?:ч(?:ас(?:а|ов)?)?|h(?:ours?)?|мин(?:ут[аы]?)?|m(?:in(?:utes?)?)?)";
+  const triple = text.match(new RegExp(`(\\d+(?:[.,]\\d+)?)\\s*(?:-|—|–|до|to)\\s*(\\d+(?:[.,]\\d+)?)\\s*(?:-|—|–|до|to)\\s*(\\d+(?:[.,]\\d+)?)\\s*${unit}`, "i"));
+  if (triple) {
+    const values = triple.slice(1, 4).map((value) => Math.max(5, Math.round(Number(value.replace(",", ".")) * unitFactor)));
+    return { mode: "range", minMinutes: Math.min(values[0], values[1]), likelyMinutes: values[1], maxMinutes: Math.max(values[1], values[2]) };
+  }
+  const pair = text.match(new RegExp(`(\\d+(?:[.,]\\d+)?)\\s*(?:-|—|–|до|to)\\s*(\\d+(?:[.,]\\d+)?)\\s*${unit}`, "i"));
+  if (pair) {
+    const first = Math.max(5, Math.round(Number(pair[1].replace(",", ".")) * unitFactor));
+    const second = Math.max(5, Math.round(Number(pair[2].replace(",", ".")) * unitFactor));
+    const minMinutes = Math.min(first, second);
+    const maxMinutes = Math.max(first, second);
+    return { mode: "range", minMinutes, likelyMinutes: Math.round((minMinutes + maxMinutes) / 2), maxMinutes };
+  }
+  const likelyMinutes = parseDuration(text);
+  if (!likelyMinutes) return undefined;
+  if (/(?:примерно|около|приблизительно|плюс-минус|roughly|about|approximately)/i.test(text)) {
+    return {
+      mode: "approximate",
+      minMinutes: Math.max(5, Math.round(likelyMinutes * .7)),
+      likelyMinutes,
+      maxMinutes: Math.round(likelyMinutes * 1.3),
+      tolerancePercent: 30,
+    };
+  }
+  return { mode: "exact", minMinutes: likelyMinutes, likelyMinutes, maxMinutes: likelyMinutes };
+}
+
+function parseRecurrenceCount(text: string): { min: number; likely: number; max: number; period: "week" | "month" } | undefined {
+  const match = text.match(/(\d+)\s*(?:-|—|–|до|to)\s*(\d+)\s*(?:раз|times?)(?:\s*(?:в|за|per)\s*(недел\w*|месяц\w*|week|month))?/i);
+  if (!match) return undefined;
+  const min = Math.min(Number(match[1]), Number(match[2]));
+  const max = Math.max(Number(match[1]), Number(match[2]));
+  return { min, likely: Math.round((min + max) / 2), max, period: /месяц|month/i.test(match[3] ?? "") ? "month" : "week" };
 }
 
 function parseSleepDurationRange(text: string): { minMinutes: number; maxMinutes: number } | undefined {
@@ -321,16 +467,19 @@ export function parsePlannerCommand(
 ): PlannerDraft {
   const text = command.trim();
   const baseDate = formatDateInTimeZone(now, profile.timezone);
-  const range = parseTimeRange(text);
+  const durationEstimate = parseWorkDurationEstimate(text);
+  const durationRangeWritten = durationEstimate?.mode === "range";
+  const range = durationRangeWritten ? undefined : parseTimeRange(text);
   const duration = range
     ? Math.max(5, (plannerTimeToMinutes(range.end) - plannerTimeToMinutes(range.start) + 1440) % 1440)
-    : parseDuration(text) ?? 60;
+    : durationEstimate?.likelyMinutes ?? 60;
   const lower = text.toLocaleLowerCase();
   const recurrence = parseRecurrence(text);
+  const recurrenceCount = parseRecurrenceCount(text);
   const inferredDate = inferDateFromText(text, baseDate);
   const kind = range || lower.includes("встреч") || lower.includes("appointment")
     ? "fixed_event"
-    : recurrence || lower.includes("routine")
+    : recurrence || recurrenceCount || lower.includes("routine")
       ? "routine"
       : "flexible_task";
   const title = text
@@ -352,10 +501,48 @@ export function parsePlannerCommand(
       ? "target" as const
       : "none" as const;
   const deadlineClock = parseDeadlineClock(text) ?? "23:59";
+  const estimate = range
+    ? { mode: "exact" as const, minMinutes: duration, likelyMinutes: duration, maxMinutes: duration }
+    : durationEstimate ?? { mode: "exact" as const, minMinutes: duration, likelyMinutes: duration, maxMinutes: duration };
+  const outcomeMode = /(?:кажд(?:ый|ую|ое)\s+(?:день|раз)|per\s+(?:day|session)|выделять время|allocate time)/i.test(lower)
+    ? "time_budget" as const
+    : "deliverable" as const;
+  const commitmentLevel = deadlineType === "hard" || /(?:нельзя пропустить|must not skip)/i.test(lower)
+    ? "must_not_skip" as const
+    : /(?:если останется время|в свободное время|if time|spare time)/i.test(lower)
+      ? "if_time" as const
+      : /(?:желательно|would like|desired)/i.test(lower)
+        ? "desired" as const
+        : "required" as const;
+  const allowedWeekdays = recurrence?.weekdays ?? (recurrence?.frequency === "daily" ? [1, 2, 3, 4, 5, 6, 7] : recurrenceCount ? [1, 2, 3, 4, 5, 6, 7] : []);
   return {
     title,
     kind,
     estimateMinutes: duration,
+    uncertaintyPolicy: {
+      outcomeMode,
+      duration: { ...estimate, source: "user" },
+      date: {
+        mode: inferredDate ? /(?:примерно|желательно|around|prefer)/i.test(lower) ? "preferred" : "exact" : "any",
+        exactDate: inferredDate,
+        preferredDate: /(?:примерно|желательно|around|prefer)/i.test(lower) ? inferredDate : undefined,
+      },
+      time: { mode: range ? "exact" : "any", exactStart: range?.start },
+      recurrence: {
+        mode: recurrenceCount ? "count_range" : "exact_days",
+        period: recurrenceCount?.period ?? "week",
+        minOccurrences: recurrenceCount?.min ?? Math.max(1, allowedWeekdays.length || 1),
+        likelyOccurrences: recurrenceCount?.likely ?? Math.max(1, allowedWeekdays.length || 1),
+        maxOccurrences: recurrenceCount?.max ?? Math.max(1, allowedWeekdays.length || 1),
+        allowedWeekdays,
+      },
+      deadline: deadlineType === "none" ? { mode: "none" } : {
+        mode: deadlineType === "hard" ? "hard" : "preferred_range",
+        latestAt: inferredDate ? zonedPlannerDateTimeToUtc(inferredDate, deadlineClock, profile.timezone) : undefined,
+      },
+    },
+    commitmentLevel,
+    planningRank: 0,
     priority,
     energy: "normal",
     date: inferredDate ?? baseDate,
@@ -374,11 +561,13 @@ export function parsePlannerCommand(
     allowedWindows: [],
     preferredWindows: [],
     avoidedWindows: [],
-    recurrence: recurrence ? {
-      ...recurrence,
+    recurrence: recurrence || recurrenceCount ? {
+      ...(recurrence ?? { frequency: "custom" as const, weekdays: allowedWeekdays }),
       startDate: inferredDate ?? baseDate,
       startTime: range?.start,
       endTime: range?.end,
+      durationMode: outcomeMode === "deliverable" ? "per_cycle" : "per_occurrence",
+      schedulingMode: commitmentLevel === "if_time" ? "spare_time" : "required",
     } : undefined,
     autoPlan: kind !== "fixed_event",
     status: "active",
@@ -396,8 +585,12 @@ export function parsePlannerCommands(
   lines.forEach((line, index) => {
     const draft = parsePlannerCommand(line, profile, now);
     drafts.push(draft);
-    if (!parseDuration(line) && !parseTimeRange(line)) {
+    const durationEstimate = parseWorkDurationEstimate(line);
+    if (!durationEstimate && !parseTimeRange(line)) {
       ambiguities.push({ index, field: "duration", message: "Длительность не указана; временно поставлен 1 час." });
+    }
+    if (durationEstimate?.mode === "range") {
+      ambiguities.push({ index, field: "duration", message: "Диапазон распознан; проверьте значение «обычно», которое используется для основного плана." });
     }
     if (draft.kind === "fixed_event" && !draft.start) {
       ambiguities.push({ index, field: "time", message: "Для фиксированного события нужно указать начало и конец." });
@@ -495,6 +688,12 @@ function blockInterval(block: PlannerBlock): Interval {
   return { start: new Date(block.startAt).getTime(), end: new Date(block.endAt).getTime() };
 }
 
+function accountedBlockMinutes(block: PlannerBlock): number {
+  return block.status === "done" && block.actualStartAt && block.actualEndAt
+    ? isoDurationMinutes(block.actualStartAt, block.actualEndAt)
+    : isoDurationMinutes(block.startAt, block.endAt);
+}
+
 function windowContainsMinute(window: PlannerTimeWindow, minute: number): boolean {
   const start = plannerTimeToMinutes(window.start);
   let end = plannerTimeToMinutes(window.end);
@@ -524,8 +723,23 @@ function requiredPlannerGap(defaultMinutes: number, afterMinutes: number, before
   return Math.max(defaultMinutes, Math.max(0, afterMinutes) + Math.max(0, beforeMinutes));
 }
 
+function strictTravelExtra(item: PlannerItem): number {
+  const travel = item.uncertaintyPolicy.travel;
+  return travel?.punctuality === "strict" ? Math.max(0, travel.maxMinutes - travel.likelyMinutes) : 0;
+}
+
+function plannerBufferBefore(item: PlannerItem | undefined): number {
+  if (!item) return 0;
+  return item.bufferBeforeMinutes + strictTravelExtra(item);
+}
+
+function plannerBufferAfter(item: PlannerItem | undefined): number {
+  if (!item) return 0;
+  return item.bufferAfterMinutes > 0 ? item.bufferAfterMinutes + strictTravelExtra(item) : 0;
+}
+
 function placementFootprintMinutes(item: PlannerItem, durationMinutes: number): number {
-  return durationMinutes + item.bufferBeforeMinutes + item.bufferAfterMinutes;
+  return durationMinutes + plannerBufferBefore(item) + plannerBufferAfter(item);
 }
 
 function energyAt(profile: PlannerProfile, minute: number): PlannerEnergy {
@@ -563,7 +777,9 @@ function deadlineBufferMinutes(item: PlannerItem): number {
   const ratio = item.estimateConfidence === "high" ? 0.15 : item.estimateConfidence === "low" ? 0.5 : 0.3;
   const minimum = item.estimateConfidence === "high" ? 30 : item.estimateConfidence === "low" ? 120 : 60;
   const maximum = item.estimateConfidence === "high" ? 240 : item.estimateConfidence === "low" ? 960 : 480;
-  return Math.ceil(clamp(item.estimateMinutes * ratio, minimum, maximum) / STEP_MINUTES) * STEP_MINUTES;
+  const confidenceBuffer = clamp(item.estimateMinutes * ratio, minimum, maximum);
+  const uncertaintyBuffer = Math.max(0, item.uncertaintyPolicy.duration.maxMinutes - item.uncertaintyPolicy.duration.likelyMinutes);
+  return Math.ceil(Math.max(confidenceBuffer, uncertaintyBuffer) / STEP_MINUTES) * STEP_MINUTES;
 }
 
 function plannerSlotAvailable(profile: PlannerProfile, occupied: PlannerBlock[], start: number, end: number): boolean {
@@ -573,7 +789,7 @@ function plannerSlotAvailable(profile: PlannerProfile, occupied: PlannerBlock[],
   const insideAvailability = availabilityForDate(profile, date).some((window) => windowContainsMinute(window, minute));
   if (!insideAvailability) return false;
   return !occupied.some((block) => {
-    if (block.status === "cancelled" || block.status === "skipped") return false;
+    if (block.status === "cancelled" || block.status === "skipped" || block.soft) return false;
     const interval = blockInterval(block);
     return start < interval.end && interval.start < end;
   });
@@ -648,9 +864,10 @@ export function analyzePlannerDeadlines(
   return items.flatMap((item): PlannerDeadlineAnalysis[] => {
     if (item.status !== "active" || item.deadlineType === "none" || !item.deadlineAt) return [];
     const completedMinutes = blocks
-      .filter((block) => block.itemId === item.id && block.status === "done")
-      .reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0);
-    const remainingMinutes = Math.max(0, item.estimateMinutes - completedMinutes);
+      .filter((block) => block.itemId === item.id && block.status === "done" && !block.soft)
+      .reduce((sum, block) => sum + accountedBlockMinutes(block), 0);
+    const remainingMinutes = Math.max(0, item.uncertaintyPolicy.duration.likelyMinutes - completedMinutes);
+    const maximumRemainingMinutes = Math.max(0, item.uncertaintyPolicy.duration.maxMinutes - completedMinutes);
     const capacityBlocks = blocks.filter((block) => block.itemId !== item.id);
     const targetFinishAt = resolvePlannerTargetFinish(item, profile, capacityBlocks, now) ?? item.deadlineAt;
     const deadlineMs = new Date(item.deadlineAt).getTime();
@@ -665,6 +882,13 @@ export function analyzePlannerDeadlines(
         : availableToTarget - remainingMinutes < Math.max(30, Math.ceil(item.estimateMinutes * 0.15))
           ? "tight" as const
           : "on_track" as const;
+    const maximumRisk = availableMinutes < maximumRemainingMinutes
+      ? "impossible" as const
+      : availableToTarget < maximumRemainingMinutes
+        ? "at_risk" as const
+        : availableToTarget - maximumRemainingMinutes < Math.max(30, Math.ceil(maximumRemainingMinutes * 0.15))
+          ? "tight" as const
+          : "on_track" as const;
     const latestSafeStartAt = walkAvailableMinutesBackward(profile, capacityBlocks, item.deadlineAt, remainingMinutes, now.getTime());
     return [{
       itemId: item.id,
@@ -677,6 +901,16 @@ export function analyzePlannerDeadlines(
       slackMinutes,
       latestSafeStartAt,
       risk,
+      likelyScenario: {
+        remainingMinutes,
+        slackMinutes,
+        risk,
+      },
+      maximumScenario: {
+        remainingMinutes: maximumRemainingMinutes,
+        slackMinutes: availableMinutes - maximumRemainingMinutes,
+        risk: maximumRisk,
+      },
     }];
   }).sort((left, right) => left.deadlineAt.localeCompare(right.deadlineAt) || left.itemId.localeCompare(right.itemId));
 }
@@ -710,57 +944,153 @@ function buildPlacementRequests(
   timezone: string
 ): PlacementRequest[] {
   const requests: PlacementRequest[] = [];
-  const activeBlocks = blocks.filter((block) => block.status !== "cancelled" && block.status !== "skipped");
-  const recurrenceBlocks = blocks.filter((block) => block.status !== "cancelled");
-  const pushRecurringRequest = (
+  const activeBlocks = blocks.filter((block) => block.status !== "cancelled" && block.status !== "skipped" && !block.soft);
+  const recurrenceBlocks = blocks.filter((block) => block.status !== "cancelled" && !block.soft);
+  const mandatoryMinimum = (item: PlannerItem) => item.deadlineType === "hard"
+    || item.commitmentLevel === "must_not_skip"
+    || item.commitmentLevel === "required";
+  const pushVolumeRequests = (
     item: PlannerItem,
     occurrenceKey: string,
     alreadyPlanned: number,
-    constraints: Pick<PlacementRequest, "targetDate" | "allowedDates">
+    constraints: Pick<PlacementRequest, "targetDate" | "allowedDates">,
+    occurrenceTier?: "likely" | "extra"
   ) => {
-    if (item.recurrence?.schedulingMode !== "spare_time") {
-      const remaining = Math.max(0, item.estimateMinutes - alreadyPlanned);
-      if (remaining > 0) requests.push({ item, occurrenceKey, durationMinutes: remaining, tier: "required", ...constraints });
+    const estimate = item.uncertaintyPolicy.duration;
+    const role = estimate.mode === "unknown" ? "calibration" as const : "work" as const;
+    if (occurrenceTier) {
+      const target = estimate.likelyMinutes;
+      const remaining = Math.max(0, target - alreadyPlanned);
+      if (remaining > 0) requests.push({
+        item,
+        occurrenceKey,
+        durationMinutes: remaining,
+        tier: occurrenceTier,
+        role,
+        mandatory: false,
+        ...constraints,
+      });
       return;
     }
-    const minimumTarget = Math.min(item.estimateMinutes, item.recurrence.minimumMinutes ?? 30);
-    const minimumRemaining = Math.max(0, minimumTarget - alreadyPlanned);
-    const extraRemaining = Math.max(0, item.estimateMinutes - Math.max(alreadyPlanned, minimumTarget));
+    const legacySpareMinimum = item.recurrence?.schedulingMode === "spare_time"
+      ? Math.min(estimate.minMinutes, item.recurrence.minimumMinutes ?? estimate.minMinutes)
+      : estimate.minMinutes;
+    const minimumRemaining = Math.max(0, legacySpareMinimum - alreadyPlanned);
+    const likelyRemaining = Math.max(0, estimate.likelyMinutes - Math.max(alreadyPlanned, legacySpareMinimum));
+    const reserveRemaining = Math.max(0, estimate.maxMinutes - Math.max(alreadyPlanned, estimate.likelyMinutes));
     if (minimumRemaining > 0) requests.push({
       item,
-      occurrenceKey: `${occurrenceKey}:minimum`,
+      occurrenceKey: estimate.mode === "exact" ? occurrenceKey : `${occurrenceKey}:minimum`,
       durationMinutes: minimumRemaining,
       tier: "minimum",
+      role,
+      mandatory: mandatoryMinimum(item),
       ...constraints,
     });
-    if (extraRemaining > 0) requests.push({
+    if (likelyRemaining > 0) requests.push({
       item,
-      occurrenceKey: `${occurrenceKey}:extra`,
-      durationMinutes: extraRemaining,
-      tier: "extra",
+      occurrenceKey: `${occurrenceKey}:likely`,
+      durationMinutes: likelyRemaining,
+      tier: "likely",
+      role,
+      mandatory: false,
+      ...constraints,
+    });
+    if (reserveRemaining > 0) requests.push({
+      item,
+      occurrenceKey: `${occurrenceKey}:reserve`,
+      durationMinutes: reserveRemaining,
+      tier: "reserve",
+      role: "uncertainty_reserve",
+      mandatory: false,
       ...constraints,
     });
   };
+  const datesInPolicyRange = (item: PlannerItem): string[] | undefined => {
+    const policy = item.uncertaintyPolicy.date;
+    if (policy.mode !== "range") return undefined;
+    const earliest = policy.earliestDate ?? startDate;
+    const latest = policy.latestDate ?? endDate;
+    const dates: string[] = [];
+    for (let date = startDate; date <= endDate; date = addPlannerDays(date, 1)) {
+      if (date >= earliest && date <= latest) dates.push(date);
+    }
+    return dates;
+  };
+  const directConstraints = (item: PlannerItem): Pick<PlacementRequest, "targetDate" | "allowedDates"> => {
+    const policy = item.uncertaintyPolicy.date;
+    if (policy.mode === "exact") {
+      return { targetDate: policy.exactDate ?? item.recurrence?.startDate };
+    }
+    return { allowedDates: datesInPolicyRange(item) };
+  };
   for (const item of items) {
     if (item.status !== "active" || !item.autoPlan || item.kind === "fixed_event") continue;
+    if (item.uncertaintyPolicy.duration.mode === "unknown") {
+      const alreadyCalibrated = activeBlocks.some((block) => block.itemId === item.id && block.role === "calibration");
+      if (!alreadyCalibrated) {
+        const allowedDates = item.recurrence ? getRoutineDates(item, startDate, endDate) : datesInPolicyRange(item);
+        pushVolumeRequests(item, `${item.id}:calibration`, 0, item.recurrence
+          ? { allowedDates }
+          : directConstraints(item));
+      }
+      continue;
+    }
+    if (item.uncertaintyPolicy.recurrence.mode === "count_range" && item.recurrence && item.recurrence.frequency !== "once") {
+      const policy = item.uncertaintyPolicy.recurrence;
+      const candidateDates = getRoutineDates(item, startDate, endDate)
+        .filter((date) => !policy.allowedWeekdays.length || policy.allowedWeekdays.includes(plannerWeekday(date)));
+      const periods = new Map<string, string[]>();
+      for (const date of candidateDates) {
+        const periodKey = policy.period === "month" ? date.slice(0, 7) : calendarWeekStart(date);
+        periods.set(periodKey, [...(periods.get(periodKey) ?? []), date]);
+      }
+      if (item.uncertaintyPolicy.outcomeMode === "deliverable") {
+        for (const [periodKey, periodDates] of periods) {
+          const allowedDates = periodDates.slice(0, Math.max(1, policy.maxOccurrences));
+          const alreadyPlanned = recurrenceBlocks
+            .filter((block) => block.itemId === item.id && block.occurrenceKey?.startsWith(`${item.id}:project:${periodKey}`))
+            .reduce((sum, block) => sum + accountedBlockMinutes(block), 0);
+          pushVolumeRequests(item, `${item.id}:project:${periodKey}`, alreadyPlanned, { allowedDates });
+        }
+        continue;
+      }
+      for (const [periodKey, periodDates] of periods) {
+        const maximum = Math.min(policy.maxOccurrences, periodDates.length);
+        for (let index = 0; index < maximum; index += 1) {
+          const occurrenceKey = `${item.id}:count:${periodKey}:${index + 1}`;
+          const targetDate = periodDates[Math.min(periodDates.length - 1, Math.floor(index * periodDates.length / Math.max(1, maximum)))];
+          const alreadyPlanned = recurrenceBlocks
+            .filter((block) => block.itemId === item.id && block.occurrenceKey?.startsWith(occurrenceKey))
+            .reduce((sum, block) => sum + accountedBlockMinutes(block), 0);
+          const occurrenceTier = index < policy.minOccurrences
+            ? undefined
+            : index < policy.likelyOccurrences
+              ? "likely" as const
+              : "extra" as const;
+          pushVolumeRequests(item, occurrenceKey, alreadyPlanned, { targetDate }, occurrenceTier);
+        }
+      }
+      continue;
+    }
     if (item.kind === "routine" || item.recurrence?.frequency === "once") {
       const routineDates = getRoutineDates(item, startDate, endDate);
-      if (item.kind === "routine" && item.recurrence?.durationMode === "per_cycle") {
-        const datesByWeek = new Map<string, string[]>();
+      if (item.uncertaintyPolicy.outcomeMode === "deliverable" || (item.kind === "routine" && item.recurrence?.durationMode === "per_cycle")) {
+        const datesByPeriod = new Map<string, string[]>();
+        const monthly = item.uncertaintyPolicy.recurrence.period === "month";
         for (const date of routineDates) {
-          const weekStart = calendarWeekStart(date);
-          datesByWeek.set(weekStart, [...(datesByWeek.get(weekStart) ?? []), date]);
+          const periodKey = monthly ? date.slice(0, 7) : calendarWeekStart(date);
+          datesByPeriod.set(periodKey, [...(datesByPeriod.get(periodKey) ?? []), date]);
         }
-        for (const [weekStart, allowedDates] of datesByWeek) {
-          const weekEnd = addPlannerDays(weekStart, 6);
+        for (const [periodKey, allowedDates] of datesByPeriod) {
           const alreadyPlanned = recurrenceBlocks
             .filter((block) => {
               if (block.itemId !== item.id) return false;
               const date = blockLocalDate(block, timezone);
-              return date >= weekStart && date <= weekEnd;
+              return monthly ? date.startsWith(periodKey) : calendarWeekStart(date) === periodKey;
             })
-            .reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0);
-          pushRecurringRequest(item, `${item.id}:cycle:${weekStart}`, alreadyPlanned, { allowedDates });
+            .reduce((sum, block) => sum + accountedBlockMinutes(block), 0);
+          pushVolumeRequests(item, `${item.id}:cycle:${periodKey}`, alreadyPlanned, { allowedDates });
         }
         continue;
       }
@@ -768,27 +1098,32 @@ function buildPlacementRequests(
         const key = `${item.id}:${date}`;
         const alreadyPlanned = recurrenceBlocks
           .filter((block) => block.itemId === item.id && blockLocalDate(block, timezone) === date)
-          .reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0);
-        pushRecurringRequest(item, key, alreadyPlanned, { targetDate: date });
+          .reduce((sum, block) => sum + accountedBlockMinutes(block), 0);
+        pushVolumeRequests(item, key, alreadyPlanned, { targetDate: date });
       }
       continue;
     }
     const alreadyPlanned = activeBlocks
       .filter((block) => block.itemId === item.id)
-      .reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0);
-    const remaining = Math.max(0, item.estimateMinutes - alreadyPlanned);
-    if (remaining > 0) requests.push({ item, occurrenceKey: item.id, durationMinutes: remaining });
+      .reduce((sum, block) => sum + accountedBlockMinutes(block), 0);
+    pushVolumeRequests(item, item.id, alreadyPlanned, directConstraints(item));
   }
   return requests.sort((left, right) => {
     const placementRank = (request: PlacementRequest) => {
-      if (request.item.deadlineType === "hard") return 0;
-      if (request.tier === "required" || request.item.deadlineType === "target") return 1;
-      if (request.tier === "minimum") return 2;
-      if (request.tier === "extra") return 4;
-      return 3;
+      if (request.tier === "reserve") return 30;
+      if (request.tier === "extra") return 50;
+      if (request.item.commitmentLevel === "if_time" || request.item.recurrence?.schedulingMode === "spare_time") return 40;
+      const group = request.item.deadlineType === "hard" || request.item.commitmentLevel === "must_not_skip"
+        ? 0
+        : request.item.commitmentLevel === "required"
+          ? 10
+          : 20;
+      return group + (request.tier === "likely" ? 1 : 0);
     };
     const rank = placementRank(left) - placementRank(right);
     if (rank) return rank;
+    const manualRank = left.item.planningRank - right.item.planningRank;
+    if (manualRank) return manualRank;
     const leftHard = left.item.deadlineType === "hard" ? 1 : 0;
     const rightHard = right.item.deadlineType === "hard" ? 1 : 0;
     if (leftHard !== rightHard) return rightHard - leftHard;
@@ -818,6 +1153,11 @@ function scoreCandidate(
   let score = priorityWeight[item.priority] - (startAt - horizonStart) / 3_600_000;
   if (energyAt(profile, startMinute - energyShiftMinutes) === item.energy) score += 80;
   if (item.preferredWindows.some((window) => windowContainsMinute(window, startMinute))) score += 120;
+  if (item.uncertaintyPolicy.date.mode === "preferred" && item.uncertaintyPolicy.date.preferredDate === date) score += 180;
+  if (item.uncertaintyPolicy.time.mode === "preferred" && item.uncertaintyPolicy.time.preferredStart) {
+    const distance = Math.abs(startMinute - plannerTimeToMinutes(item.uncertaintyPolicy.time.preferredStart));
+    score += Math.max(0, 140 - distance);
+  }
   const effectiveDeadline = item.targetFinishAt ?? item.deadlineAt;
   if (effectiveDeadline) {
     const slackHours = (new Date(effectiveDeadline).getTime() - startAt) / 3_600_000;
@@ -849,7 +1189,7 @@ function findPlacement(
     const windows = availabilityForDate(profile, date);
     const totalAvailable = windows.reduce((sum, window) => sum + durationForLocalRange(window.start, window.end), 0);
     const fixedMinutes = occupied
-      .filter((block) => block.fixed && !["cancelled", "skipped"].includes(block.status))
+      .filter((block) => block.fixed && !block.soft && !["cancelled", "skipped"].includes(block.status))
       .reduce((sum, block) => {
         const bodyMinutes = windows.reduce(
           (windowSum, window) => windowSum + blockMinutesInsideWindow(block, date, window, profile.timezone),
@@ -857,10 +1197,10 @@ function findPlacement(
         );
         if (!bodyMinutes) return sum;
         const blockItem = block.itemId ? itemById.get(block.itemId) : undefined;
-        return sum + bodyMinutes + (blockItem?.bufferBeforeMinutes ?? 0) + (blockItem?.bufferAfterMinutes ?? 0);
+        return sum + bodyMinutes + plannerBufferBefore(blockItem) + plannerBufferAfter(blockItem);
       }, 0);
     const capacity = Math.floor(Math.max(0, totalAvailable - fixedMinutes) * (1 - profile.reserveRatio));
-    if ((autoMinutesByDate.get(date) ?? 0) + placementFootprintMinutes(request.item, durationMinutes) > capacity) continue;
+    if (request.tier !== "reserve" && (autoMinutesByDate.get(date) ?? 0) + placementFootprintMinutes(request.item, durationMinutes) > capacity) continue;
     for (const window of windows) {
       const windowStart = plannerTimeToMinutes(window.start);
       let windowEnd = plannerTimeToMinutes(window.end);
@@ -868,10 +1208,19 @@ function findPlacement(
       for (let minute = Math.ceil(windowStart / STEP_MINUTES) * STEP_MINUTES; minute + durationMinutes <= windowEnd; minute += STEP_MINUTES) {
         const localDate = minute >= 1440 ? addPlannerDays(date, 1) : date;
         const localMinute = minute % 1440;
+        const timePolicy = request.item.uncertaintyPolicy.time;
+        if (timePolicy.mode === "exact" && timePolicy.exactStart
+          && localMinute !== plannerTimeToMinutes(timePolicy.exactStart)) continue;
+        if (timePolicy.mode === "range" && timePolicy.earliestStart && timePolicy.latestEnd
+          && !rangeInsideWindow(
+            { start: timePolicy.earliestStart, end: timePolicy.latestEnd },
+            localMinute,
+            localMinute + durationMinutes
+          )) continue;
         if (request.item.allowedWindows.length > 0
           && !request.item.allowedWindows.some((candidate) => rangeInsideWindow(candidate, localMinute, localMinute + durationMinutes))) continue;
-        if (minute - request.item.bufferBeforeMinutes < windowStart
-          || minute + durationMinutes + request.item.bufferAfterMinutes > windowEnd) continue;
+        if (minute - plannerBufferBefore(request.item) < windowStart
+          || minute + durationMinutes + plannerBufferAfter(request.item) > windowEnd) continue;
         if (request.item.avoidedWindows.some((candidate) => windowOverlapsRange(candidate, localMinute, localMinute + durationMinutes))) continue;
         const startAt = zonedPlannerDateTimeToUtc(
           localDate,
@@ -882,18 +1231,18 @@ function findPlacement(
         if (request.item.deadlineType === "hard" && request.item.deadlineAt
           && new Date(endAt).getTime() > new Date(request.item.deadlineAt).getTime()) continue;
         const candidate = { start: new Date(startAt).getTime(), end: new Date(endAt).getTime() };
-        if (candidate.start - request.item.bufferBeforeMinutes * 60_000 < nowMs) continue;
+        if (candidate.start - plannerBufferBefore(request.item) * 60_000 < nowMs) continue;
         if (request.item.earliestAt && candidate.start < new Date(request.item.earliestAt).getTime()) continue;
         if (occupied.some((block) => {
-          if (block.status === "cancelled" || block.status === "skipped") return false;
+          if (block.status === "cancelled" || block.status === "skipped" || block.soft) return false;
           const interval = blockInterval(block);
           const occupiedItem = block.itemId ? itemById.get(block.itemId) : undefined;
-          const occupiedBefore = occupiedItem?.bufferBeforeMinutes ?? 0;
-          const occupiedAfter = occupiedItem?.bufferAfterMinutes ?? 0;
+          const occupiedBefore = plannerBufferBefore(occupiedItem);
+          const occupiedAfter = plannerBufferAfter(occupiedItem);
           if (candidate.end <= interval.start) {
             return candidate.end + requiredPlannerGap(
               profile.defaultBufferMinutes,
-              request.item.bufferAfterMinutes,
+              plannerBufferAfter(request.item),
               occupiedBefore
             ) * 60_000 > interval.start;
           }
@@ -904,7 +1253,7 @@ function findPlacement(
             return candidate.start - requiredPlannerGap(
               profile.defaultBufferMinutes,
               occupiedAfter,
-              request.item.bufferBeforeMinutes
+              plannerBufferBefore(request.item)
             ) * 60_000 < interval.end;
           }
           return true;
@@ -1159,17 +1508,17 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
     const fixedItem = fixedBlock.itemId ? items.find((item) => item.id === fixedBlock.itemId) : undefined;
     const rawIncoming = blockInterval(fixedBlock);
     const incoming = {
-      start: rawIncoming.start - (fixedItem?.bufferBeforeMinutes ?? 0) * 60_000,
-      end: rawIncoming.end + (fixedItem?.bufferAfterMinutes ?? 0) * 60_000,
+      start: rawIncoming.start - plannerBufferBefore(fixedItem) * 60_000,
+      end: rawIncoming.end + plannerBufferAfter(fixedItem) * 60_000,
     };
     for (const block of [...workingBlocks, ...sleepBlocks]) {
       const occupiedItem = block.itemId ? items.find((item) => item.id === block.itemId) : undefined;
       const rawOccupied = blockInterval(block);
       const occupied = {
-        start: rawOccupied.start - (occupiedItem?.bufferBeforeMinutes ?? 0) * 60_000,
-        end: rawOccupied.end + (occupiedItem?.bufferAfterMinutes ?? 0) * 60_000,
+        start: rawOccupied.start - plannerBufferBefore(occupiedItem) * 60_000,
+        end: rawOccupied.end + plannerBufferAfter(occupiedItem) * 60_000,
       };
-      if (block.id === fixedBlock.id || block.status === "cancelled" || block.status === "skipped" || !rangesOverlap(incoming, occupied)) continue;
+      if (block.id === fixedBlock.id || block.status === "cancelled" || block.status === "skipped" || block.soft || !rangesOverlap(incoming, occupied)) continue;
       if (block.status === "in_progress") {
         conflicts.push({
           id: uniqueId("conflict-active", block.id, fixedBlock.id),
@@ -1205,14 +1554,25 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
     const extended = { ...original, endAt: addIsoMinutes(original.endAt, input.blockExtension.minutes) };
     for (const block of [...workingBlocks, ...sleepBlocks]) {
       if (block.id === original.id || !rangesOverlap(blockInterval(extended), blockInterval(block))) continue;
+      if (block.soft) {
+        changes.push({
+          id: uniqueId("consume-reserve", block.id, input.blockExtension.minutes),
+          kind: "remove_block",
+          blockId: block.id,
+          title: block.title,
+          reason: "Продление сначала использует мягкий резерв этого плана.",
+        });
+        workingBlocks = workingBlocks.filter((candidate) => candidate.id !== block.id);
+        continue;
+      }
       if (block.fixed || block.status === "done" || block.status === "in_progress" || new Date(block.startAt).getTime() < now.getTime()) {
         conflicts.push({
           id: uniqueId("extension-conflict", original.id, block.id),
           kind: block.status === "in_progress" ? "active_overlap" : "fixed_overlap",
           title: original.title,
           message: block.id.startsWith("sleep-")
-            ? "Дополнительные 15 минут пересекаются с защищённым сном. Продление не применено."
-            : "Дополнительные 15 минут пересекаются с защищённым или уже начатым делом.",
+            ? `Дополнительные ${input.blockExtension.minutes} минут пересекаются с защищённым сном. Продление не применено.`
+            : `Дополнительные ${input.blockExtension.minutes} минут пересекаются с защищённым или уже начатым делом.`,
           blockIds: [original.id, block.id],
         });
       } else {
@@ -1230,16 +1590,30 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
       fromEndAt: original.endAt,
       toStartAt: original.startAt,
       toEndAt: extended.endAt,
-      reason: "Добавлено 15 минут; всё последующее пересчитано без молчаливого сдвига сна или другого срока.",
+      reason: `Добавлено ${input.blockExtension.minutes} минут; всё последующее пересчитано без молчаливого сдвига сна или другого срока.`,
     });
     const itemIndex = items.findIndex((item) => item.id === original.itemId);
     if (itemIndex >= 0) {
-      items[itemIndex] = { ...items[itemIndex], estimateMinutes: items[itemIndex].estimateMinutes + input.blockExtension.minutes };
+      const currentItem = items[itemIndex];
+      const likelyMinutes = currentItem.uncertaintyPolicy.duration.likelyMinutes + input.blockExtension.minutes;
+      items[itemIndex] = normalizePlannerItem({
+        ...currentItem,
+        estimateMinutes: likelyMinutes,
+        uncertaintyPolicy: {
+          ...currentItem.uncertaintyPolicy,
+          duration: {
+            ...currentItem.uncertaintyPolicy.duration,
+            likelyMinutes,
+            maxMinutes: Math.max(likelyMinutes, currentItem.uncertaintyPolicy.duration.maxMinutes),
+            source: "user",
+          },
+        },
+      });
       changes.push({
         id: uniqueId("extend-item", items[itemIndex].id, items[itemIndex].estimateMinutes),
         kind: "update_item",
         item: items[itemIndex],
-        reason: "Оценка длительности увеличена на подтверждаемые 15 минут.",
+        reason: `Обычная оценка длительности увеличена на подтверждённые ${input.blockExtension.minutes} минут.`,
       });
     }
   }
@@ -1274,8 +1648,8 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
       const blockItem = block.itemId ? items.find((item) => item.id === block.itemId) : undefined;
       const rawBlock = blockInterval(block);
       const protectedBlock = {
-        start: rawBlock.start - (blockItem?.bufferBeforeMinutes ?? 0) * 60_000,
-        end: rawBlock.end + (blockItem?.bufferAfterMinutes ?? 0) * 60_000,
+        start: rawBlock.start - plannerBufferBefore(blockItem) * 60_000,
+        end: rawBlock.end + plannerBufferAfter(blockItem) * 60_000,
       };
       if (!rangesOverlap(blockInterval(sleep), protectedBlock)) continue;
       if (conflicts.some((conflict) => conflict.blockIds.includes(sleep.id) && conflict.blockIds.includes(block.id))) continue;
@@ -1346,7 +1720,7 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
 
   const autoMinutesByDate = new Map<string, number>();
   const itemById = new Map(items.map((item) => [item.id, item]));
-  for (const block of workingBlocks.filter((candidate) => !candidate.fixed && !["cancelled", "skipped", "done"].includes(candidate.status))) {
+  for (const block of workingBlocks.filter((candidate) => !candidate.fixed && !candidate.soft && !["cancelled", "skipped", "done"].includes(candidate.status))) {
     const date = formatDateInTimeZone(new Date(block.startAt), profile.timezone);
     const windows = availabilityForDate(profile, date);
     const minutes = windows.reduce(
@@ -1398,6 +1772,8 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
         status: "planned",
         source: "auto",
         fixed: false,
+        role: request.role ?? "work",
+        soft: request.tier === "reserve",
         occurrenceKey: request.occurrenceKey,
       };
       if (request.sourceBlock && part === 1) {
@@ -1417,20 +1793,71 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
           id: uniqueId("add", block.id),
           kind: "add_block",
           block,
-          reason: request.tier === "extra"
+          reason: request.tier === "reserve"
+            ? "Мягкий резерв показывает запас до максимальной оценки и не блокирует менее важные дела."
+            : request.tier === "extra"
             ? "Свободное время добавлено после размещения обязательств, сроков и защищённого минимума."
             : request.tier === "minimum"
-              ? "Минимальное время хобби защищено от вытеснения обычными гибкими делами."
+              ? "Сначала размещён обязательный минимум неточной оценки."
+              : request.tier === "likely"
+                ? "План доведён от минимума до наиболее вероятной длительности."
               : request.item.preferredWindows.length
             ? "Подобрано свободное окно с учётом предпочтительного времени и нагрузки."
             : "Подобрано свободное окно с учётом приоритета, энергии и нагрузки.",
         });
       }
       workingBlocks.push(block);
-      autoMinutesByDate.set(
-        placement.date,
-        (autoMinutesByDate.get(placement.date) ?? 0) + placementFootprintMinutes(request.item, duration)
-      );
+      const travel = request.item.uncertaintyPolicy.travel;
+      const travelReserveMinutes = travel && travel.punctuality !== "strict"
+        ? Math.max(0, travel.maxMinutes - travel.likelyMinutes)
+        : 0;
+      if (!block.soft && travelReserveMinutes > 0) {
+        const outboundReserveEndAt = addIsoMinutes(block.startAt, -request.item.bufferBeforeMinutes);
+        const travelReserves: PlannerBlock[] = [{
+          id: uniqueId("travel-reserve-before", block.id),
+          itemId: request.item.id,
+          title: `Запас на дорогу — ${request.item.title}`,
+          startAt: addIsoMinutes(outboundReserveEndAt, -travelReserveMinutes),
+          endAt: outboundReserveEndAt,
+          status: "planned",
+          source: "auto",
+          fixed: false,
+          role: "uncertainty_reserve",
+          soft: true,
+          occurrenceKey: `${request.occurrenceKey}:travel-before`,
+        }];
+        if (request.item.bufferAfterMinutes > 0) {
+          const returnReserveStartAt = addIsoMinutes(block.endAt, request.item.bufferAfterMinutes);
+          travelReserves.push({
+          id: uniqueId("travel-reserve-after", block.id),
+          itemId: request.item.id,
+          title: `Запас на обратную дорогу — ${request.item.title}`,
+          startAt: returnReserveStartAt,
+          endAt: addIsoMinutes(returnReserveStartAt, travelReserveMinutes),
+          status: "planned",
+          source: "auto",
+          fixed: false,
+          role: "uncertainty_reserve",
+          soft: true,
+          occurrenceKey: `${request.occurrenceKey}:travel-after`,
+          });
+        }
+        for (const reserve of travelReserves) {
+          workingBlocks.push(reserve);
+          changes.push({
+            id: uniqueId("add", reserve.id),
+            kind: "add_block",
+            block: reserve,
+            reason: "Мягкий запас учитывает неопределённость дороги и не блокирует менее важные дела.",
+          });
+        }
+      }
+      if (!block.soft) {
+        autoMinutesByDate.set(
+          placement.date,
+          (autoMinutesByDate.get(placement.date) ?? 0) + placementFootprintMinutes(request.item, duration)
+        );
+      }
       remaining -= duration;
       if (!request.item.canSplit) break;
     }
@@ -1456,7 +1883,7 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
           reason: "Вытеснённый блок возвращён в очередь: безопасного нового времени пока нет.",
         });
       }
-      if (request.tier === "extra") continue;
+      if (!request.mandatory) continue;
       const reason = "Не найдено свободного окна без нарушения доступности, буферов или резерва времени.";
       unplaced.push({
         itemId: request.item.id,
@@ -1984,13 +2411,66 @@ export function applyProposalChanges(
   return { items: nextItems, blocks: nextBlocks };
 }
 
+export function annotateTentativeBlocks(items: PlannerItem[], blocks: PlannerBlock[]): PlannerBlock[] {
+  const byId = new Map(items.map((item) => [item.id, item]));
+  const groupRank = (item: PlannerItem | undefined) => {
+    if (!item) return 99_000_000;
+    const group = item.deadlineType === "hard" || item.commitmentLevel === "must_not_skip"
+      ? 0
+      : item.commitmentLevel === "required"
+        ? 1
+        : item.commitmentLevel === "desired"
+          ? 2
+          : 3;
+    return group * 1_000_000 + item.planningRank;
+  };
+  const reserves = blocks.filter((block) => block.soft && block.status === "planned");
+  return blocks.map((block) => {
+    if (block.soft || block.status !== "planned") return { ...block, tentative: false };
+    const blockRank = groupRank(block.itemId ? byId.get(block.itemId) : undefined);
+    const tentative = reserves.some((reserve) => {
+      if (reserve.itemId === block.itemId || groupRank(reserve.itemId ? byId.get(reserve.itemId) : undefined) >= blockRank) return false;
+      return rangesOverlap(blockInterval(block), blockInterval(reserve));
+    });
+    return { ...block, tentative };
+  });
+}
+
 export function plannerCompletionSuggestion(item: PlannerItem, blocks: PlannerBlock[]): number | null {
   const samples = blocks
-    .filter((block) => block.itemId === item.id && block.status === "done" && block.actualStartAt && block.actualEndAt)
+    .filter((block) => block.itemId === item.id && block.status === "done" && !block.soft && block.actualStartAt && block.actualEndAt)
     .map((block) => isoDurationMinutes(block.actualStartAt!, block.actualEndAt!))
     .filter((duration) => duration >= 5)
     .sort((left, right) => left - right);
   if (samples.length < 3) return null;
   const median = samples[Math.floor(samples.length / 2)];
   return Math.abs(median - item.estimateMinutes) >= 10 ? median : null;
+}
+
+export function plannerCompletionRangeSuggestion(
+  item: PlannerItem,
+  blocks: PlannerBlock[]
+): { minMinutes: number; likelyMinutes: number; maxMinutes: number; sampleCount: number } | null {
+  const samples = blocks
+    .filter((block) => block.itemId === item.id && block.status === "done" && !block.soft && block.actualStartAt && block.actualEndAt)
+    .map((block) => isoDurationMinutes(block.actualStartAt!, block.actualEndAt!))
+    .filter((duration) => duration >= 5)
+    .sort((left, right) => left - right);
+  if (samples.length < 3) return null;
+  const percentile = (ratio: number) => samples[Math.min(samples.length - 1, Math.round((samples.length - 1) * ratio))];
+  const roundFive = (value: number) => Math.max(5, Math.round(value / 5) * 5);
+  const suggestion = {
+    minMinutes: roundFive(percentile(0.2)),
+    likelyMinutes: roundFive(percentile(0.5)),
+    maxMinutes: roundFive(percentile(0.8)),
+    sampleCount: samples.length,
+  };
+  suggestion.minMinutes = Math.min(suggestion.minMinutes, suggestion.likelyMinutes);
+  suggestion.maxMinutes = Math.max(suggestion.maxMinutes, suggestion.likelyMinutes);
+  const current = item.uncertaintyPolicy.duration;
+  return Math.abs(current.minMinutes - suggestion.minMinutes) >= 10
+    || Math.abs(current.likelyMinutes - suggestion.likelyMinutes) >= 10
+    || Math.abs(current.maxMinutes - suggestion.maxMinutes) >= 10
+    ? suggestion
+    : null;
 }

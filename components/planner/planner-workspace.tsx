@@ -29,8 +29,10 @@ import {
   type PlannerDraft,
   type PlannerDeadlineChainMode,
   type PlannerDeadlineType,
+  type PlannerCommitmentLevel,
   type PlannerEnergy,
   type PlannerEstimateConfidence,
+  type PlannerEstimateMode,
   type PlannerHorizon,
   type PlannerItem,
   type PlannerItemKind,
@@ -58,7 +60,7 @@ import {
 import styles from "./planner-workspace.module.css";
 
 type PlannerView = "day" | "week" | "month" | "agenda";
-type Modal = "quick" | "item" | "proposal" | "settings" | "stats" | "import" | "assistant" | "sleep" | null;
+type Modal = "quick" | "item" | "proposal" | "settings" | "stats" | "import" | "assistant" | "sleep" | "hierarchy" | null;
 type CalendarBlock = PlannerBlock | PlannerSleepBlock;
 
 function isSleepBlock(block: CalendarBlock): block is PlannerSleepBlock {
@@ -96,9 +98,18 @@ type ItemForm = {
   title: string;
   kind: PlannerItemKind;
   estimateMinutes: string;
+  durationEstimateMode: PlannerEstimateMode;
+  minimumDurationMinutes: string;
+  maximumDurationMinutes: string;
+  durationTolerancePercent: "15" | "30" | "50";
+  calibrationMinutes: string;
+  outcomeMode: "deliverable" | "time_budget";
+  commitmentLevel: PlannerCommitmentLevel;
+  planningRank: string;
   date: string;
   start: string;
   end: string;
+  deadlineEarliest: string;
   deadline: string;
   deadlineTime: string;
   deadlineType: PlannerDeadlineType;
@@ -130,6 +141,16 @@ type ItemForm = {
   recurrenceDurationMode: "per_occurrence" | "per_cycle";
   recurrenceSchedulingMode: "required" | "spare_time";
   minimumEstimateMinutes: string;
+  recurrencePolicyMode: "exact_days" | "count_range";
+  recurrencePeriod: "week" | "month";
+  minOccurrences: string;
+  likelyOccurrences: string;
+  maxOccurrences: string;
+  dateFlexibility: "exact" | "preferred" | "range" | "any";
+  preferredDate: string;
+  earliestDate: string;
+  latestDate: string;
+  timeFlexibility: "preferred" | "range" | "any";
 };
 
 const text = {
@@ -259,9 +280,11 @@ function formatDuration(minutes: number, locale: Locale): string {
 }
 
 function plannerItemDurationLabel(item: PlannerItem, locale: Locale): string {
-  if (item.recurrence?.schedulingMode !== "spare_time") return formatDuration(item.estimateMinutes, locale);
-  const minimum = Math.min(item.estimateMinutes, item.recurrence.minimumMinutes ?? 30);
-  return `${locale === "ru" ? "в свободное время" : "in spare time"} · ${formatDuration(minimum, locale)}–${formatDuration(item.estimateMinutes, locale)}`;
+  const estimate = item.uncertaintyPolicy.duration;
+  const prefix = item.recurrence?.schedulingMode === "spare_time" ? `${locale === "ru" ? "в свободное время" : "in spare time"} · ` : "";
+  if (estimate.mode === "unknown") return `${prefix}${locale === "ru" ? "пробная сессия" : "calibration"} ${formatDuration(estimate.calibrationMinutes ?? estimate.likelyMinutes, locale)}`;
+  if (estimate.mode === "exact") return `${prefix}${formatDuration(estimate.likelyMinutes, locale)}`;
+  return `${prefix}${formatDuration(estimate.minMinutes, locale)} — ${formatDuration(estimate.likelyMinutes, locale)} — ${formatDuration(estimate.maxMinutes, locale)}`;
 }
 
 function formatCountdown(endAt: string, now: Date, locale: Locale): string {
@@ -278,8 +301,11 @@ function formatDay(date: string, locale: Locale, options: Intl.DateTimeFormatOpt
 
 function defaultItemForm(date: string): ItemForm {
   return {
-    id: "", title: "", kind: "flexible_task", estimateMinutes: "60", date,
-    start: "", end: "", deadline: "", deadlineTime: "23:59", deadlineType: "none",
+    id: "", title: "", kind: "flexible_task", estimateMinutes: "60",
+    durationEstimateMode: "exact", minimumDurationMinutes: "60", maximumDurationMinutes: "60",
+    durationTolerancePercent: "30", calibrationMinutes: "30", outcomeMode: "deliverable",
+    commitmentLevel: "required", planningRank: "0", date,
+    start: "", end: "", deadlineEarliest: "", deadline: "", deadlineTime: "23:59", deadlineType: "none",
     targetFinishMode: "auto", targetFinishDate: "", targetFinishTime: "23:59",
     estimateConfidence: "normal", deadlineChainMode: "inherit", deadlineChainGap: "5",
     nextItemId: "", createMilestones: false, priority: "normal", energy: "normal",
@@ -290,6 +316,9 @@ function defaultItemForm(date: string): ItemForm {
     recurrenceWeekdays: [plannerWeekday(date)],
     recurrenceDurationMode: "per_occurrence",
     recurrenceSchedulingMode: "required", minimumEstimateMinutes: "30",
+    recurrencePolicyMode: "exact_days", recurrencePeriod: "week",
+    minOccurrences: "2", likelyOccurrences: "3", maxOccurrences: "4",
+    dateFlexibility: "any", preferredDate: "", earliestDate: "", latestDate: "", timeFlexibility: "any",
   };
 }
 
@@ -303,10 +332,21 @@ function formFromDraft(draft: PlannerDraft, date: string, timezone: string): Ite
     id: draft.id ?? "",
     title: draft.title,
     kind: draft.kind ?? form.kind,
-    estimateMinutes: String(draft.estimateMinutes ?? 60),
+    estimateMinutes: String(draft.uncertaintyPolicy?.duration.likelyMinutes ?? draft.estimateMinutes ?? 60),
+    durationEstimateMode: draft.uncertaintyPolicy?.duration.mode ?? "exact",
+    minimumDurationMinutes: String(draft.uncertaintyPolicy?.duration.minMinutes ?? draft.estimateMinutes ?? 60),
+    maximumDurationMinutes: String(draft.uncertaintyPolicy?.duration.maxMinutes ?? draft.estimateMinutes ?? 60),
+    durationTolerancePercent: String(draft.uncertaintyPolicy?.duration.tolerancePercent ?? 30) as ItemForm["durationTolerancePercent"],
+    calibrationMinutes: String(draft.uncertaintyPolicy?.duration.calibrationMinutes ?? 30),
+    outcomeMode: draft.uncertaintyPolicy?.outcomeMode ?? (draft.recurrence?.durationMode === "per_cycle" ? "deliverable" : "time_budget"),
+    commitmentLevel: draft.commitmentLevel ?? "required",
+    planningRank: String(draft.planningRank ?? 0),
     date: draft.date ?? date,
     start: draft.start ?? "",
     end: draft.end ?? "",
+    deadlineEarliest: draft.uncertaintyPolicy?.deadline?.preferredFromAt
+      ? formatDateInTimeZone(new Date(draft.uncertaintyPolicy.deadline.preferredFromAt), timezone)
+      : "",
     deadline: draft.deadlineAt ? formatDateInTimeZone(new Date(draft.deadlineAt), timezone) : "",
     deadlineTime: draft.deadlineAt ? formatTimeInTimeZone(new Date(draft.deadlineAt), timezone) : "23:59",
     deadlineType: draft.deadlineType ?? (draft.deadlineAt ? "target" : "none"),
@@ -338,6 +378,16 @@ function formFromDraft(draft: PlannerDraft, date: string, timezone: string): Ite
     recurrenceDurationMode: draft.recurrence?.durationMode ?? "per_occurrence",
     recurrenceSchedulingMode: draft.recurrence?.schedulingMode ?? "required",
     minimumEstimateMinutes: String(draft.recurrence?.minimumMinutes ?? 30),
+    recurrencePolicyMode: draft.uncertaintyPolicy?.recurrence.mode ?? "exact_days",
+    recurrencePeriod: draft.uncertaintyPolicy?.recurrence.period ?? "week",
+    minOccurrences: String(draft.uncertaintyPolicy?.recurrence.minOccurrences ?? 2),
+    likelyOccurrences: String(draft.uncertaintyPolicy?.recurrence.likelyOccurrences ?? 3),
+    maxOccurrences: String(draft.uncertaintyPolicy?.recurrence.maxOccurrences ?? 4),
+    dateFlexibility: draft.uncertaintyPolicy?.date.mode ?? "any",
+    preferredDate: draft.uncertaintyPolicy?.date.preferredDate ?? "",
+    earliestDate: draft.uncertaintyPolicy?.date.earliestDate ?? "",
+    latestDate: draft.uncertaintyPolicy?.date.latestDate ?? "",
+    timeFlexibility: draft.uncertaintyPolicy?.time.mode === "preferred" || draft.uncertaintyPolicy?.time.mode === "range" ? draft.uncertaintyPolicy.time.mode : "any",
   };
 }
 
@@ -345,7 +395,7 @@ function asDraft(form: ItemForm, profile: PlannerProfile, locale: Locale): Plann
   const recurrence: PlannerRecurrence | undefined = form.kind === "routine"
     ? {
         frequency: form.recurrenceFrequency,
-        durationMode: form.recurrenceDurationMode,
+        durationMode: form.outcomeMode === "deliverable" ? "per_cycle" : form.recurrenceDurationMode,
         schedulingMode: form.recurrenceSchedulingMode,
         minimumMinutes: form.recurrenceSchedulingMode === "spare_time"
           ? Math.min(Number(form.minimumEstimateMinutes) || 30, Number(form.estimateMinutes) || 60)
@@ -358,10 +408,21 @@ function asDraft(form: ItemForm, profile: PlannerProfile, locale: Locale): Plann
   const deadlineAt = form.kind !== "fixed_event" && form.deadlineType !== "none" && form.deadline
     ? zonedPlannerDateTimeToUtc(form.deadline, form.deadlineTime || "23:59", profile.timezone)
     : undefined;
+  const preferredDeadlineFromAt = form.deadlineType === "target" && form.deadlineEarliest
+    ? zonedPlannerDateTimeToUtc(form.deadlineEarliest, "00:00", profile.timezone)
+    : undefined;
   const targetFinishAt = form.deadlineType === "hard" && form.targetFinishMode === "manual" && form.targetFinishDate
     ? zonedPlannerDateTimeToUtc(form.targetFinishDate, form.targetFinishTime || "23:59", profile.timezone)
     : undefined;
-  const estimateMinutes = Number(form.estimateMinutes) || 60;
+  const estimateMinutes = form.durationEstimateMode === "unknown"
+    ? Number(form.calibrationMinutes) || 30
+    : Number(form.estimateMinutes) || 60;
+  const minimumDurationMinutes = form.durationEstimateMode === "exact" || form.durationEstimateMode === "unknown"
+    ? estimateMinutes
+    : Math.min(estimateMinutes, Number(form.minimumDurationMinutes) || estimateMinutes);
+  const maximumDurationMinutes = form.durationEstimateMode === "exact" || form.durationEstimateMode === "unknown"
+    ? estimateMinutes
+    : Math.max(estimateMinutes, Number(form.maximumDurationMinutes) || estimateMinutes);
   const milestoneCount = form.createMilestones && deadlineAt && estimateMinutes >= 120
     ? Math.min(5, Math.max(2, Math.ceil(estimateMinutes / 120)))
     : 0;
@@ -372,6 +433,47 @@ function asDraft(form: ItemForm, profile: PlannerProfile, locale: Locale): Plann
     id: form.id || undefined,
     title: form.title.trim(), kind: form.kind,
     estimateMinutes,
+    uncertaintyPolicy: {
+      outcomeMode: form.outcomeMode,
+      duration: {
+        mode: form.durationEstimateMode,
+        minMinutes: minimumDurationMinutes,
+        likelyMinutes: estimateMinutes,
+        maxMinutes: maximumDurationMinutes,
+        tolerancePercent: form.durationEstimateMode === "approximate" ? Number(form.durationTolerancePercent) as 15 | 30 | 50 : undefined,
+        calibrationMinutes: form.durationEstimateMode === "unknown" ? Number(form.calibrationMinutes) || 30 : undefined,
+        source: "user",
+      },
+      date: {
+        mode: form.kind === "fixed_event" ? "exact" : form.dateFlexibility,
+        exactDate: form.dateFlexibility === "exact" ? form.date || undefined : undefined,
+        preferredDate: form.preferredDate || undefined,
+        earliestDate: form.earliestDate || undefined,
+        latestDate: form.latestDate || undefined,
+      },
+      time: {
+        mode: form.kind === "fixed_event" ? "exact" : form.timeFlexibility,
+        exactStart: form.kind === "fixed_event" ? form.start || undefined : undefined,
+        preferredStart: form.preferredStart || undefined,
+        earliestStart: form.allowedStart || undefined,
+        latestEnd: form.allowedEnd || undefined,
+      },
+      recurrence: {
+        mode: form.recurrencePolicyMode,
+        period: form.recurrencePeriod,
+        minOccurrences: Math.max(0, Number(form.minOccurrences) || 0),
+        likelyOccurrences: Math.max(0, Number(form.likelyOccurrences) || 0),
+        maxOccurrences: Math.max(0, Number(form.maxOccurrences) || 0),
+        allowedWeekdays: form.recurrenceWeekdays,
+      },
+      deadline: form.deadlineType === "none" ? { mode: "none" } : {
+        mode: form.deadlineType === "hard" ? "hard" : "preferred_range",
+        preferredFromAt: preferredDeadlineFromAt,
+        latestAt: deadlineAt,
+      },
+    },
+    commitmentLevel: form.deadlineType === "hard" ? "must_not_skip" : form.commitmentLevel,
+    planningRank: Math.max(0, Number(form.planningRank) || 0),
     date: form.kind === "fixed_event" ? form.date : undefined,
     start: form.kind === "fixed_event" ? form.start || undefined : undefined,
     end: form.kind === "fixed_event" ? form.end || undefined : undefined,
@@ -418,6 +520,8 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [replanSuggested, setReplanSuggested] = useState(false);
+  const [calibrationItemId, setCalibrationItemId] = useState<string | null>(null);
   const [view, setView] = useState<PlannerView>("week");
   const [selectedDate, setSelectedDate] = useState(() => todayIn(Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Minsk"));
   const [mobileTab, setMobileTab] = useState<"now" | "day" | "calendar" | "inbox">("calendar");
@@ -524,7 +628,7 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
     ? buildPlannerSleepBlocks(profile, data.sleepEvents, visibleDates[0], visibleDates[visibleDates.length - 1])
     : [], [data, profile, visibleDates]);
 
-  const activeBlocks = useMemo(() => blocks.filter((block) => !["cancelled", "skipped"].includes(block.status)), [blocks]);
+  const activeBlocks = useMemo(() => blocks.filter((block) => !block.soft && !["cancelled", "skipped"].includes(block.status)), [blocks]);
   const actionableBlocks = useMemo(() => activeBlocks.filter((block) => block.status === "planned" || block.status === "in_progress"), [activeBlocks]);
   const futureItemIds = useMemo(() => new Set(actionableBlocks.filter((block) => new Date(block.endAt) > now).map((block) => block.itemId)), [actionableBlocks, now]);
   const inbox = useMemo(() => items.filter((item) => item.status === "active" && item.kind !== "fixed_event" && !futureItemIds.has(item.id)), [futureItemIds, items]);
@@ -532,6 +636,12 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
     ?? actionableBlocks.find((block) => new Date(block.startAt) <= now && new Date(block.endAt) > now)
     ?? null, [actionableBlocks, now]);
   const currentItem = useMemo(() => currentBlock?.itemId ? items.find((item) => item.id === currentBlock.itemId) : undefined, [currentBlock, items]);
+  const currentProgress = useMemo(() => {
+    if (!currentBlock || currentBlock.status !== "in_progress") return 0;
+    const start = new Date(currentBlock.actualStartAt ?? currentBlock.startAt).getTime();
+    const duration = Math.max(1, new Date(currentBlock.endAt).getTime() - new Date(currentBlock.startAt).getTime());
+    return Math.max(0, (now.getTime() - start) / duration);
+  }, [currentBlock, now]);
   const nextBlock = useMemo(() => actionableBlocks.filter((block) => block.status === "planned" && new Date(block.startAt) > now).sort((a, b) => a.startAt.localeCompare(b.startAt))[0] ?? null, [actionableBlocks, now]);
   const todayHealth = useMemo(() => {
     const date = todayIn(profile.timezone);
@@ -605,6 +715,11 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
       await api(`/api/planner/blocks/${encodeURIComponent(block.id)}/action`, { method: "POST", body: JSON.stringify({ action, minutes, expectedRevision: profile.revision }) });
       await load(true);
       succeeded = true;
+      if (action === "done") {
+        if (new Date(block.endAt).getTime() > Date.now()) setReplanSuggested(true);
+        const completedItem = block.itemId ? items.find((item) => item.id === block.itemId) : undefined;
+        if (completedItem?.uncertaintyPolicy.duration.mode === "unknown") setCalibrationItemId(completedItem.id);
+      }
     });
     return succeeded;
   }
@@ -663,10 +778,31 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
   async function acceptDurationSuggestion(itemId: string, suggestedMinutes: number) {
     const item = items.find((candidate) => candidate.id === itemId);
     if (!item) return;
+    const suggestedRange = data?.durationSuggestions?.find((candidate) => candidate.itemId === itemId)?.suggestedRange;
+    const nextItem = {
+      ...item,
+      estimateMinutes: suggestedRange?.likelyMinutes ?? suggestedMinutes,
+      uncertaintyPolicy: {
+        ...item.uncertaintyPolicy,
+        duration: suggestedRange ? {
+          mode: "range" as const,
+          minMinutes: suggestedRange.minMinutes,
+          likelyMinutes: suggestedRange.likelyMinutes,
+          maxMinutes: suggestedRange.maxMinutes,
+          source: "statistics" as const,
+        } : {
+          ...item.uncertaintyPolicy.duration,
+          minMinutes: suggestedMinutes,
+          likelyMinutes: suggestedMinutes,
+          maxMinutes: suggestedMinutes,
+          source: "statistics" as const,
+        },
+      },
+    };
     await run(async () => {
       await api(`/api/planner/items/${encodeURIComponent(itemId)}`, {
         method: "PATCH",
-        body: JSON.stringify({ expectedRevision: profile.revision, item: { ...item, estimateMinutes: suggestedMinutes } }),
+        body: JSON.stringify({ expectedRevision: profile.revision, item: nextItem }),
       });
       await load(true);
     }, locale === "ru" ? "Оценка длительности обновлена." : "Duration estimate updated.");
@@ -712,10 +848,26 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
     setModal("item");
   }
 
+  function openCalibrationEstimate(itemId: string) {
+    const item = items.find((candidate) => candidate.id === itemId);
+    if (!item) return;
+    const trial = item.uncertaintyPolicy.duration.calibrationMinutes ?? item.estimateMinutes;
+    setQuickTrigger("plans_changed");
+    setItemForm({
+      ...formFromDraft(item, selectedDate, profile.timezone),
+      durationEstimateMode: "range",
+      minimumDurationMinutes: String(trial),
+      estimateMinutes: String(Math.max(trial, trial * 2)),
+      maximumDurationMinutes: String(Math.max(trial, trial * 3)),
+    });
+    setCalibrationItemId(null);
+    setModal("item");
+  }
+
   if (loading) return <div className={styles.loading}>Собираем ваш план…</div>;
   if (!data) return <div className={styles.fatal}><p>{error}</p><button onClick={() => void load()}>Повторить</button></div>;
 
-  const showAssistantSetup = profile.assistantSetupVersion < 3 && modal !== "proposal" && modal !== "import";
+  const showAssistantSetup = profile.assistantSetupVersion < 4 && modal !== "proposal" && modal !== "import";
 
   return (
     <main className={styles.root}>
@@ -736,16 +888,21 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
         <button className={styles.primaryButton} onClick={() => openItem()}>＋ {copy.add}</button>
         <button className={styles.changeButton} onClick={() => openQuick("plans_changed")}>⚡ {copy.changed}</button>
         <button className={styles.ghostButton} onClick={() => setModal("assistant")}>▣ {locale === "ru" ? "Автопланировщик" : "Autoplanner"}</button>
+        <button className={styles.ghostButton} onClick={() => setModal("hierarchy")}>↕ {locale === "ru" ? "Иерархия дел" : "Item hierarchy"}</button>
         <button className={styles.ghostButton} onClick={() => void openLegacyImport()}>↗ {copy.legacy}</button>
         {data.latestChangeSetId && <button className={styles.linkButton} onClick={() => void undo()} disabled={busy}>{copy.undo}</button>}
       </section>
 
       {error && <div className={styles.errorBanner}>{error}<button onClick={() => setError(null)}>×</button></div>}
       {notice && <div className={styles.notice}>{notice}</div>}
+      {replanSuggested && <div className={styles.suggestionBanner}><span>{locale === "ru" ? "Дело завершилось раньше. Освободившееся время можно оставить свободным или пересобрать оставшуюся часть дня." : "The item finished early. Keep the time free or rebuild the rest of the day."}</span><button onClick={() => { setReplanSuggested(false); void run(() => createProposal({ trigger: "plans_changed", rebuildFuture: true })); }}>{locale === "ru" ? "Предпросмотр пересборки" : "Preview rebuild"}</button><button onClick={() => setReplanSuggested(false)}>{locale === "ru" ? "Оставить свободным" : "Keep free"}</button></div>}
+      {calibrationItemId && <div className={styles.suggestionBanner}><span>{locale === "ru" ? "Пробная сессия завершена. Сколько работы осталось? Укажите первую оценку минимум — обычно — максимум; она применится только после вашего подтверждения." : "Calibration finished. How much work remains? Enter the first minimum — usual — maximum estimate; it applies only after confirmation."}</span><button onClick={() => openCalibrationEstimate(calibrationItemId)}>{locale === "ru" ? "Уточнить оценку" : "Refine estimate"}</button></div>}
       {tentativeSleepEvent && <div className={styles.suggestionBanner}><span>{tentativeSleepEvent.actualStartAt
         ? (locale === "ru" ? `Сон перед ${tentativeSleepEvent.wakeDate} рассчитан предварительно по середине указанного диапазона. Подтвердите фактическое засыпание.` : `Sleep before ${tentativeSleepEvent.wakeDate} is tentative and uses the midpoint of your range. Confirm the actual bedtime.`)
         : (locale === "ru" ? `Время сна перед ${tentativeSleepEvent.wakeDate} пока неизвестно. Постоянный режим защищён, но задачи не перестраивались по выдуманному времени.` : `Bedtime before ${tentativeSleepEvent.wakeDate} is still unknown. The regular schedule remains protected and no speculative task moves were made.`)}</span><button onClick={() => openSleep("bedtime", tentativeSleepEvent.wakeDate)}>{locale === "ru" ? "Ложусь сейчас" : "Going to bed now"}</button></div>}
-      {data.durationSuggestions?.[0] && <div className={styles.suggestionBanner}><span>{locale === "ru" ? `После трёх выполнений «${data.durationSuggestions[0].title}» обычно занимает ${formatDuration(data.durationSuggestions[0].suggestedMinutes, locale)} вместо ${formatDuration(data.durationSuggestions[0].currentMinutes, locale)}.` : `After three completions, “${data.durationSuggestions[0].title}” usually takes ${formatDuration(data.durationSuggestions[0].suggestedMinutes, locale)} instead of ${formatDuration(data.durationSuggestions[0].currentMinutes, locale)}.`}</span><button onClick={() => void acceptDurationSuggestion(data.durationSuggestions![0].itemId, data.durationSuggestions![0].suggestedMinutes)}>{locale === "ru" ? "Обновить оценку" : "Update estimate"}</button></div>}
+      {data.durationSuggestions?.[0] && <div className={styles.suggestionBanner}><span>{data.durationSuggestions[0].suggestedRange
+        ? (locale === "ru" ? `После ${data.durationSuggestions[0].suggestedRange.sampleCount} сопоставимых выполнений «${data.durationSuggestions[0].title}» предлагается диапазон ${formatDuration(data.durationSuggestions[0].suggestedRange.minMinutes, locale)} — ${formatDuration(data.durationSuggestions[0].suggestedRange.likelyMinutes, locale)} — ${formatDuration(data.durationSuggestions[0].suggestedRange.maxMinutes, locale)}. Ничего не изменится без подтверждения.` : `After ${data.durationSuggestions[0].suggestedRange.sampleCount} comparable completions, “${data.durationSuggestions[0].title}” is suggested as ${formatDuration(data.durationSuggestions[0].suggestedRange.minMinutes, locale)} — ${formatDuration(data.durationSuggestions[0].suggestedRange.likelyMinutes, locale)} — ${formatDuration(data.durationSuggestions[0].suggestedRange.maxMinutes, locale)}. Nothing changes without confirmation.`)
+        : (locale === "ru" ? `После трёх выполнений «${data.durationSuggestions[0].title}» обычно занимает ${formatDuration(data.durationSuggestions[0].suggestedMinutes, locale)}.` : `After three completions, “${data.durationSuggestions[0].title}” usually takes ${formatDuration(data.durationSuggestions[0].suggestedMinutes, locale)}.`)}</span><button onClick={() => void acceptDurationSuggestion(data.durationSuggestions![0].itemId, data.durationSuggestions![0].suggestedMinutes)}>{locale === "ru" ? "Применить предложение" : "Apply suggestion"}</button></div>}
       {data.sleepDurationSuggestion && <div className={styles.suggestionBanner}><span>{locale === "ru" ? `${data.sleepDurationSuggestion.reason} Предлагаем увеличить цель сна с ${formatDuration(data.sleepDurationSuggestion.currentMinutes, locale)} до ${formatDuration(data.sleepDurationSuggestion.suggestedMinutes, locale)}.` : `Your last seven comparable nights suggest increasing the sleep target from ${formatDuration(data.sleepDurationSuggestion.currentMinutes, locale)} to ${formatDuration(data.sleepDurationSuggestion.suggestedMinutes, locale)}.`}</span><button onClick={() => void acceptSleepDurationSuggestion(data.sleepDurationSuggestion!.suggestedMinutes)}>{locale === "ru" ? "Посмотреть изменение" : "Review change"}</button></div>}
       {data.sleepHealthNotice && <div className={styles.warningBanner}>{locale === "ru" ? data.sleepHealthNotice : "Your sleep schedule has shifted sharply several times in the last two weeks. The planner can protect recovery time, but persistent sleepiness or sleep problems are worth discussing with a professional."}</div>}
 
@@ -812,11 +969,13 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
               <span>{currentBlock.status === "in_progress" ? (locale === "ru" ? "В процессе" : "In progress") : (locale === "ru" ? "По плану сейчас" : "Scheduled now")}</span>
               <h3>{currentBlock.title}</h3>
               <p>{formatCountdown(currentBlock.endAt, now, locale)}</p>
+              {currentProgress >= .8 && currentProgress < 1 && <div className={styles.progressPrompt}>{locale === "ru" ? "Вы использовали около 80% обычной длительности. Блок скоро закончится — ничего переносить пока не нужно." : "You have used about 80% of the usual duration. The block is nearing its end; nothing moves yet."}</div>}
+              {currentProgress >= 1 && <div className={styles.progressPrompt}><strong>{locale === "ru" ? "Обычная длительность закончилась. Как продолжить?" : "The usual duration has elapsed. What next?"}</strong><div><button onClick={() => void blockAction(currentBlock, "done")}>{locale === "ru" ? "Готово" : "Done"}</button>{[15, 30].map((minutes) => <button key={minutes} onClick={() => void run(() => createProposal({ trigger: "plans_changed", blockExtension: { blockId: currentBlock.id, minutes } }))}>+{minutes} {locale === "ru" ? "мин" : "min"}</button>)}<button onClick={() => { const raw = window.prompt(locale === "ru" ? "Сколько ещё минут нужно?" : "How many more minutes?"); const minutes = Math.max(5, Math.min(1440, Number(raw) || 0)); if (minutes) void run(() => createProposal({ trigger: "plans_changed", blockExtension: { blockId: currentBlock.id, minutes } })); }}>{locale === "ru" ? "Другое время" : "Other time"}</button><button onClick={() => setNotice(locale === "ru" ? "Оценка пока не меняется. Дело останется активным, а вы сможете уточнить время позже." : "The estimate stays unchanged. The item remains active and can be refined later.")}>{locale === "ru" ? "Пока не могу оценить" : "Can't estimate yet"}</button></div></div>}
               {currentItem?.deadlineAt && <div className={styles.nowDeadline}><span>{currentItem.deadlineType === "hard" ? (locale === "ru" ? "Жёсткий срок" : "Hard deadline") : (locale === "ru" ? "Целевой срок" : "Target deadline")}</span>{currentItem.targetFinishAt && <small>{locale === "ru" ? "Внутренняя цель" : "Internal target"}: {formatDay(formatDateInTimeZone(new Date(currentItem.targetFinishAt), profile.timezone), locale)} {formatTimeInTimeZone(new Date(currentItem.targetFinishAt), profile.timezone)}</small>}<small>{locale === "ru" ? "Окончательный срок" : "Final deadline"}: {formatDay(formatDateInTimeZone(new Date(currentItem.deadlineAt), profile.timezone), locale)} {formatTimeInTimeZone(new Date(currentItem.deadlineAt), profile.timezone)}</small>{currentItem.deadlinePolicy.nextItemId && <small>{locale === "ru" ? "Следом" : "Next"}: {items.find((item) => item.id === currentItem.deadlinePolicy.nextItemId)?.title ?? (locale === "ru" ? "выбранное дело" : "selected item")}</small>}</div>}
               <div className={styles.quickActions}>
                 {currentBlock.status !== "in_progress" && <button onClick={() => void blockAction(currentBlock, "start")}>{copy.start}</button>}
                 <button className={styles.doneButton} onClick={() => void blockAction(currentBlock, "done")}>{copy.done}</button>
-                <button onClick={() => void run(() => createProposal({ trigger: "plans_changed", blockExtension: { blockId: currentBlock.id, minutes: 15 } }))}>{locale === "ru" ? "Нужно ещё 15 минут" : "Need 15 more minutes"}</button>
+                {currentProgress < 1 && <button onClick={() => void run(() => createProposal({ trigger: "plans_changed", blockExtension: { blockId: currentBlock.id, minutes: 15 } }))}>{locale === "ru" ? "Нужно ещё 15 минут" : "Need 15 more minutes"}</button>}
                 <button onClick={() => void moveRemainder(currentBlock)}>{locale === "ru" ? "Перенести остаток" : "Move remainder"}</button>
                 {currentItem && <button onClick={() => openItem(currentItem)}>{locale === "ru" ? "Сократить объём" : "Reduce scope"}</button>}
                 {[15, 30, 60].map((minutes) => <button key={minutes} onClick={() => void blockAction(currentBlock, "snooze", minutes)}>+{minutes} {locale === "ru" ? "мин" : "min"}</button>)}
@@ -872,6 +1031,7 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
       {modal === "sleep" && <SleepChangedModal profile={profile} locale={locale} busy={busy} initialMode={sleepModalMode} initialWakeDate={sleepModalWakeDate} onClose={() => setModal(null)} onSubmit={(sleepEvent: PlannerSleepEvent) => run(() => createProposal({ sleepEvent, trigger: "sleep_changed", rebuildFuture: Boolean(sleepEvent.actualStartAt) }))} onCheckIn={checkInSleep} onParseFeedback={(textValue) => api<PlannerSleepParseResult>("/api/planner/assistant/parse", { method: "POST", body: JSON.stringify({ mode: "sleep", text: textValue }) })} />}
       {modal === "quick" && <QuickModal command={quickCommand} setCommand={setQuickCommand} onSubmit={submitQuick} onClose={() => setModal(null)} trigger={quickTrigger} busy={busy} locale={locale} />}
       {modal === "item" && <ItemModal value={itemForm} setValue={setItemForm} items={items} profile={profile} now={now} onSubmit={submitItem} onClose={() => setModal(null)} busy={busy} locale={locale} />}
+      {modal === "hierarchy" && <PlannerHierarchyModal items={items} locale={locale} busy={busy} onClose={() => setModal(null)} onReview={(drafts) => run(() => createProposal({ drafts, trigger: "plans_changed", rebuildFuture: true }))} />}
       {modal === "proposal" && proposal && <ProposalModal proposal={proposal} profile={profile} locale={locale} busy={busy}
         onClose={() => setModal(null)} onApply={applyProposal} onEdit={() => proposal.normalizedDraft ? openItem(proposal.normalizedDraft) : setModal(proposal.trigger === "sleep_changed" ? "sleep" : "settings")}
         onSwitchFocus={(planningFocusOverride) => run(() => createProposal({ ...replayProposalInput(proposal), planningFocusOverride }))}
@@ -996,11 +1156,11 @@ function TimeGrid({ dates, blocks, sleepBlocks, profile, locale, selectedDate, s
               const top = ((start - dayStart) / (dayEnd - dayStart)) * 100;
               const size = Math.max(2.3, (duration / (dayEnd - dayStart)) * 100);
               return (
-                <article key={block.id} draggable={!sleep && !busy && block.status === "planned"} onDragStart={() => { if (!sleep) setDragId(block.id); }} onKeyDown={(event) => { if (!sleep) keyboard(event, block); }} tabIndex={0}
-                  className={`${styles.calendarBlock} ${sleep ? styles.sleepBlock : styles[block.fixed ? "fixedBlock" : "flexibleBlock"]} ${sleep && block.tentative ? styles.sleepTentative : ""} ${sleep && block.recoveryNight ? styles.sleepRecovery : ""} ${!sleep && block.status !== "planned" ? styles[block.status] ?? "" : ""}`} style={{ top: `${top}%`, height: `${size}%` }}>
-                  <strong>{sleep ? "■" : block.fixed ? "◆" : "↝"} {formatTimeInTimeZone(new Date(block.startAt), profile.timezone)} · {sleep ? block.tentative ? (locale === "ru" ? "СОН · ПРЕДВАРИТЕЛЬНО" : "SLEEP · TENTATIVE") : block.recoveryNight ? (locale === "ru" ? "СОН · ВОССТАНОВЛЕНИЕ" : "SLEEP · RECOVERY") : (locale === "ru" ? "СОН · ЗАЩИЩЕНО" : "SLEEP · PROTECTED") : block.title}</strong>
-                  <small>{formatDuration(duration, locale)}{sleep ? ` · ${locale === "ru" ? "не перемещается" : "locked"}` : ""}</small>
-                  {!sleep && block.status === "planned" && <div className={styles.resizeActions}>
+                <article key={block.id} draggable={!sleep && !block.soft && !busy && block.status === "planned"} onDragStart={() => { if (!sleep && !block.soft) setDragId(block.id); }} onKeyDown={(event) => { if (!sleep && !block.soft) keyboard(event, block); }} tabIndex={0}
+                  className={`${styles.calendarBlock} ${sleep ? styles.sleepBlock : styles[block.fixed ? "fixedBlock" : "flexibleBlock"]} ${sleep && block.tentative ? styles.sleepTentative : ""} ${sleep && block.recoveryNight ? styles.sleepRecovery : ""} ${!sleep && block.soft ? styles.softReserveBlock : ""} ${!sleep && block.tentative ? styles.tentativeWorkBlock : ""} ${!sleep && block.status !== "planned" ? styles[block.status] ?? "" : ""}`} style={{ top: `${top}%`, height: `${size}%` }}>
+                  <strong>{sleep ? "■" : block.soft ? "≈" : block.fixed ? "◆" : "↝"} {formatTimeInTimeZone(new Date(block.startAt), profile.timezone)} · {sleep ? block.tentative ? (locale === "ru" ? "СОН · ПРЕДВАРИТЕЛЬНО" : "SLEEP · TENTATIVE") : block.recoveryNight ? (locale === "ru" ? "СОН · ВОССТАНОВЛЕНИЕ" : "SLEEP · RECOVERY") : (locale === "ru" ? "СОН · ЗАЩИЩЕНО" : "SLEEP · PROTECTED") : block.soft ? `${locale === "ru" ? "МЯГКИЙ РЕЗЕРВ" : "SOFT RESERVE"} · ${block.title}` : block.tentative ? `${locale === "ru" ? "ПРЕДВАРИТЕЛЬНО" : "TENTATIVE"} · ${block.title}` : block.title}</strong>
+                  <small>{formatDuration(duration, locale)}{sleep ? ` · ${locale === "ru" ? "не перемещается" : "locked"}` : block.soft ? ` · ${locale === "ru" ? "не блокирует другие дела" : "does not block other work"}` : ""}</small>
+                  {!sleep && !block.soft && block.status === "planned" && <div className={styles.resizeActions}>
                     <button onClick={() => void onMove(block, block.startAt, addIsoMinutes(block.endAt, -15))} aria-label={locale === "ru" ? "Уменьшить на 15 минут" : "Shorten 15 minutes"}>−</button>
                     <button onClick={() => void onMove(block, block.startAt, addIsoMinutes(block.endAt, 15))} aria-label={locale === "ru" ? "Увеличить на 15 минут" : "Extend 15 minutes"}>＋</button>
                   </div>}
@@ -1022,7 +1182,7 @@ function MonthGrid({ dates, blocks, sleepBlocks, profile, locale, selectedDate, 
     const dayBlocks: CalendarBlock[] = [...blocks.filter((block) => localDate(block, profile.timezone) === date && !["cancelled", "skipped"].includes(block.status)), ...splitSleepBlocksByDate(sleepBlocks, [date], profile.timezone)];
     return <button key={date} onClick={() => onSelect(date)} className={`${styles.monthDay} ${date === selectedDate ? styles.monthSelected : ""} ${date.slice(0, 7) !== selectedDate.slice(0, 7) ? styles.otherMonth : ""}`}>
       <span>{formatDay(date, locale, { weekday: "short" })}</span><strong>{date.slice(-2)}</strong>
-      <div>{dayBlocks.slice(0, 3).map((block) => <i key={block.id} className={isSleepBlock(block) ? styles.sleepPill : block.fixed ? styles.fixedPill : styles.flexPill}>{isSleepBlock(block) ? "■" : block.fixed ? "◆" : "↝"} {isSleepBlock(block) ? (locale === "ru" ? "Сон" : "Sleep") : block.title}</i>)}</div>
+      <div>{dayBlocks.slice(0, 3).map((block) => <i key={block.id} className={isSleepBlock(block) ? styles.sleepPill : block.soft ? styles.softPill : block.fixed ? styles.fixedPill : styles.flexPill}>{isSleepBlock(block) ? "■" : block.soft ? "≈" : block.fixed ? "◆" : "↝"} {isSleepBlock(block) ? (locale === "ru" ? "Сон" : "Sleep") : block.soft ? (locale === "ru" ? "Мягкий резерв" : "Soft reserve") : block.title}</i>)}</div>
       {dayBlocks.length > 3 && <small>+{dayBlocks.length - 3}</small>}
     </button>;
   })}</div>;
@@ -1035,8 +1195,8 @@ function Agenda({ blocks, sleepBlocks, dates, profile, locale, onAction }: {
   const selected: CalendarBlock[] = [...blocks.filter((block) => dates.includes(localDate(block, profile.timezone)) && block.status !== "cancelled"), ...splitSleepBlocksByDate(sleepBlocks, dates, profile.timezone)].sort((a, b) => a.startAt.localeCompare(b.startAt));
   return <div className={styles.agenda}>{selected.map((block) => <article key={block.id}>
     <time>{formatDay(localDate(block, profile.timezone), locale)} · {formatTimeInTimeZone(new Date(block.startAt), profile.timezone)}</time>
-    <div><strong>{isSleepBlock(block) ? (locale === "ru" ? "Сон · защищено" : "Sleep · protected") : block.title}</strong><small>{formatDuration(isoDurationMinutes(block.startAt, block.endAt), locale)}{isSleepBlock(block) ? "" : ` · ${blockStatusLabel[locale][block.status]}`}</small></div>
-    {!isSleepBlock(block) && block.status === "planned" && <div><button onClick={() => void onAction(block, "start")}>▶</button><button onClick={() => void onAction(block, "done")}>✓</button><button onClick={() => void onAction(block, "skip")}>↷</button></div>}
+    <div><strong>{isSleepBlock(block) ? (locale === "ru" ? "Сон · защищено" : "Sleep · protected") : block.soft ? `${locale === "ru" ? "Мягкий резерв" : "Soft reserve"} · ${block.title}` : block.tentative ? `${locale === "ru" ? "Предварительно" : "Tentative"} · ${block.title}` : block.title}</strong><small>{formatDuration(isoDurationMinutes(block.startAt, block.endAt), locale)}{isSleepBlock(block) ? "" : block.soft ? ` · ${locale === "ru" ? "не блокирует" : "non-blocking"}` : ` · ${blockStatusLabel[locale][block.status]}`}</small></div>
+    {!isSleepBlock(block) && !block.soft && block.status === "planned" && <div><button onClick={() => void onAction(block, "start")}>▶</button><button onClick={() => void onAction(block, "done")}>✓</button><button onClick={() => void onAction(block, "skip")}>↷</button></div>}
   </article>)}</div>;
 }
 
@@ -1072,6 +1232,16 @@ function ItemModal({ value, setValue, items, profile, now, onSubmit, onClose, bu
   onSubmit: (event: FormEvent) => Promise<void>; onClose: () => void; busy: boolean; locale: Locale;
 }) {
   const update = <K extends keyof ItemForm>(key: K, next: ItemForm[K]) => setValue((current) => ({ ...current, [key]: next }));
+  const updateLikelyDuration = (minutes: number) => setValue((current) => {
+    if (current.durationEstimateMode !== "approximate") return { ...current, estimateMinutes: String(minutes) };
+    const tolerance = Number(current.durationTolerancePercent) / 100;
+    return {
+      ...current,
+      estimateMinutes: String(minutes),
+      minimumDurationMinutes: String(Math.max(5, Math.round(minutes * (1 - tolerance)))),
+      maximumDurationMinutes: String(Math.max(minutes, Math.round(minutes * (1 + tolerance)))),
+    };
+  });
   const deadlinePreview = value.deadlineType !== "none" && value.deadline
     ? (() => {
         const deadlineAt = new Date(zonedPlannerDateTimeToUtc(value.deadline, value.deadlineTime || "23:59", profile.timezone)).getTime();
@@ -1091,25 +1261,26 @@ function ItemModal({ value, setValue, items, profile, now, onSubmit, onClose, bu
       <div className={styles.formGrid}>
         <label className={styles.wide}>{locale === "ru" ? "Название" : "Title"}<input autoFocus required value={value.title} onChange={(e) => update("title", e.target.value)} /></label>
         <label>{locale === "ru" ? "Вид" : "Type"}<select value={value.kind} onChange={(e) => update("kind", e.target.value as PlannerItemKind)}>{Object.entries(kindLabel[locale]).map(([kind, label]) => <option key={kind} value={kind}>{label}</option>)}</select></label>
-        <DurationInput label={value.kind === "routine"
-          ? value.recurrenceSchedulingMode === "spare_time"
-            ? (locale === "ru" ? "Не больше" : "At most")
-            : value.recurrenceDurationMode === "per_cycle"
-            ? (locale === "ru" ? "Общий объём за неделю" : "Weekly total")
-            : (locale === "ru" ? "Длительность в каждый день" : "Duration on each day")
-          : (locale === "ru" ? "Длительность" : "Duration")} valueMinutes={value.estimateMinutes} minMinutes={5} maxMinutes={1440} locale={locale} onChangeMinutes={(minutes) => update("estimateMinutes", String(minutes))} />
-        {value.kind === "routine" && value.recurrenceSchedulingMode === "spare_time" && <DurationInput label={locale === "ru" ? "Не меньше" : "At least"} valueMinutes={value.minimumEstimateMinutes} minMinutes={5} maxMinutes={Number(value.estimateMinutes) || 1440} locale={locale} onChangeMinutes={(minutes) => update("minimumEstimateMinutes", String(minutes))} />}
+        {value.kind !== "fixed_event" && <><label>{locale === "ru" ? "Что планируем" : "Planning goal"}<select value={value.outcomeMode} onChange={(e) => update("outcomeMode", e.target.value as ItemForm["outcomeMode"])}><option value="deliverable">{locale === "ru" ? "Закончить результат — общий объём" : "Finish a result — total workload"}</option><option value="time_budget">{locale === "ru" ? "Просто выделять время" : "Simply allocate time"}</option></select></label><label>{locale === "ru" ? "Точность длительности" : "Duration certainty"}<select value={value.durationEstimateMode} onChange={(e) => { const mode = e.target.value as PlannerEstimateMode; setValue((current) => ({ ...current, durationEstimateMode: mode, canSplit: mode === "range" ? true : current.canSplit })); }}><option value="exact">{locale === "ru" ? "Точно" : "Exact"}</option><option value="approximate">{locale === "ru" ? "Примерно" : "Approximate"}</option><option value="range">{locale === "ru" ? "Диапазон" : "Range"}</option><option value="unknown">{locale === "ru" ? "Не знаю — пробная сессия" : "Unknown — calibration session"}</option></select></label></>}
+        {value.kind !== "fixed_event" && value.durationEstimateMode !== "unknown" && <DurationInput label={value.durationEstimateMode === "exact" ? (locale === "ru" ? "Длительность" : "Duration") : (locale === "ru" ? "Обычно" : "Usually")} valueMinutes={value.estimateMinutes} minMinutes={5} maxMinutes={value.outcomeMode === "deliverable" ? 600000 : 1440} locale={locale} onChangeMinutes={updateLikelyDuration} />}
+        {value.kind !== "fixed_event" && value.durationEstimateMode === "unknown" && <DurationInput label={locale === "ru" ? "Пробная сессия" : "Calibration session"} valueMinutes={value.calibrationMinutes} minMinutes={5} maxMinutes={1440} locale={locale} onChangeMinutes={(minutes) => update("calibrationMinutes", String(minutes))} />}
+        {value.kind !== "fixed_event" && (value.durationEstimateMode === "approximate" || value.durationEstimateMode === "range") && <><DurationInput label={locale === "ru" ? "Минимум" : "Minimum"} valueMinutes={value.minimumDurationMinutes} minMinutes={5} maxMinutes={Number(value.estimateMinutes) || 600000} locale={locale} onChangeMinutes={(minutes) => update("minimumDurationMinutes", String(minutes))} /><DurationInput label={locale === "ru" ? "Максимум" : "Maximum"} valueMinutes={value.maximumDurationMinutes} minMinutes={Number(value.estimateMinutes) || 5} maxMinutes={value.outcomeMode === "deliverable" ? 600000 : 1440} locale={locale} onChangeMinutes={(minutes) => update("maximumDurationMinutes", String(minutes))} />{value.durationEstimateMode === "approximate" && <label>{locale === "ru" ? "Погрешность" : "Uncertainty"}<select value={value.durationTolerancePercent} onChange={(e) => { const tolerance = e.target.value as ItemForm["durationTolerancePercent"]; const likely = Number(value.estimateMinutes) || 60; setValue((current) => ({ ...current, durationTolerancePercent: tolerance, minimumDurationMinutes: String(Math.max(5, Math.round(likely * (1 - Number(tolerance) / 100)))), maximumDurationMinutes: String(Math.round(likely * (1 + Number(tolerance) / 100))) })); }}><option value="15">±15%</option><option value="30">±30%</option><option value="50">±50%</option></select></label>}</>}
         {value.kind === "fixed_event" && <><label>{locale === "ru" ? "Дата" : "Date"}<input type="date" required value={value.date} onChange={(e) => update("date", e.target.value)} /></label><label>{locale === "ru" ? "Начало" : "Start"}<input type="time" required value={value.start} onChange={(e) => update("start", e.target.value)} /></label><label>{locale === "ru" ? "Конец" : "End"}<input type="time" value={value.end} onChange={(e) => update("end", e.target.value)} /></label></>}
         {value.kind !== "fixed_event" && <>
+          <label>{locale === "ru" ? "Насколько обязательно" : "Commitment level"}<select value={value.deadlineType === "hard" ? "must_not_skip" : value.commitmentLevel} disabled={value.deadlineType === "hard"} onChange={(e) => update("commitmentLevel", e.target.value as PlannerCommitmentLevel)}><option value="must_not_skip">{locale === "ru" ? "Нельзя пропустить" : "Must not skip"}</option><option value="required">{locale === "ru" ? "Нужно сделать" : "Need to do"}</option><option value="desired">{locale === "ru" ? "Желательно" : "Desired"}</option><option value="if_time">{locale === "ru" ? "Только если останется время" : "Only if time remains"}</option></select></label>
           <label>{locale === "ru" ? "Вид срока" : "Deadline type"}<select value={value.deadlineType} onChange={(e) => update("deadlineType", e.target.value as PlannerDeadlineType)}><option value="none">{locale === "ru" ? "Без срока" : "No deadline"}</option><option value="target">{locale === "ru" ? "Целевой" : "Target"}</option><option value="hard">{locale === "ru" ? "Жёсткий" : "Hard"}</option></select></label>
-          {value.deadlineType !== "none" && <><label>{locale === "ru" ? "Дата срока" : "Deadline date"}<input type="date" required value={value.deadline} onChange={(e) => update("deadline", e.target.value)} /></label><label>{locale === "ru" ? "Точное время" : "Exact time"}<input type="time" required value={value.deadlineTime} onChange={(e) => update("deadlineTime", e.target.value)} /></label></>}
+          {value.deadlineType === "target" && <label>{locale === "ru" ? "Желательно не раньше" : "Prefer not before"}<input type="date" value={value.deadlineEarliest} max={value.deadline || undefined} onChange={(e) => update("deadlineEarliest", e.target.value)} /></label>}
+          {value.deadlineType !== "none" && <><label>{value.deadlineType === "target" ? (locale === "ru" ? "Желательно не позже" : "Prefer not after") : (locale === "ru" ? "Не позже" : "Not after")}<input type="date" required min={value.deadlineType === "target" ? value.deadlineEarliest || undefined : undefined} value={value.deadline} onChange={(e) => update("deadline", e.target.value)} /></label><label>{locale === "ru" ? "Время границы" : "Boundary time"}<input type="time" required value={value.deadlineTime} onChange={(e) => update("deadlineTime", e.target.value)} /></label></>}
+          {value.kind === "flexible_task" && <><label>{locale === "ru" ? "Точность даты" : "Date flexibility"}<select value={value.dateFlexibility} onChange={(e) => update("dateFlexibility", e.target.value as ItemForm["dateFlexibility"])}><option value="exact">{locale === "ru" ? "Точно" : "Exact"}</option><option value="preferred">{locale === "ru" ? "Предпочтительно" : "Preferred"}</option><option value="range">{locale === "ru" ? "Допустимый период" : "Allowed range"}</option><option value="any">{locale === "ru" ? "Без разницы" : "Any"}</option></select></label>{value.dateFlexibility === "exact" && <label>{locale === "ru" ? "Дата" : "Date"}<input type="date" value={value.date} onChange={(e) => update("date", e.target.value)} /></label>}{value.dateFlexibility === "preferred" && <label>{locale === "ru" ? "Желательная дата" : "Preferred date"}<input type="date" value={value.preferredDate} onChange={(e) => update("preferredDate", e.target.value)} /></label>}{value.dateFlexibility === "range" && <><label>{locale === "ru" ? "Не раньше" : "Not before"}<input type="date" value={value.earliestDate} onChange={(e) => update("earliestDate", e.target.value)} /></label><label>{locale === "ru" ? "Не позже" : "Not after"}<input type="date" value={value.latestDate} onChange={(e) => update("latestDate", e.target.value)} /></label></>}</>}
+          <label>{locale === "ru" ? "Точность времени" : "Time flexibility"}<select value={value.timeFlexibility} onChange={(e) => update("timeFlexibility", e.target.value as ItemForm["timeFlexibility"])}><option value="any">{locale === "ru" ? "Без разницы" : "Any"}</option><option value="preferred">{locale === "ru" ? "Предпочтительно" : "Preferred"}</option><option value="range">{locale === "ru" ? "Допустимый интервал" : "Allowed range"}</option></select></label>
         </>}
-        {value.kind === "routine" && <><label>{locale === "ru" ? "Режим" : "Mode"}<select value={value.recurrenceSchedulingMode} onChange={(e) => { const mode = e.target.value as ItemForm["recurrenceSchedulingMode"]; setValue((current) => ({ ...current, recurrenceSchedulingMode: mode, canSplit: mode === "spare_time" ? true : current.canSplit })); }}><option value="required">{locale === "ru" ? "Обычное обязательное дело" : "Regular required item"}</option><option value="spare_time">{locale === "ru" ? "В свободное время" : "In spare time"}</option></select><small>{value.recurrenceSchedulingMode === "spare_time" ? (locale === "ru" ? "Минимум защищается от обычных гибких дел; дополнительное время выдаётся после обязательств и сроков." : "The minimum is protected from ordinary flexible work; extra time comes after commitments and deadlines.") : undefined}</small></label><label>{locale === "ru" ? "Повтор" : "Repeat"}<select value={value.recurrenceFrequency} onChange={(e) => update("recurrenceFrequency", e.target.value as ItemForm["recurrenceFrequency"])}><option value="daily">{locale === "ru" ? "Каждый день" : "Daily"}</option><option value="weekly">{locale === "ru" ? "Раз в неделю" : "Weekly"}</option><option value="custom">{locale === "ru" ? "По дням" : "Weekdays"}</option></select></label><label>{locale === "ru" ? "Длительность означает" : "Duration means"}<select value={value.recurrenceDurationMode} onChange={(e) => { const mode = e.target.value as ItemForm["recurrenceDurationMode"]; setValue((current) => ({ ...current, recurrenceDurationMode: mode, canSplit: mode === "per_cycle" ? true : current.canSplit })); }}><option value="per_occurrence">{locale === "ru" ? "Столько в каждый выбранный день" : "This much on every selected day"}</option><option value="per_cycle">{locale === "ru" ? "Столько всего за выбранные дни недели" : "This much across the selected week"}</option></select><small>{value.recurrenceDurationMode === "per_cycle" ? (locale === "ru" ? "Планировщик распределит общий объём только между выбранными днями." : "The planner distributes the total only across selected days.") : (locale === "ru" ? "Указанная длительность повторится в каждый выбранный день." : "The duration repeats on every selected day.")}</small></label></>}
+        {value.kind === "routine" && <><label>{locale === "ru" ? "Режим" : "Mode"}<select value={value.recurrenceSchedulingMode} onChange={(e) => { const mode = e.target.value as ItemForm["recurrenceSchedulingMode"]; setValue((current) => ({ ...current, recurrenceSchedulingMode: mode, commitmentLevel: mode === "spare_time" ? "if_time" : current.commitmentLevel, canSplit: mode === "spare_time" ? true : current.canSplit })); }}><option value="required">{locale === "ru" ? "Обычное дело" : "Regular item"}</option><option value="spare_time">{locale === "ru" ? "В свободное время" : "In spare time"}</option></select></label><label>{locale === "ru" ? "Повтор" : "Repeat"}<select value={value.recurrenceFrequency} onChange={(e) => update("recurrenceFrequency", e.target.value as ItemForm["recurrenceFrequency"])}><option value="daily">{locale === "ru" ? "Каждый день" : "Daily"}</option><option value="weekly">{locale === "ru" ? "Раз в неделю" : "Weekly"}</option><option value="custom">{locale === "ru" ? "По допустимым дням" : "Allowed weekdays"}</option></select></label><label>{locale === "ru" ? "Количество повторов" : "Recurrence count"}<select value={value.recurrencePolicyMode} onChange={(e) => update("recurrencePolicyMode", e.target.value as ItemForm["recurrencePolicyMode"])}><option value="exact_days">{locale === "ru" ? "В каждый выбранный день" : "Every selected day"}</option><option value="count_range">{locale === "ru" ? "От–обычно–до раз" : "Min–usual–max times"}</option></select></label>{value.recurrencePolicyMode === "count_range" && <><label>{locale === "ru" ? "Период" : "Period"}<select value={value.recurrencePeriod} onChange={(e) => update("recurrencePeriod", e.target.value as ItemForm["recurrencePeriod"])}><option value="week">{locale === "ru" ? "Неделя" : "Week"}</option><option value="month">{locale === "ru" ? "Месяц" : "Month"}</option></select></label><label>{locale === "ru" ? "Не меньше раз" : "At least"}<input type="number" min={0} max={31} value={value.minOccurrences} onChange={(e) => update("minOccurrences", e.target.value)} /></label><label>{locale === "ru" ? "Обычно раз" : "Usually"}<input type="number" min={0} max={31} value={value.likelyOccurrences} onChange={(e) => update("likelyOccurrences", e.target.value)} /></label><label>{locale === "ru" ? "Не больше раз" : "At most"}<input type="number" min={0} max={31} value={value.maxOccurrences} onChange={(e) => update("maxOccurrences", e.target.value)} /></label></>}<label>{locale === "ru" ? "Длительность означает" : "Duration means"}<select value={value.outcomeMode === "deliverable" ? "per_cycle" : value.recurrenceDurationMode} onChange={(e) => update("recurrenceDurationMode", e.target.value as ItemForm["recurrenceDurationMode"])} disabled={value.outcomeMode === "deliverable"}><option value="per_occurrence">{locale === "ru" ? "Столько в каждое выполнение" : "This much each time"}</option><option value="per_cycle">{locale === "ru" ? "Столько всего за период" : "This much per period"}</option></select></label></>}
       </div>
       {deadlinePreview && <p className={styles.deadlinePreview}><strong>{deadlinePreview}</strong><span>{locale === "ru" ? "Предварительная оценка по оставшемуся времени. Точный риск с доступными окнами, сном и обязательствами появится в предпросмотре." : "A preliminary wall-clock estimate. The preview calculates exact risk using availability, sleep and commitments."}</span></p>}
       {value.kind === "routine" && value.recurrenceFrequency === "custom" && <div className={styles.weekdays}>{[1,2,3,4,5,6,7].map((day) => <button type="button" key={day} className={value.recurrenceWeekdays.includes(day) ? styles.weekdayActive : ""} onClick={() => update("recurrenceWeekdays", value.recurrenceWeekdays.includes(day) ? value.recurrenceWeekdays.filter((candidate) => candidate !== day) : [...value.recurrenceWeekdays, day])}>{locale === "ru" ? ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"][day-1] : ["M","T","W","T","F","S","S"][day-1]}</button>)}</div>}
       <details className={styles.advanced}><summary>{locale === "ru" ? "Дополнительно" : "Advanced"}</summary><div className={styles.formGrid}>
         <label>{locale === "ru" ? "Приоритет" : "Priority"}<select value={value.priority} onChange={(e) => update("priority", e.target.value as PlannerPriority)}>{(["low", "normal", "high", "critical"] as const).map((priority) => <option key={priority} value={priority}>{priorityLabel[locale][priority]}</option>)}</select></label>
+        <label>{locale === "ru" ? "Порядок внутри группы" : "Order within group"}<input type="number" min={0} max={1000000} value={value.planningRank} onChange={(e) => update("planningRank", e.target.value)} /><small>{locale === "ru" ? "Меньшее число планируется раньше; общий экран иерархии позволяет менять порядок перетаскиванием." : "Lower values plan first; the hierarchy screen also supports drag ordering."}</small></label>
         <label>{locale === "ru" ? "Энергия" : "Energy"}<select value={value.energy} onChange={(e) => update("energy", e.target.value as PlannerEnergy)}>{(["low", "normal", "high"] as const).map((energy) => <option key={energy} value={energy}>{energyLabel[locale][energy]}</option>)}</select></label>
         {value.deadlineType === "hard" && <>
           <label>{locale === "ru" ? "Уверенность в длительности" : "Estimate confidence"}<select value={value.estimateConfidence} onChange={(e) => update("estimateConfidence", e.target.value as PlannerEstimateConfidence)}><option value="high">{locale === "ru" ? "Высокая" : "High"}</option><option value="normal">{locale === "ru" ? "Обычная" : "Normal"}</option><option value="low">{locale === "ru" ? "Низкая" : "Low"}</option></select><small>{locale === "ru" ? "Чем ниже уверенность, тем раньше будет внутренняя цель." : "Lower confidence creates an earlier internal target."}</small></label>
@@ -1120,17 +1291,64 @@ function ItemModal({ value, setValue, items, profile, now, onSubmit, onClose, bu
           <label>{locale === "ru" ? "Перерыв в цепочке" : "Chain break"}<select value={value.deadlineChainGap} onChange={(e) => update("deadlineChainGap", e.target.value as ItemForm["deadlineChainGap"])}><option value="0">0 {locale === "ru" ? "мин" : "min"}</option><option value="5">5 {locale === "ru" ? "мин" : "min"}</option><option value="15">15 {locale === "ru" ? "мин" : "min"}</option></select></label>
           {Number(value.estimateMinutes) >= 120 && <label className={`${styles.checkbox} ${styles.wide}`}><input type="checkbox" checked={value.createMilestones} onChange={(e) => update("createMilestones", e.target.checked)} />{locale === "ru" ? `Создать ${Math.min(5, Math.max(2, Math.ceil(Number(value.estimateMinutes) / 120)))} редактируемых этапа после подтверждения` : `Create ${Math.min(5, Math.max(2, Math.ceil(Number(value.estimateMinutes) / 120)))} editable milestones after confirmation`}</label>}
         </>}
-        <label>{locale === "ru" ? "Допустимо с" : "Allowed from"}<input type="time" value={value.allowedStart} onChange={(e) => update("allowedStart", e.target.value)} /></label><label>{locale === "ru" ? "до" : "to"}<input type="time" value={value.allowedEnd} onChange={(e) => update("allowedEnd", e.target.value)} /></label>
-        <label>{locale === "ru" ? "Предпочитать с" : "Prefer from"}<input type="time" value={value.preferredStart} onChange={(e) => update("preferredStart", e.target.value)} /></label><label>{locale === "ru" ? "до" : "to"}<input type="time" value={value.preferredEnd} onChange={(e) => update("preferredEnd", e.target.value)} /></label>
+        {value.timeFlexibility === "range" && <><label>{locale === "ru" ? "Допустимо с" : "Allowed from"}<input type="time" value={value.allowedStart} onChange={(e) => update("allowedStart", e.target.value)} /></label><label>{locale === "ru" ? "до" : "to"}<input type="time" value={value.allowedEnd} onChange={(e) => update("allowedEnd", e.target.value)} /></label></>}
+        {value.timeFlexibility === "preferred" && <><label>{locale === "ru" ? "Предпочитать с" : "Prefer from"}<input type="time" value={value.preferredStart} onChange={(e) => update("preferredStart", e.target.value)} /></label><label>{locale === "ru" ? "до" : "to"}<input type="time" value={value.preferredEnd} onChange={(e) => update("preferredEnd", e.target.value)} /></label></>}
         <label>{locale === "ru" ? "Не ставить с" : "Avoid from"}<input type="time" value={value.avoidedStart} onChange={(e) => update("avoidedStart", e.target.value)} /></label><label>{locale === "ru" ? "до" : "to"}<input type="time" value={value.avoidedEnd} onChange={(e) => update("avoidedEnd", e.target.value)} /></label>
         <DurationInput label={locale === "ru" ? "Буфер до" : "Buffer before"} valueMinutes={value.bufferBeforeMinutes} maxMinutes={1440} locale={locale} onChangeMinutes={(minutes) => update("bufferBeforeMinutes", String(minutes))} /><DurationInput label={locale === "ru" ? "Буфер после" : "Buffer after"} valueMinutes={value.bufferAfterMinutes} maxMinutes={1440} locale={locale} onChangeMinutes={(minutes) => update("bufferAfterMinutes", String(minutes))} />
         <label>{locale === "ru" ? "Область" : "Area"}<input value={value.area} onChange={(e) => update("area", e.target.value)} /></label><label>{locale === "ru" ? "Место" : "Location"}<input value={value.location} onChange={(e) => update("location", e.target.value)} /></label>
         {value.kind !== "fixed_event" && <label className={styles.checkbox}><input type="checkbox" checked={value.canSplit} onChange={(e) => update("canSplit", e.target.checked)} />{locale === "ru" ? "Можно делить" : "Can split"}</label>}
-        {value.canSplit && <DurationInput label={locale === "ru" ? "Минимальная часть" : "Minimum chunk"} valueMinutes={value.minChunkMinutes} minMinutes={5} maxMinutes={Number(value.estimateMinutes) || 1440} locale={locale} onChangeMinutes={(minutes) => update("minChunkMinutes", String(minutes))} />}
+        {value.canSplit && <DurationInput label={locale === "ru" ? "Минимальная часть" : "Minimum chunk"} valueMinutes={value.minChunkMinutes} minMinutes={5} maxMinutes={value.durationEstimateMode === "unknown" ? Number(value.calibrationMinutes) || 30 : Number(value.maximumDurationMinutes) || Number(value.estimateMinutes) || 1440} locale={locale} onChangeMinutes={(minutes) => update("minChunkMinutes", String(minutes))} />}
         <label className={styles.wide}>{locale === "ru" ? "Заметки" : "Notes"}<textarea value={value.notes} onChange={(e) => update("notes", e.target.value)} /></label>
       </div></details>
       <div className={styles.modalActions}><button type="button" onClick={onClose}>{locale === "ru" ? "Отмена" : "Cancel"}</button><button className={styles.primaryButton} disabled={busy || !value.title.trim()}>{locale === "ru" ? "Показать изменения" : "Review changes"}</button></div>
     </form>
+  </ModalShell>;
+}
+
+function PlannerHierarchyModal({ items, locale, busy, onClose, onReview }: {
+  items: PlannerItem[];
+  locale: Locale;
+  busy: boolean;
+  onClose: () => void;
+  onReview: (items: PlannerItem[]) => Promise<void>;
+}) {
+  const [drafts, setDrafts] = useState(() => items
+    .filter((item) => item.status === "active" && item.kind !== "fixed_event")
+    .map((item) => ({ ...item, commitmentLevel: item.deadlineType === "hard" ? "must_not_skip" as const : item.commitmentLevel })));
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const levels: PlannerCommitmentLevel[] = ["must_not_skip", "required", "desired", "if_time"];
+  const labels: Record<PlannerCommitmentLevel, string> = locale === "ru" ? {
+    must_not_skip: "1. Нельзя пропустить",
+    required: "2. Нужно сделать",
+    desired: "3. Желательно",
+    if_time: "4. Только если останется время",
+  } : {
+    must_not_skip: "1. Must not skip",
+    required: "2. Need to do",
+    desired: "3. Desired",
+    if_time: "4. Only if time remains",
+  };
+  const changeLevel = (id: string, commitmentLevel: PlannerCommitmentLevel) => setDrafts((current) => {
+    const nextRank = current.filter((item) => item.commitmentLevel === commitmentLevel).length;
+    return current.map((item) => item.id === id ? { ...item, commitmentLevel, planningRank: nextRank } : item);
+  });
+  const reorder = (dragged: string, target: string) => setDrafts((current) => {
+    const source = current.find((item) => item.id === dragged);
+    const destination = current.find((item) => item.id === target);
+    if (!source || !destination || source.commitmentLevel !== destination.commitmentLevel) return current;
+    const group = current.filter((item) => item.commitmentLevel === source.commitmentLevel)
+      .sort((left, right) => left.planningRank - right.planningRank || left.id.localeCompare(right.id));
+    const ordered = group.filter((item) => item.id !== dragged);
+    ordered.splice(Math.max(0, ordered.findIndex((item) => item.id === target)), 0, source);
+    const ranks = new Map(ordered.map((item, index) => [item.id, index]));
+    return current.map((item) => ranks.has(item.id) ? { ...item, planningRank: ranks.get(item.id)! } : item);
+  });
+  return <ModalShell title={locale === "ru" ? "Иерархия гибких дел" : "Flexible-item hierarchy"} onClose={onClose} locale={locale}>
+    <div className={styles.form}>
+      <p className={styles.modalLead}>{locale === "ru" ? "Сначала планируются группы сверху вниз. Внутри группы перетаскивайте дела: верхнее получает время раньше. Жёсткий срок автоматически остаётся в первой группе." : "Groups plan top to bottom. Drag within a group: higher items receive time first. Hard deadlines remain in the first group."}</p>
+      <section className={styles.commitmentHierarchy}>{levels.map((level) => <div className={styles.hierarchyGroup} key={level}><h4>{labels[level]}</h4>{drafts.filter((item) => item.commitmentLevel === level).sort((left, right) => left.planningRank - right.planningRank || left.id.localeCompare(right.id)).map((item) => <div className={styles.hierarchyItem} key={item.id} draggable={item.deadlineType !== "hard"} onDragStart={() => setDraggedId(item.id)} onDragEnd={() => setDraggedId(null)} onDragOver={(event) => event.preventDefault()} onDrop={() => { if (draggedId) reorder(draggedId, item.id); setDraggedId(null); }}><span>↕</span><div><strong>{item.title}</strong><small>{plannerItemDurationLabel(item, locale)}</small></div><select value={item.commitmentLevel} disabled={item.deadlineType === "hard"} onChange={(event) => changeLevel(item.id, event.target.value as PlannerCommitmentLevel)}>{levels.map((candidate) => <option value={candidate} key={candidate}>{labels[candidate]}</option>)}</select></div>)}</div>)}</section>
+      <div className={styles.modalActions}><button type="button" onClick={onClose}>{locale === "ru" ? "Отмена" : "Cancel"}</button><button type="button" className={styles.primaryButton} disabled={busy} onClick={() => void onReview(drafts)}>{locale === "ru" ? "Предпросмотр пересборки" : "Preview rebuild"}</button></div>
+    </div>
   </ModalShell>;
 }
 
@@ -1187,7 +1405,7 @@ function ProposalModal({ proposal, profile, locale, busy, onClose, onApply, onEd
       {proposal.wakeAnchorDecision && <section className={styles.wakeDecision}><span>{locale === "ru" ? "Автоматически выбран устойчивый режим" : "Stable schedule selected automatically"}</span><div><strong>{locale === "ru" ? "Подъём" : "Wake"} {proposal.wakeAnchorDecision.wakeTime}</strong><strong>{locale === "ru" ? "Сон с" : "Sleep from"} {proposal.wakeAnchorDecision.bedtime}</strong><strong>{formatDuration(proposal.wakeAnchorDecision.targetDurationMinutes, locale)}</strong></div><p>{wakeDecisionReason(proposal, locale)}</p><small>{locale === "ru" ? `Проверено вариантов: ${proposal.wakeAnchorDecision.candidatesEvaluated}. Диапазон сна: ${formatDuration(proposal.wakeAnchorDecision.durationRange.minMinutes, locale)}–${formatDuration(proposal.wakeAnchorDecision.durationRange.maxMinutes, locale)}. Это предложение ещё не применено.` : `${proposal.wakeAnchorDecision.candidatesEvaluated} options checked. Sleep range: ${formatDuration(proposal.wakeAnchorDecision.durationRange.minMinutes, locale)}–${formatDuration(proposal.wakeAnchorDecision.durationRange.maxMinutes, locale)}. This proposal has not been applied.`}</small></section>}
       {proposal.effectiveFocus && <section className={styles.focusOverride}><h3>{locale === "ru" ? "Приоритет только для этого предпросмотра" : "Priority for this preview only"}</h3><p>{locale === "ru" ? "Переключение пересчитает предложение, но не изменит постоянную настройку." : "Switching recalculates this proposal without changing your saved preference."}</p><div className={styles.segmented}><button type="button" disabled={busy} className={proposal.effectiveFocus === "sleep" ? styles.segmentedActive : ""} onClick={() => void onSwitchFocus("sleep")}>{locale === "ru" ? "Сон важнее" : "Sleep first"}</button><button type="button" disabled={busy} className={proposal.effectiveFocus === "work" ? styles.segmentedActive : ""} onClick={() => void onSwitchFocus("work")}>{locale === "ru" ? "Дедлайны важнее" : "Deadlines first"}</button></div></section>}
       {proposal.sleepPlan?.length ? <section><h3>{locale === "ru" ? "Защищённый сон" : "Protected sleep"}</h3><div className={styles.sleepPlanList}>{proposal.sleepPlan.map((night) => <article key={night.wakeDate}><strong>{night.wakeDate} · {formatDuration(night.durationMinutes, locale)}</strong><span>{night.borrowedMinutes > 0 ? (locale === "ru" ? `Сокращение на ${formatDuration(night.borrowedMinutes, locale)} ради жёсткого срока` : `${formatDuration(night.borrowedMinutes, locale)} borrowed for a hard deadline`) : night.reason === "workload" ? (locale === "ru" ? "Более короткий допустимый вариант улучшает план" : "A shorter allowed option improves the plan") : night.reason === "recovery" ? (locale === "ru" ? "Восстановительная ночь" : "Recovery night") : (locale === "ru" ? "Предпочтительный вариант" : "Preferred option")}</span><small>{formatTimeInTimeZone(new Date(night.startAt), profile.timezone)}–{formatTimeInTimeZone(new Date(night.endAt), profile.timezone)}</small></article>)}</div></section> : null}
-      {proposal.deadlineAnalysis?.length ? <section><h3>{locale === "ru" ? "Сроки и риск" : "Deadlines and risk"}</h3><div className={styles.deadlineList}>{proposal.deadlineAnalysis.map((entry) => <article key={entry.itemId} data-risk={entry.risk}><div><strong>{entry.title}</strong><span>{entry.risk === "on_track" ? (locale === "ru" ? "Успеваем" : "On track") : entry.risk === "tight" ? (locale === "ru" ? "Плотно" : "Tight") : entry.risk === "at_risk" ? (locale === "ru" ? "Под угрозой" : "At risk") : (locale === "ru" ? "Физически не помещается" : "Cannot physically fit")}</span></div><p>{locale === "ru" ? "Внутренняя цель" : "Internal target"}: {formatDay(formatDateInTimeZone(new Date(entry.targetFinishAt), profile.timezone), locale)} {formatTimeInTimeZone(new Date(entry.targetFinishAt), profile.timezone)} · {locale === "ru" ? "жёсткий срок" : "deadline"}: {formatDay(formatDateInTimeZone(new Date(entry.deadlineAt), profile.timezone), locale)} {formatTimeInTimeZone(new Date(entry.deadlineAt), profile.timezone)}</p><small>{locale === "ru" ? "Осталось работы" : "Work remaining"}: {formatDuration(entry.remainingMinutes, locale)} · {locale === "ru" ? "доступно" : "available"}: {formatDuration(entry.availableMinutes, locale)}{entry.latestSafeStartAt ? ` · ${locale === "ru" ? "последний безопасный старт" : "latest safe start"}: ${formatDay(formatDateInTimeZone(new Date(entry.latestSafeStartAt), profile.timezone), locale)} ${formatTimeInTimeZone(new Date(entry.latestSafeStartAt), profile.timezone)}` : ""}</small>{entry.nextItemTitle && <p>{locale === "ru" ? "Следом" : "Next"}: {entry.nextItemTitle}</p>}</article>)}</div></section> : null}
+      {proposal.deadlineAnalysis?.length ? <section><h3>{locale === "ru" ? "Сроки и риск" : "Deadlines and risk"}</h3><div className={styles.deadlineList}>{proposal.deadlineAnalysis.map((entry) => <article key={entry.itemId} data-risk={entry.risk}><div><strong>{entry.title}</strong><span>{entry.risk === "on_track" ? (locale === "ru" ? "Успеваем" : "On track") : entry.risk === "tight" ? (locale === "ru" ? "Плотно" : "Tight") : entry.risk === "at_risk" ? (locale === "ru" ? "Под угрозой" : "At risk") : (locale === "ru" ? "Физически не помещается" : "Cannot physically fit")}</span></div><p>{locale === "ru" ? "Внутренняя цель" : "Internal target"}: {formatDay(formatDateInTimeZone(new Date(entry.targetFinishAt), profile.timezone), locale)} {formatTimeInTimeZone(new Date(entry.targetFinishAt), profile.timezone)} · {locale === "ru" ? "жёсткий срок" : "deadline"}: {formatDay(formatDateInTimeZone(new Date(entry.deadlineAt), profile.timezone), locale)} {formatTimeInTimeZone(new Date(entry.deadlineAt), profile.timezone)}</p><small>{locale === "ru" ? "Осталось работы" : "Work remaining"}: {formatDuration(entry.remainingMinutes, locale)} · {locale === "ru" ? "доступно" : "available"}: {formatDuration(entry.availableMinutes, locale)}{entry.latestSafeStartAt ? ` · ${locale === "ru" ? "последний безопасный старт" : "latest safe start"}: ${formatDay(formatDateInTimeZone(new Date(entry.latestSafeStartAt), profile.timezone), locale)} ${formatTimeInTimeZone(new Date(entry.latestSafeStartAt), profile.timezone)}` : ""}</small>{entry.likelyScenario && entry.maximumScenario && <small>{locale === "ru" ? "Обычный сценарий" : "Likely scenario"}: {entry.likelyScenario.risk} · {locale === "ru" ? "максимальный сценарий" : "maximum scenario"}: {entry.maximumScenario.risk} ({formatDuration(entry.maximumScenario.remainingMinutes, locale)})</small>}{entry.nextItemTitle && <p>{locale === "ru" ? "Следом" : "Next"}: {entry.nextItemTitle}</p>}</article>)}</div></section> : null}
       {proposal.conflicts.length > 0 && <section className={styles.conflicts}><h3>{locale === "ru" ? "Нужно ваше решение" : "Your decision is needed"}</h3>{proposal.conflicts.map((conflict) => <article key={conflict.id}><strong>{conflict.title}</strong><p>{locale === "ru" ? conflict.message : conflict.kind === "active_overlap" ? "The protected time overlaps work already in progress. Pause it, finish first, or edit the new input." : conflict.blockIds.some((id) => id.startsWith("sleep-")) ? "A fixed event overlaps protected sleep. Edit the event or sleep input." : "Two fixed events overlap and cannot be moved automatically."}</p>{conflict.kind === "active_overlap" ? <div><button onClick={() => void onPause(conflict.blockIds[0])}>{locale === "ru" ? "Поставить текущее на паузу" : "Pause current"}</button><button onClick={() => void onFinishFirst(conflict.blockIds[0], conflict.blockIds[1])}>{locale === "ru" ? "Закончить текущее сначала" : "Finish current first"}</button><button onClick={onEdit}>{proposal.trigger === "sleep_changed" ? (locale === "ru" ? "Исправить сон" : "Edit sleep") : (locale === "ru" ? "Изменить вводные" : "Edit input")}</button></div> : <div><button onClick={onEdit}>{locale === "ru" ? "Исправить конфликт" : "Edit conflict"}</button></div>}</article>)}</section>}
       <section><h3>{locale === "ru" ? "Изменения" : "Changes"}</h3><div className={styles.changeList}>{proposal.changes.map((change) => <article key={change.id}>
         <span>{change.kind === "add_block" ? "+" : change.kind === "move_block" ? "→" : change.kind === "remove_block" ? "−" : change.kind === "upsert_sleep_event" ? "■" : "•"}</span>

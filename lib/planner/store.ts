@@ -5,7 +5,7 @@ import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 
 import { getPostgresPool } from "@/lib/db/postgres";
 import { assertValidPasswordCandidate, verifyPassword } from "@/lib/auth/password";
-import { applyProposalChanges, buildPlannerProposal, normalizePlannerItem, normalizePlannerProfile, plannerCompletionSuggestion } from "@/lib/planner/engine";
+import { annotateTentativeBlocks, applyProposalChanges, buildPlannerProposal, normalizePlannerItem, normalizePlannerProfile, plannerCompletionRangeSuggestion, plannerCompletionSuggestion } from "@/lib/planner/engine";
 import { buildPlannerSleepBlocks, normalizePlannerSleepEvent, plannerSleepDurationSuggestion, plannerSleepHealthNotice, sleepWindowForWakeDate } from "@/lib/planner/sleep";
 import {
   createDefaultPlannerProfile,
@@ -73,6 +73,9 @@ type ItemRow = {
   priority: PlannerItem["priority"];
   energy: PlannerItem["energy"];
   estimate_minutes: number;
+  uncertainty_policy: PlannerItem["uncertaintyPolicy"];
+  commitment_level: PlannerItem["commitmentLevel"];
+  planning_rank: number;
   earliest_at: Date | string | null;
   deadline_at: Date | string | null;
   deadline_type: PlannerItem["deadlineType"];
@@ -105,6 +108,8 @@ type BlockRow = {
   status: PlannerBlock["status"];
   source: PlannerBlock["source"];
   fixed: boolean;
+  role: PlannerBlock["role"];
+  soft: boolean;
   occurrence_key: string | null;
   actual_start_at: Date | string | null;
   actual_end_at: Date | string | null;
@@ -120,11 +125,11 @@ type ProposalRow = {
   applied_at: Date | string | null;
 };
 
-const ITEM_COLUMNS = `id,kind,title,notes,area,location,priority,energy,estimate_minutes,
+const ITEM_COLUMNS = `id,kind,title,notes,area,location,priority,energy,estimate_minutes,uncertainty_policy,commitment_level,planning_rank,
   earliest_at,deadline_at,deadline_type,target_finish_at,target_finish_mode,estimate_confidence,
   deadline_policy,milestones,allowed_windows,preferred_windows,avoided_windows,can_split,min_chunk_minutes,
   buffer_before_minutes,buffer_after_minutes,recurrence,auto_plan,status,unplaced_reason,created_at,updated_at`;
-const BLOCK_COLUMNS = `id,item_id,title,start_at,end_at,status,source,fixed,occurrence_key,
+const BLOCK_COLUMNS = `id,item_id,title,start_at,end_at,status,source,fixed,role,soft,occurrence_key,
   actual_start_at,actual_end_at,created_at,updated_at`;
 
 let plannerSchemaPromise: Promise<void> | null = null;
@@ -135,7 +140,26 @@ async function ensurePlannerSchema(executor: SqlExecutor): Promise<void> {
   plannerSchemaPromise = (async () => {
     await executor.query(`
       alter table if exists public.planner_items
-        add column if not exists allowed_windows jsonb not null default '[]'::jsonb
+        add column if not exists allowed_windows jsonb not null default '[]'::jsonb,
+        add column if not exists uncertainty_policy jsonb not null default '{}'::jsonb,
+        add column if not exists commitment_level text not null default 'required',
+        add column if not exists planning_rank integer not null default 0
+    `);
+    await executor.query(`
+      alter table if exists public.planner_blocks
+        add column if not exists role text not null default 'work',
+        add column if not exists soft boolean not null default false
+    `);
+    await executor.query(`
+      alter table if exists public.planner_items drop constraint if exists planner_items_estimate_minutes_check;
+      alter table if exists public.planner_items add constraint planner_items_estimate_minutes_check
+        check (estimate_minutes between 5 and 600000);
+      alter table if exists public.planner_items drop constraint if exists planner_items_buffer_before_minutes_check;
+      alter table if exists public.planner_items add constraint planner_items_buffer_before_minutes_check
+        check (buffer_before_minutes between 0 and 1440);
+      alter table if exists public.planner_items drop constraint if exists planner_items_buffer_after_minutes_check;
+      alter table if exists public.planner_items add constraint planner_items_buffer_after_minutes_check
+        check (buffer_after_minutes between 0 and 1440)
     `);
   })().catch((error) => {
     plannerSchemaPromise = null;
@@ -202,6 +226,9 @@ function itemFromRow(row: ItemRow): PlannerItem {
     priority: row.priority,
     energy: row.energy,
     estimateMinutes: row.estimate_minutes,
+    uncertaintyPolicy: row.uncertainty_policy,
+    commitmentLevel: row.commitment_level,
+    planningRank: row.planning_rank,
     earliestAt: toIso(row.earliest_at),
     deadlineAt: toIso(row.deadline_at),
     deadlineType: row.deadline_type,
@@ -236,6 +263,8 @@ function blockFromRow(row: BlockRow): PlannerBlock {
     status: row.status,
     source: row.source,
     fixed: row.fixed,
+    role: row.role,
+    soft: row.soft,
     occurrenceKey: row.occurrence_key ?? undefined,
     actualStartAt: toIso(row.actual_start_at),
     actualEndAt: toIso(row.actual_end_at),
@@ -355,19 +384,20 @@ async function insertItem(executor: SqlExecutor, userId: string, value: PlannerI
   const item = normalizePlannerItem(value);
   await executor.query(
     `insert into public.planner_items (
-       app_user_id,id,kind,title,notes,area,location,priority,energy,estimate_minutes,
+       app_user_id,id,kind,title,notes,area,location,priority,energy,estimate_minutes,uncertainty_policy,commitment_level,planning_rank,
        earliest_at,deadline_at,deadline_type,target_finish_at,target_finish_mode,estimate_confidence,
        deadline_policy,milestones,allowed_windows,preferred_windows,avoided_windows,can_split,min_chunk_minutes,
        buffer_before_minutes,buffer_after_minutes,recurrence,auto_plan,status,unplaced_reason
      ) values (
-       $1::uuid,$2::text,$3::text,$4::text,$5::text,$6::text,$7::text,$8::text,$9::text,$10::integer,
-       $11::timestamptz,$12::timestamptz,$13::text,$14::timestamptz,$15::text,$16::text,
-       $17::jsonb,$18::jsonb,$19::jsonb,$20::jsonb,$21::jsonb,$22::boolean,$23::integer,
-       $24::integer,$25::integer,$26::jsonb,$27::boolean,$28::text,$29::text
+       $1::uuid,$2::text,$3::text,$4::text,$5::text,$6::text,$7::text,$8::text,$9::text,$10::integer,$11::jsonb,$12::text,$13::integer,
+       $14::timestamptz,$15::timestamptz,$16::text,$17::timestamptz,$18::text,$19::text,
+       $20::jsonb,$21::jsonb,$22::jsonb,$23::jsonb,$24::jsonb,$25::boolean,$26::integer,
+       $27::integer,$28::integer,$29::jsonb,$30::boolean,$31::text,$32::text
      ) on conflict (app_user_id,id) do update set
        kind=excluded.kind,title=excluded.title,notes=excluded.notes,area=excluded.area,
        location=excluded.location,priority=excluded.priority,energy=excluded.energy,
-       estimate_minutes=excluded.estimate_minutes,earliest_at=excluded.earliest_at,
+       estimate_minutes=excluded.estimate_minutes,uncertainty_policy=excluded.uncertainty_policy,
+       commitment_level=excluded.commitment_level,planning_rank=excluded.planning_rank,earliest_at=excluded.earliest_at,
        deadline_at=excluded.deadline_at,deadline_type=excluded.deadline_type,
        target_finish_at=excluded.target_finish_at,target_finish_mode=excluded.target_finish_mode,
        estimate_confidence=excluded.estimate_confidence,deadline_policy=excluded.deadline_policy,
@@ -379,8 +409,8 @@ async function insertItem(executor: SqlExecutor, userId: string, value: PlannerI
        auto_plan=excluded.auto_plan,status=excluded.status,unplaced_reason=excluded.unplaced_reason`,
     [
       userId, item.id, item.kind, item.title, item.notes ?? "", item.area ?? "", item.location ?? "",
-      item.priority, item.energy, item.estimateMinutes, item.earliestAt ?? null, item.deadlineAt ?? null,
-      item.deadlineType,item.targetFinishAt ?? null,item.targetFinishMode,item.estimateConfidence,
+      item.priority, item.energy, item.estimateMinutes, JSON.stringify(item.uncertaintyPolicy), item.commitmentLevel, item.planningRank,
+      item.earliestAt ?? null, item.deadlineAt ?? null,item.deadlineType,item.targetFinishAt ?? null,item.targetFinishMode,item.estimateConfidence,
       JSON.stringify(item.deadlinePolicy),JSON.stringify(item.milestones),JSON.stringify(item.allowedWindows),
       JSON.stringify(item.preferredWindows), JSON.stringify(item.avoidedWindows), item.canSplit,
       item.minChunkMinutes, item.bufferBeforeMinutes, item.bufferAfterMinutes,
@@ -392,18 +422,18 @@ async function insertItem(executor: SqlExecutor, userId: string, value: PlannerI
 async function insertBlock(executor: SqlExecutor, userId: string, block: PlannerBlock): Promise<void> {
   await executor.query(
     `insert into public.planner_blocks (
-       app_user_id,id,item_id,title,start_at,end_at,status,source,fixed,occurrence_key,
+       app_user_id,id,item_id,title,start_at,end_at,status,source,fixed,role,soft,occurrence_key,
        actual_start_at,actual_end_at
      ) values ($1::uuid,$2::text,$3::text,$4::text,$5::timestamptz,$6::timestamptz,
-       $7::text,$8::text,$9::boolean,$10::text,$11::timestamptz,$12::timestamptz)
+       $7::text,$8::text,$9::boolean,$10::text,$11::boolean,$12::text,$13::timestamptz,$14::timestamptz)
      on conflict (app_user_id,id) do update set
        item_id=excluded.item_id,title=excluded.title,start_at=excluded.start_at,end_at=excluded.end_at,
-       status=excluded.status,source=excluded.source,fixed=excluded.fixed,
+       status=excluded.status,source=excluded.source,fixed=excluded.fixed,role=excluded.role,soft=excluded.soft,
        occurrence_key=excluded.occurrence_key,actual_start_at=excluded.actual_start_at,
        actual_end_at=excluded.actual_end_at`,
     [
       userId, block.id, block.itemId ?? null, block.title, block.startAt, block.endAt,
-      block.status, block.source, block.fixed, block.occurrenceKey ?? null,
+      block.status, block.source, block.fixed, block.role ?? "work", Boolean(block.soft), block.occurrenceKey ?? null,
       block.actualStartAt ?? null, block.actualEndAt ?? null,
     ]
   );
@@ -481,13 +511,16 @@ function createPlannerStore(): PlannerStore {
           [userId]
         ),
       ]);
+      const annotatedBlocks = annotateTentativeBlocks(items, blocks);
       const durationSuggestions = items.flatMap((item) => {
-        const suggestedMinutes = plannerCompletionSuggestion(item, blocks);
-        return suggestedMinutes === null ? [] : [{
+        const suggestedMinutes = plannerCompletionSuggestion(item, annotatedBlocks);
+        const suggestedRange = plannerCompletionRangeSuggestion(item, annotatedBlocks);
+        return suggestedMinutes === null && suggestedRange === null ? [] : [{
           itemId: item.id,
           title: item.title,
           currentMinutes: item.estimateMinutes,
-          suggestedMinutes,
+          suggestedMinutes: suggestedRange?.likelyMinutes ?? suggestedMinutes!,
+          suggestedRange: suggestedRange ?? undefined,
         }];
       });
       const today = new Intl.DateTimeFormat("en-CA", {
@@ -496,7 +529,7 @@ function createPlannerStore(): PlannerStore {
       const sleepBlocks = buildPlannerSleepBlocks(profile, sleepEvents, today, new Date(Date.now() + 35 * 86_400_000).toISOString().slice(0, 10));
       const sleepDurationSuggestion = plannerSleepDurationSuggestion(profile.sleepSchedule, sleepEvents, today);
       const sleepHealthNotice = plannerSleepHealthNotice(profile, sleepEvents, today);
-      return { profile, items, blocks, sleepEvents, sleepBlocks, latestChangeSetId: latest.rows[0]?.id, durationSuggestions, sleepDurationSuggestion, sleepHealthNotice };
+      return { profile, items, blocks: annotatedBlocks, sleepEvents, sleepBlocks, latestChangeSetId: latest.rows[0]?.id, durationSuggestions, sleepDurationSuggestion, sleepHealthNotice };
     },
     async updateSettings(userId, patch, expectedRevision) {
       return withTransaction(pool, async (client) => {

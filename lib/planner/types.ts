@@ -9,6 +9,65 @@ export type PlannerBlockStatus =
   | "skipped"
   | "cancelled";
 export type PlannerBlockSource = "manual" | "auto" | "migrated";
+export type PlannerBlockRole = "work" | "uncertainty_reserve" | "calibration";
+
+export type PlannerEstimateMode = "exact" | "approximate" | "range" | "unknown";
+export type PlannerEstimateSource = "user" | "calibration" | "statistics";
+export type PlannerOutcomeMode = "deliverable" | "time_budget";
+export type PlannerCommitmentLevel = "must_not_skip" | "required" | "desired" | "if_time";
+export type PlannerUncertainDateMode = "exact" | "preferred" | "range" | "any";
+export type PlannerUncertainTimeMode = "exact" | "preferred" | "range" | "any";
+export type PlannerTravelEstimateMode = "exact" | "approximate" | "range";
+
+export type PlannerDurationEstimate = {
+  mode: PlannerEstimateMode;
+  minMinutes: number;
+  likelyMinutes: number;
+  maxMinutes: number;
+  tolerancePercent?: 15 | 30 | 50;
+  calibrationMinutes?: number;
+  source: PlannerEstimateSource;
+};
+
+export type PlannerUncertaintyPolicy = {
+  outcomeMode: PlannerOutcomeMode;
+  duration: PlannerDurationEstimate;
+  date: {
+    mode: PlannerUncertainDateMode;
+    exactDate?: string;
+    preferredDate?: string;
+    earliestDate?: string;
+    latestDate?: string;
+  };
+  time: {
+    mode: PlannerUncertainTimeMode;
+    exactStart?: string;
+    preferredStart?: string;
+    earliestStart?: string;
+    latestEnd?: string;
+  };
+  recurrence: {
+    mode: "exact_days" | "count_range";
+    period: "week" | "month";
+    minOccurrences: number;
+    likelyOccurrences: number;
+    maxOccurrences: number;
+    allowedWeekdays: number[];
+  };
+  deadline?: {
+    mode: "none" | "preferred_range" | "hard";
+    preferredFromAt?: string;
+    latestAt?: string;
+  };
+  travel?: {
+    mode: PlannerTravelEstimateMode;
+    minMinutes: number;
+    likelyMinutes: number;
+    maxMinutes: number;
+    tolerancePercent?: 15 | 30 | 50;
+    punctuality: "strict" | "normal" | "flexible";
+  };
+};
 
 export type PlannerTimeWindow = {
   start: string;
@@ -194,6 +253,11 @@ export type PlannerItem = {
   priority: PlannerPriority;
   energy: PlannerEnergy;
   estimateMinutes: number;
+  /** Unified scheduling uncertainty. estimateMinutes mirrors duration.likelyMinutes for compatibility. */
+  uncertaintyPolicy: PlannerUncertaintyPolicy;
+  commitmentLevel: PlannerCommitmentLevel;
+  /** Lower values are planned first inside the same commitment group. */
+  planningRank: number;
   earliestAt?: string;
   deadlineAt?: string;
   deadlineType: PlannerDeadlineType;
@@ -226,6 +290,11 @@ export type PlannerBlock = {
   status: PlannerBlockStatus;
   source: PlannerBlockSource;
   fixed: boolean;
+  role?: PlannerBlockRole;
+  /** Soft blocks reserve likely-to-maximum capacity without making the interval unavailable. */
+  soft?: boolean;
+  /** A lower-priority block currently using another item's soft reserve. */
+  tentative?: boolean;
   occurrenceKey?: string;
   actualStartAt?: string;
   actualEndAt?: string;
@@ -318,6 +387,16 @@ export type PlannerDeadlineAnalysis = {
   slackMinutes: number;
   latestSafeStartAt?: string;
   risk: PlannerDeadlineRisk;
+  likelyScenario?: {
+    remainingMinutes: number;
+    slackMinutes: number;
+    risk: PlannerDeadlineRisk;
+  };
+  maximumScenario?: {
+    remainingMinutes: number;
+    slackMinutes: number;
+    risk: PlannerDeadlineRisk;
+  };
   nextItemId?: string;
   nextItemTitle?: string;
 };
@@ -390,6 +469,12 @@ export type PlannerBootstrap = {
     title: string;
     currentMinutes: number;
     suggestedMinutes: number;
+    suggestedRange?: {
+      minMinutes: number;
+      likelyMinutes: number;
+      maxMinutes: number;
+      sampleCount: number;
+    };
   }>;
   sleepDurationSuggestion?: {
     currentMinutes: number;
@@ -411,7 +496,7 @@ export type PlannerProposalInput = {
   planningFocusOverride?: PlannerPlanningFocus;
   blockExtension?: {
     blockId: string;
-    minutes: 15;
+    minutes: number;
   };
 };
 

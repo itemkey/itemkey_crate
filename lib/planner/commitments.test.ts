@@ -127,4 +127,71 @@ test("spare-time commitment stores a protected minimum and a weekly maximum", ()
     schedulingMode: "spare_time",
     minimumMinutes: 30,
   });
+  assert.deepEqual(draft.uncertaintyPolicy?.duration, {
+    mode: "range",
+    minMinutes: 30,
+    likelyMinutes: 240,
+    maxMinutes: 240,
+    tolerancePercent: undefined,
+    calibrationMinutes: undefined,
+    source: "user",
+  });
+});
+
+test("approximate duration and travel remain independent of occurrence mode", () => {
+  const draft = commitmentToPlannerDraft(normalizeStructuredCommitment({
+    id: "approx-editing",
+    title: "Монтаж",
+    occurrenceMode: "once",
+    timeMode: "flexible",
+    durationType: "approximate",
+    durationMinutes: 180,
+    tolerancePercent: 30,
+    minDurationMinutes: 125,
+    maxDurationMinutes: 250,
+    commitmentLevel: "must_not_skip",
+    travel: {
+      enabled: true,
+      originAddress: "Дом",
+      destinationAddress: "Студия",
+      mode: "transit",
+      direction: "round_trip",
+      durationMinutes: 40,
+      estimateMode: "range",
+      minDurationMinutes: 30,
+      maxDurationMinutes: 65,
+      punctuality: "strict",
+      bufferMinutes: 10,
+    },
+  }), "ru");
+  assert.equal(draft.uncertaintyPolicy?.duration.mode, "approximate");
+  assert.equal(draft.uncertaintyPolicy?.duration.likelyMinutes, 180);
+  assert.equal(draft.uncertaintyPolicy?.travel?.maxMinutes, 65);
+  assert.equal(draft.commitmentLevel, "must_not_skip");
+  assert.equal(draft.bufferAfterMinutes, 40);
+});
+
+test("recurrence count range keeps allowed days and min-usual-max counts", () => {
+  const draft = commitmentToPlannerDraft(normalizeStructuredCommitment({
+    id: "weekly-practice",
+    title: "Практика",
+    occurrenceMode: "recurring",
+    weekdays: [1, 2, 3, 4, 5],
+    timeMode: "flexible",
+    recurrenceMode: "count_range",
+    recurrencePeriod: "week",
+    minOccurrences: 2,
+    likelyOccurrences: 3,
+    maxOccurrences: 4,
+    durationType: "exact",
+    durationMinutes: 45,
+  }), "ru");
+  assert.deepEqual(draft.uncertaintyPolicy?.recurrence, {
+    mode: "count_range",
+    period: "week",
+    minOccurrences: 2,
+    likelyOccurrences: 3,
+    maxOccurrences: 4,
+    allowedWeekdays: [1, 2, 3, 4, 5],
+  });
 });

@@ -37,7 +37,10 @@ create table if not exists public.planner_items (
   notes text not null default '', area text not null default '', location text not null default '',
   priority text not null default 'normal' check (priority in ('low', 'normal', 'high', 'critical')),
   energy text not null default 'normal' check (energy in ('low', 'normal', 'high')),
-  estimate_minutes integer not null default 60 check (estimate_minutes between 5 and 1440),
+  estimate_minutes integer not null default 60 check (estimate_minutes between 5 and 600000),
+  uncertainty_policy jsonb not null default '{}'::jsonb,
+  commitment_level text not null default 'required' check (commitment_level in ('must_not_skip', 'required', 'desired', 'if_time')),
+  planning_rank integer not null default 0 check (planning_rank between 0 and 1000000),
   earliest_at timestamptz null, deadline_at timestamptz null,
   deadline_type text not null default 'none' check (deadline_type in ('none', 'target', 'hard')),
   target_finish_at timestamptz null,
@@ -50,8 +53,8 @@ create table if not exists public.planner_items (
   avoided_windows jsonb not null default '[]'::jsonb,
   can_split boolean not null default false,
   min_chunk_minutes integer not null default 25 check (min_chunk_minutes between 5 and 1440),
-  buffer_before_minutes integer not null default 0 check (buffer_before_minutes between 0 and 240),
-  buffer_after_minutes integer not null default 0 check (buffer_after_minutes between 0 and 240),
+  buffer_before_minutes integer not null default 0 check (buffer_before_minutes between 0 and 1440),
+  buffer_after_minutes integer not null default 0 check (buffer_after_minutes between 0 and 1440),
   recurrence jsonb null, auto_plan boolean not null default true,
   status text not null default 'active' check (status in ('active', 'completed', 'archived')),
   unplaced_reason text not null default '',
@@ -67,7 +70,26 @@ alter table public.planner_items
   add column if not exists estimate_confidence text not null default 'normal',
   add column if not exists deadline_policy jsonb not null default '{"chainMode":"inherit"}'::jsonb,
   add column if not exists milestones jsonb not null default '[]'::jsonb,
-  add column if not exists allowed_windows jsonb not null default '[]'::jsonb;
+  add column if not exists allowed_windows jsonb not null default '[]'::jsonb,
+  add column if not exists uncertainty_policy jsonb not null default '{}'::jsonb,
+  add column if not exists commitment_level text not null default 'required',
+  add column if not exists planning_rank integer not null default 0;
+
+alter table public.planner_items drop constraint if exists planner_items_estimate_minutes_check;
+alter table public.planner_items add constraint planner_items_estimate_minutes_check
+  check (estimate_minutes between 5 and 600000);
+alter table public.planner_items drop constraint if exists planner_items_commitment_level_check;
+alter table public.planner_items add constraint planner_items_commitment_level_check
+  check (commitment_level in ('must_not_skip', 'required', 'desired', 'if_time'));
+alter table public.planner_items drop constraint if exists planner_items_planning_rank_check;
+alter table public.planner_items add constraint planner_items_planning_rank_check
+  check (planning_rank between 0 and 1000000);
+alter table public.planner_items drop constraint if exists planner_items_buffer_before_minutes_check;
+alter table public.planner_items add constraint planner_items_buffer_before_minutes_check
+  check (buffer_before_minutes between 0 and 1440);
+alter table public.planner_items drop constraint if exists planner_items_buffer_after_minutes_check;
+alter table public.planner_items add constraint planner_items_buffer_after_minutes_check
+  check (buffer_after_minutes between 0 and 1440);
 
 update public.planner_items
 set deadline_type = 'target'
@@ -93,7 +115,10 @@ create table if not exists public.planner_blocks (
   start_at timestamptz not null, end_at timestamptz not null,
   status text not null default 'planned' check (status in ('planned', 'in_progress', 'done', 'skipped', 'cancelled')),
   source text not null default 'manual' check (source in ('manual', 'auto', 'migrated')),
-  fixed boolean not null default false, occurrence_key text null,
+  fixed boolean not null default false,
+  role text not null default 'work' check (role in ('work', 'uncertainty_reserve', 'calibration')),
+  soft boolean not null default false,
+  occurrence_key text null,
   actual_start_at timestamptz null, actual_end_at timestamptz null,
   created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
   primary key (app_user_id, id),
@@ -101,6 +126,13 @@ create table if not exists public.planner_blocks (
   constraint planner_blocks_item_fk foreign key (app_user_id, item_id)
     references public.planner_items(app_user_id, id) on delete cascade
 );
+
+alter table public.planner_blocks
+  add column if not exists role text not null default 'work',
+  add column if not exists soft boolean not null default false;
+alter table public.planner_blocks drop constraint if exists planner_blocks_role_check;
+alter table public.planner_blocks add constraint planner_blocks_role_check
+  check (role in ('work', 'uncertainty_reserve', 'calibration'));
 
 alter table public.planner_blocks drop constraint if exists planner_blocks_item_fk;
 alter table public.planner_blocks add constraint planner_blocks_item_fk

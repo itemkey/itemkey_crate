@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { normalizeScheduleBlocks, normalizeSchedulePayload, type SchedulePayload } from "../schedules.ts";
 import { addIsoMinutes, addPlannerDays, plannerTimeToMinutes, zonedPlannerDateTimeToUtc } from "./time.ts";
+import { normalizePlannerItem } from "./engine.ts";
 import type { PlannerBlock, PlannerItem, PlannerProfile } from "./types.ts";
 
 export type LegacySchedulePayloadSource = {
@@ -35,12 +36,15 @@ export function convertLegacyScheduleSource(
   const prefix = `legacy-${shortHash(source.sourceKey)}`;
   const itemIds = new Map<string, string>();
   const items: PlannerItem[] = [];
-  const addItem = (legacyId: string, value: Omit<PlannerItem, "id">) => {
+  const addItem = (
+    legacyId: string,
+    value: Omit<PlannerItem, "id" | "uncertaintyPolicy" | "commitmentLevel" | "planningRank">
+  ) => {
     const existing = itemIds.get(legacyId);
     if (existing) return existing;
     const id = `${prefix}-${shortHash(legacyId)}`;
     itemIds.set(legacyId, id);
-    items.push({ id, ...value });
+    items.push(normalizePlannerItem({ id, ...value }));
     return id;
   };
   for (const task of source.payload.taskBase ?? []) {
