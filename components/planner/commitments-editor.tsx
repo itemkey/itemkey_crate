@@ -36,6 +36,16 @@ function formatCommitmentDuration(totalMinutes: number, locale: Locale): string 
   return `${hours} ${locale === "ru" ? "ч" : "h"}${remainder ? ` ${remainder} ${locale === "ru" ? "мин" : "min"}` : ""}`;
 }
 
+function durationInputParts(totalMinutes: number): { hours: string; minutes: string } {
+  const total = Math.max(0, Math.round(totalMinutes));
+  const hours = Math.floor(total / 60);
+  const minutes = total % 60;
+  return {
+    hours: hours ? String(hours) : "",
+    minutes: minutes ? String(minutes) : "",
+  };
+}
+
 function validPlaces(value: unknown): PlannerSavedPlace[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((entry): PlannerSavedPlace[] => {
@@ -88,6 +98,8 @@ export default function CommitmentsEditor({
   const ru = locale === "ru";
   const [quickTitle, setQuickTitle] = useState("");
   const [editor, setEditorState] = useState<PlannerStructuredCommitment | null>(null);
+  const [durationHoursInput, setDurationHoursInput] = useState("1");
+  const [durationMinutesInput, setDurationMinutesInput] = useState("");
   const [places, setPlaces] = useState<PlannerSavedPlace[]>(() => {
     if (typeof window === "undefined") return [];
     try {
@@ -313,6 +325,8 @@ export default function CommitmentsEditor({
     setSelectedDestinationPlaceId("");
     setDestinationLabel("");
     setRememberDestination(false);
+    setDurationHoursInput("1");
+    setDurationMinutesInput("");
     setEditor(blankCommitment(quickTitle));
   }
 
@@ -321,6 +335,7 @@ export default function CommitmentsEditor({
     const originPlace = places.find((place) => place.id === commitment.travel.originPlaceId);
     const destinationPlace = places.find((place) => place.id === commitment.travel.destinationPlaceId)
       ?? places.find((place) => place.address === commitment.travel.destinationAddress);
+    const durationParts = durationInputParts(commitment.durationMinutes);
     setOriginMode(originPlace?.kind === "home" ? "home" : originPlace ? "saved" : "temporary");
     setSelectedPlaceId(originPlace?.id ?? "");
     setOriginAddress(commitment.travel.originAddress ?? originPlace?.address ?? "");
@@ -330,6 +345,8 @@ export default function CommitmentsEditor({
     setSelectedDestinationPlaceId(destinationPlace?.id ?? "");
     setDestinationLabel(commitment.travel.destinationLabel ?? destinationPlace?.label ?? "");
     setRememberDestination(false);
+    setDurationHoursInput(durationParts.hours);
+    setDurationMinutesInput(durationParts.minutes);
     setFormError("");
     setEstimateError("");
     setEditor(structuredClone(commitment));
@@ -401,7 +418,11 @@ export default function CommitmentsEditor({
         return setFormError(ru ? "Укажите время начала и окончания." : "Enter both start and end times.");
       }
     } else {
-      if (!Number.isFinite(editor.durationMinutes) || editor.durationMinutes < 5 || editor.durationMinutes > 1440) {
+      const durationHours = Number(durationHoursInput || 0);
+      const durationRemainder = Number(durationMinutesInput || 0);
+      if (!Number.isFinite(durationHours) || durationHours < 0 || durationHours > 24
+        || !Number.isFinite(durationRemainder) || durationRemainder < 0 || durationRemainder >= 60
+        || !Number.isFinite(editor.durationMinutes) || editor.durationMinutes < 5 || editor.durationMinutes > 1440) {
         return setFormError(ru ? "Укажите длительность от 5 минут до 24 часов." : "Enter a duration from 5 minutes to 24 hours.");
       }
       if (Boolean(editor.allowedStartTime) !== Boolean(editor.allowedEndTime)) {
@@ -508,7 +529,7 @@ export default function CommitmentsEditor({
         <div className={styles.routeToggle}><button type="button" className={editor.timeMode === "fixed" ? styles.segmentedActive : ""} aria-pressed={editor.timeMode === "fixed"} onClick={() => patchEditor({ timeMode: "fixed", canSplit: false })}>{copy.fixed}<small>{copy.fixedHint}</small></button><button type="button" className={editor.timeMode === "flexible" ? styles.segmentedActive : ""} aria-pressed={editor.timeMode === "flexible"} onClick={() => patchEditor({ timeMode: "flexible" })}>{copy.flexible}<small>{copy.flexibleHint}</small></button></div>
         {editor.timeMode === "fixed"
           ? <div className={styles.formGrid}><label>{copy.start}<input type="time" value={editor.startTime} onChange={(event) => patchEditor({ startTime: event.target.value })} /></label><label>{copy.end}<input type="time" value={editor.endTime} onChange={(event) => patchEditor({ endTime: event.target.value })} /></label></div>
-          : <><div><span className={styles.fieldTitle}>{copy.activityDuration}</span><div className={styles.formGrid}><label>{copy.durationHours}<input type="number" min="0" max="24" step="1" value={Math.floor(editor.durationMinutes / 60)} onChange={(event) => patchEditor({ durationMinutes: Math.max(0, Number(event.target.value || 0) * 60 + editor.durationMinutes % 60) })} /></label><label>{copy.durationRemainder}<input type="number" min="0" max="59" step="5" value={editor.durationMinutes % 60} onChange={(event) => patchEditor({ durationMinutes: Math.max(0, Math.floor(editor.durationMinutes / 60) * 60 + Number(event.target.value || 0)) })} /></label></div></div><div className={styles.formGrid}><label>{copy.allowedFrom}<input type="time" value={editor.allowedStartTime ?? ""} onChange={(event) => patchEditor({ allowedStartTime: event.target.value || undefined })} /></label><label>{copy.allowedTo}<input type="time" value={editor.allowedEndTime ?? ""} onChange={(event) => patchEditor({ allowedEndTime: event.target.value || undefined })} /></label></div><small>{copy.allowedHint}</small></>}
+          : <><div><span className={styles.fieldTitle}>{copy.activityDuration}</span><div className={styles.formGrid}><label>{copy.durationHours}<input type="number" inputMode="decimal" min="0" max="24" step="1" placeholder="0" value={durationHoursInput} onFocus={(event) => event.currentTarget.select()} onChange={(event) => { const next = event.target.value; setDurationHoursInput(next); patchEditor({ durationMinutes: Math.max(0, Number(next || 0) * 60 + Number(durationMinutesInput || 0)) }); }} /></label><label>{copy.durationRemainder}<input type="number" inputMode="numeric" min="0" max="59" step="5" placeholder="0" value={durationMinutesInput} onFocus={(event) => event.currentTarget.select()} onChange={(event) => { const next = event.target.value; setDurationMinutesInput(next); patchEditor({ durationMinutes: Math.max(0, Number(durationHoursInput || 0) * 60 + Number(next || 0)) }); }} /></label></div></div><div className={styles.formGrid}><label>{copy.allowedFrom}<input type="time" value={editor.allowedStartTime ?? ""} onChange={(event) => patchEditor({ allowedStartTime: event.target.value || undefined })} /></label><label>{copy.allowedTo}<input type="time" value={editor.allowedEndTime ?? ""} onChange={(event) => patchEditor({ allowedEndTime: event.target.value || undefined })} /></label></div><small>{copy.allowedHint}</small></>}
       </fieldset>
 
       <fieldset className={styles.commitmentFieldset}>
