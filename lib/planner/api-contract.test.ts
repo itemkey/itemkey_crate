@@ -9,6 +9,7 @@ function source(relativeFromRepository: string): string {
 const store = source("lib/planner/store.ts");
 const plannerUpgrade = source("postgres/planner-upgrade.sql");
 const freshSchema = source("postgres/schema.sql");
+const proposalsRoute = source("app/api/planner/proposals/route.ts");
 const mutationRoutes = [
   "app/api/planner/settings/route.ts",
   "app/api/planner/items/route.ts",
@@ -70,6 +71,13 @@ test("proposal application and undo are transactional and account-scoped", () =>
   assert.match(store, /where id=\$1::uuid and app_user_id=\$2::uuid for update/);
   assert.match(store, /where id=\$1::uuid and app_user_id=\$2::uuid and undone_at is null for update/);
   assert.match(store, /Number\(change\.to_revision\) !== current\.revision/);
+});
+
+test("proposal endpoint accepts replanning and missed-occurrence workflows", () => {
+  assert.match(proposalsRoute, /body\.trigger !== "plans_changed"/);
+  assert.match(proposalsRoute, /const missedOccurrence = body\.missedOccurrence/);
+  assert.match(proposalsRoute, /missedOccurrence,/);
+  assert.doesNotMatch(proposalsRoute, /Опишите новое дело или запустите автоплан/);
 });
 
 test("legacy import is idempotent and never mutates legacy category/message tables", () => {
