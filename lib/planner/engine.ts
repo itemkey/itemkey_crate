@@ -62,6 +62,7 @@ type PlacementRequest = {
   item: PlannerItem;
   occurrenceKey: string;
   durationMinutes: number;
+  tier?: "required" | "minimum" | "extra";
   targetDate?: string;
   allowedDates?: string[];
   sourceBlock?: PlannerBlock;
@@ -216,6 +217,14 @@ export function normalizePlannerItem(value: Partial<PlannerItem> & { id: string;
       ? {
           ...value.recurrence,
           durationMode: value.recurrence.durationMode === "per_cycle" ? "per_cycle" : "per_occurrence",
+          schedulingMode: value.recurrence.schedulingMode === "spare_time" ? "spare_time" : "required",
+          minimumMinutes: value.recurrence.schedulingMode === "spare_time"
+            ? clamp(
+                Math.round(Number(value.recurrence.minimumMinutes ?? 30)),
+                5,
+                clamp(Math.round(Number(value.estimateMinutes ?? 60)), 5, 24 * 60)
+              )
+            : undefined,
         }
       : undefined,
     autoPlan: value.autoPlan !== false,
@@ -703,6 +712,35 @@ function buildPlacementRequests(
   const requests: PlacementRequest[] = [];
   const activeBlocks = blocks.filter((block) => block.status !== "cancelled" && block.status !== "skipped");
   const recurrenceBlocks = blocks.filter((block) => block.status !== "cancelled");
+  const pushRecurringRequest = (
+    item: PlannerItem,
+    occurrenceKey: string,
+    alreadyPlanned: number,
+    constraints: Pick<PlacementRequest, "targetDate" | "allowedDates">
+  ) => {
+    if (item.recurrence?.schedulingMode !== "spare_time") {
+      const remaining = Math.max(0, item.estimateMinutes - alreadyPlanned);
+      if (remaining > 0) requests.push({ item, occurrenceKey, durationMinutes: remaining, tier: "required", ...constraints });
+      return;
+    }
+    const minimumTarget = Math.min(item.estimateMinutes, item.recurrence.minimumMinutes ?? 30);
+    const minimumRemaining = Math.max(0, minimumTarget - alreadyPlanned);
+    const extraRemaining = Math.max(0, item.estimateMinutes - Math.max(alreadyPlanned, minimumTarget));
+    if (minimumRemaining > 0) requests.push({
+      item,
+      occurrenceKey: `${occurrenceKey}:minimum`,
+      durationMinutes: minimumRemaining,
+      tier: "minimum",
+      ...constraints,
+    });
+    if (extraRemaining > 0) requests.push({
+      item,
+      occurrenceKey: `${occurrenceKey}:extra`,
+      durationMinutes: extraRemaining,
+      tier: "extra",
+      ...constraints,
+    });
+  };
   for (const item of items) {
     if (item.status !== "active" || !item.autoPlan || item.kind === "fixed_event") continue;
     if (item.kind === "routine" || item.recurrence?.frequency === "once") {
@@ -722,13 +760,7 @@ function buildPlacementRequests(
               return date >= weekStart && date <= weekEnd;
             })
             .reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0);
-          const remaining = Math.max(0, item.estimateMinutes - alreadyPlanned);
-          if (remaining > 0) requests.push({
-            item,
-            occurrenceKey: `${item.id}:cycle:${weekStart}`,
-            durationMinutes: remaining,
-            allowedDates,
-          });
+          pushRecurringRequest(item, `${item.id}:cycle:${weekStart}`, alreadyPlanned, { allowedDates });
         }
         continue;
       }
@@ -737,8 +769,7 @@ function buildPlacementRequests(
         const alreadyPlanned = recurrenceBlocks
           .filter((block) => block.itemId === item.id && blockLocalDate(block, timezone) === date)
           .reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0);
-        const remaining = Math.max(0, item.estimateMinutes - alreadyPlanned);
-        if (remaining > 0) requests.push({ item, occurrenceKey: key, durationMinutes: remaining, targetDate: date });
+        pushRecurringRequest(item, key, alreadyPlanned, { targetDate: date });
       }
       continue;
     }
@@ -749,6 +780,15 @@ function buildPlacementRequests(
     if (remaining > 0) requests.push({ item, occurrenceKey: item.id, durationMinutes: remaining });
   }
   return requests.sort((left, right) => {
+    const placementRank = (request: PlacementRequest) => {
+      if (request.item.deadlineType === "hard") return 0;
+      if (request.tier === "required" || request.item.deadlineType === "target") return 1;
+      if (request.tier === "minimum") return 2;
+      if (request.tier === "extra") return 4;
+      return 3;
+    };
+    const rank = placementRank(left) - placementRank(right);
+    if (rank) return rank;
     const leftHard = left.item.deadlineType === "hard" ? 1 : 0;
     const rightHard = right.item.deadlineType === "hard" ? 1 : 0;
     if (leftHard !== rightHard) return rightHard - leftHard;
@@ -1283,14 +1323,16 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
     if (item) {
       const sourceDate = blockLocalDate(block, profile.timezone);
       const perCycle = item.kind === "routine" && item.recurrence?.durationMode === "per_cycle";
+      const spareTime = item.recurrence?.schedulingMode === "spare_time";
       const weekStart = calendarWeekStart(sourceDate);
       const constrainedStart = weekStart > startDate ? weekStart : startDate;
       const weekEnd = addPlannerDays(weekStart, 6);
       const constrainedEnd = weekEnd < endDate ? weekEnd : endDate;
       requests.unshift({
         item,
-        occurrenceKey: perCycle ? `${item.id}:cycle:${weekStart}` : block.occurrenceKey ?? item.id,
+        occurrenceKey: block.occurrenceKey ?? (perCycle ? `${item.id}:cycle:${weekStart}` : item.id),
         durationMinutes: isoDurationMinutes(block.startAt, block.endAt),
+        tier: spareTime ? block.occurrenceKey?.endsWith(":extra") ? "extra" : "minimum" : "required",
         targetDate: !perCycle && (item.kind === "routine" || item.recurrence?.frequency === "once")
           ? sourceDate
           : undefined,
@@ -1375,7 +1417,11 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
           id: uniqueId("add", block.id),
           kind: "add_block",
           block,
-          reason: request.item.preferredWindows.length
+          reason: request.tier === "extra"
+            ? "Свободное время добавлено после размещения обязательств, сроков и защищённого минимума."
+            : request.tier === "minimum"
+              ? "Минимальное время хобби защищено от вытеснения обычными гибкими делами."
+              : request.item.preferredWindows.length
             ? "Подобрано свободное окно с учётом предпочтительного времени и нагрузки."
             : "Подобрано свободное окно с учётом приоритета, энергии и нагрузки.",
         });
@@ -1410,6 +1456,7 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
           reason: "Вытеснённый блок возвращён в очередь: безопасного нового времени пока нет.",
         });
       }
+      if (request.tier === "extra") continue;
       const reason = "Не найдено свободного окна без нарушения доступности, буферов или резерва времени.";
       unplaced.push({
         itemId: request.item.id,

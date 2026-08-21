@@ -482,6 +482,61 @@ test("recurring duration can be one weekly total instead of repeating on every s
   assert.equal(dailyMinutes, 540);
 });
 
+test("spare-time work keeps its minimum but only uses extra capacity up to its maximum", () => {
+  const hobby = item({
+    id: "hobby",
+    kind: "routine",
+    title: "Собирать модель",
+    priority: "low",
+    energy: "normal",
+    estimateMinutes: 60,
+    canSplit: true,
+    minChunkMinutes: 15,
+    recurrence: {
+      frequency: "weekly",
+      weekdays: [1],
+      durationMode: "per_cycle",
+      schedulingMode: "spare_time",
+      minimumMinutes: 30,
+    },
+  });
+  const ordinary = item({ id: "ordinary", title: "Обычное гибкое дело", priority: "high", energy: "normal", estimateMinutes: 90 });
+  const availability = (end: string) => ({
+    ...profile,
+    reserveRatio: 0,
+    defaultBufferMinutes: 0,
+    availability: Object.fromEntries(Array.from({ length: 7 }, (_, index) => [
+      String(index + 1),
+      index === 0 ? [{ start: "10:00", end }] : [],
+    ])),
+  });
+  const minutesFor = (proposal: ReturnType<typeof buildPlannerProposal>, itemId: string) => proposal.changes.reduce(
+    (sum, change) => change.kind === "add_block" && change.block.itemId === itemId
+      ? sum + (new Date(change.block.endAt).getTime() - new Date(change.block.startAt).getTime()) / 60_000
+      : sum,
+    0
+  );
+
+  const tight = buildPlannerProposal({
+    profile: availability("12:00"),
+    items: [ordinary, hobby],
+    blocks: [],
+    now: new Date("2026-08-16T04:00:00.000Z"),
+  });
+  assert.equal(minutesFor(tight, hobby.id), 30);
+  assert.equal(minutesFor(tight, ordinary.id), 90);
+  assert.ok(!tight.unplaced.some((entry) => entry.itemId === hobby.id));
+
+  const roomier = buildPlannerProposal({
+    profile: availability("12:30"),
+    items: [ordinary, hobby],
+    blocks: [],
+    now: new Date("2026-08-16T04:00:00.000Z"),
+  });
+  assert.equal(minutesFor(roomier, ordinary.id), 90);
+  assert.equal(minutesFor(roomier, hobby.id), 60);
+});
+
 test("a one-time flexible item with a date cannot move to another day", () => {
   const dated = item({
     id: "dated-flexible",

@@ -17,9 +17,10 @@ export type PlannerCommitmentCategory =
 
 export type PlannerTravelMode = "walk" | "transit" | "car";
 export type PlannerTravelDirection = "one_way" | "round_trip";
-export type PlannerCommitmentOccurrenceMode = "once" | "recurring";
+export type PlannerCommitmentOccurrenceMode = "once" | "recurring" | "spare_time";
 export type PlannerCommitmentTimeMode = "fixed" | "flexible";
 export type PlannerCommitmentDurationMode = "per_occurrence" | "per_cycle";
+export type PlannerCommitmentDurationType = "fixed" | "range";
 
 export type PlannerSavedPlace = {
   id: string;
@@ -59,6 +60,9 @@ export type PlannerStructuredCommitment = {
   durationMinutes: number;
   /** For recurring flexible items: repeat this duration each day, or complete it once across the selected week. */
   durationMode: PlannerCommitmentDurationMode;
+  durationType: PlannerCommitmentDurationType;
+  minDurationMinutes: number;
+  maxDurationMinutes: number;
   allowedStartTime?: string;
   allowedEndTime?: string;
   priority: PlannerPriority;
@@ -142,7 +146,9 @@ export function normalizeStructuredCommitment(value: Partial<PlannerStructuredCo
     id: value.id,
     title: value.title,
     category: value.category ?? "other",
-    occurrenceMode: value.occurrenceMode ?? (value.weekdays?.length ? "recurring" : "once"),
+    occurrenceMode: value.occurrenceMode === "spare_time"
+      ? "spare_time"
+      : value.occurrenceMode ?? (value.weekdays?.length ? "recurring" : "once"),
     date: value.date,
     weekdays: Array.isArray(value.weekdays) ? value.weekdays : [],
     timeMode: value.timeMode ?? "fixed",
@@ -153,6 +159,9 @@ export function normalizeStructuredCommitment(value: Partial<PlannerStructuredCo
         ? plannerCommitmentDuration(value.startTime, value.endTime)
         : 60))),
     durationMode: value.durationMode === "per_cycle" ? "per_cycle" : "per_occurrence",
+    durationType: value.durationType === "range" ? "range" : "fixed",
+    minDurationMinutes: Math.max(5, Math.round(value.minDurationMinutes ?? 30)),
+    maxDurationMinutes: Math.max(5, Math.round(value.maxDurationMinutes ?? value.durationMinutes ?? 120)),
     allowedStartTime: value.allowedStartTime,
     allowedEndTime: value.allowedEndTime,
     priority: value.priority ?? (legacyFixed ? "high" : "normal"),
@@ -198,6 +207,12 @@ function recurrenceForCommitment(
     recurrence.endTime = commitment.endTime;
   } else {
     recurrence.durationMode = commitment.durationMode;
+    if (commitment.occurrenceMode === "spare_time") {
+      recurrence.schedulingMode = "spare_time";
+      recurrence.minimumMinutes = commitment.durationType === "range"
+        ? Math.min(commitment.minDurationMinutes, commitment.maxDurationMinutes)
+        : commitment.durationMinutes;
+    }
   }
   return recurrence;
 }
@@ -220,7 +235,7 @@ export function commitmentToPlannerDraft(
       : `Travel: ${commitment.travel.originLabel || commitment.travel.originAddress || "origin"} → ${commitment.travel.destinationLabel || commitment.travel.destinationAddress || "destination"}; ${plannerTravelModeLabel(commitment.travel.mode, locale)}; ${plannerDurationLabel(routeMinutes, locale)} each way; ${roundTrip ? "round trip" : "outbound only"}${bufferMinutes ? `; ${plannerDurationLabel(bufferMinutes, locale)} outbound buffer` : ""}.`
     : "";
   const fixed = commitment.timeMode === "fixed";
-  const recurring = commitment.occurrenceMode === "recurring";
+  const recurring = commitment.occurrenceMode !== "once";
   const deadlineAt = !fixed && commitment.deadlineType !== "none" && commitment.deadlineDate
     ? zonedPlannerDateTimeToUtc(commitment.deadlineDate, commitment.deadlineTime || "23:59", timezone)
     : undefined;
@@ -235,7 +250,9 @@ export function commitmentToPlannerDraft(
     energy: "normal",
     estimateMinutes: fixed
       ? plannerCommitmentDuration(commitment.startTime, commitment.endTime)
-      : commitment.durationMinutes,
+      : commitment.occurrenceMode === "spare_time" && commitment.durationType === "range"
+        ? Math.max(commitment.minDurationMinutes, commitment.maxDurationMinutes)
+        : commitment.durationMinutes,
     estimateConfidence: "high",
     deadlineAt,
     deadlineType: deadlineAt ? commitment.deadlineType : "none",
@@ -268,12 +285,13 @@ export function plannerDraftToCommitment(
   const fixed = draft.kind === "fixed_event";
   const recurrence = draft.recurrence;
   const recurring = Boolean(recurrence && recurrence.frequency !== "once");
+  const spareTime = recurring && recurrence?.schedulingMode === "spare_time";
   const deadline = draft.deadlineAt ? new Date(draft.deadlineAt) : undefined;
   return normalizeStructuredCommitment({
     id,
     title: draft.title,
     category: "other",
-    occurrenceMode: recurring ? "recurring" : "once",
+    occurrenceMode: spareTime ? "spare_time" : recurring ? "recurring" : "once",
     date: recurrence?.frequency === "once" ? recurrence.startDate : fixed ? draft.date : undefined,
     weekdays: recurrence?.weekdays ?? (recurrence?.frequency === "daily" ? [1, 2, 3, 4, 5, 6, 7] : []),
     timeMode: fixed ? "fixed" : "flexible",
@@ -281,6 +299,10 @@ export function plannerDraftToCommitment(
     endTime: draft.end ?? recurrence?.endTime ?? "",
     durationMinutes: draft.estimateMinutes ?? 60,
     durationMode: recurrence?.durationMode ?? "per_occurrence",
+    durationType: spareTime && recurrence?.minimumMinutes !== undefined
+      && recurrence.minimumMinutes < (draft.estimateMinutes ?? 60) ? "range" : "fixed",
+    minDurationMinutes: recurrence?.minimumMinutes ?? 30,
+    maxDurationMinutes: draft.estimateMinutes ?? 120,
     allowedStartTime: draft.allowedWindows?.[0]?.start,
     allowedEndTime: draft.allowedWindows?.[0]?.end,
     priority: draft.priority ?? "normal",

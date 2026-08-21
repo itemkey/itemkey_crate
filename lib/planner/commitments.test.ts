@@ -101,3 +101,30 @@ test("recurring commitment can keep one total duration across selected weekdays"
     durationMode: "per_cycle",
   });
 });
+
+test("spare-time commitment stores a protected minimum and a weekly maximum", () => {
+  const draft = commitmentToPlannerDraft(normalizeStructuredCommitment({
+    id: "model-building",
+    title: "Собирать модель",
+    occurrenceMode: "spare_time",
+    weekdays: [2, 4, 6],
+    timeMode: "flexible",
+    startTime: "",
+    endTime: "",
+    durationType: "range",
+    durationMode: "per_cycle",
+    minDurationMinutes: 30,
+    maxDurationMinutes: 240,
+    canSplit: true,
+  }), "ru");
+
+  assert.equal(draft.kind, "routine");
+  assert.equal(draft.estimateMinutes, 240);
+  assert.deepEqual(draft.recurrence, {
+    frequency: "custom",
+    weekdays: [2, 4, 6],
+    durationMode: "per_cycle",
+    schedulingMode: "spare_time",
+    minimumMinutes: 30,
+  });
+});

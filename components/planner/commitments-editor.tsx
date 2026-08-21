@@ -53,6 +53,9 @@ function blankCommitment(title: string): PlannerStructuredCommitment {
     endTime: "",
     durationMinutes: 60,
     durationMode: "per_occurrence",
+    durationType: "fixed",
+    minDurationMinutes: 30,
+    maxDurationMinutes: 120,
     priority: "normal",
     deadlineType: "none",
     canSplit: false,
@@ -117,6 +120,8 @@ export default function CommitmentsEditor({
     when: "2. Когда и как часто",
     once: "Один раз",
     recurring: "Регулярно",
+    spareTime: "В свободное время",
+    spareTimeHint: "Сайт сначала учтёт сон, обязательства и сроки, а затем выделит этому делу доступное время.",
     date: "Дата",
     optionalDate: "Дата (необязательно)",
     dateHint: "Если оставить пустым, сайт выберет подходящий день в горизонте планирования.",
@@ -129,6 +134,11 @@ export default function CommitmentsEditor({
     start: "Начало",
     end: "Конец",
     activityDuration: "Длительность дела",
+    exactDuration: "Определённое количество времени",
+    indefiniteDuration: "Неопределённое количество времени",
+    indefiniteDurationHint: "Задайте границы: минимум защищает дело от полного вытеснения, максимум не даёт хобби занять весь свободный день.",
+    minimumDuration: "Не меньше",
+    maximumDuration: "Не больше",
     durationMeaning: "Что означает эта длительность?",
     perOccurrence: "Столько в каждый выбранный день",
     perOccurrenceHint: "Например, 1 час в понедельник, среду и пятницу — по 1 часу в каждый день.",
@@ -199,6 +209,8 @@ export default function CommitmentsEditor({
     when: "2. When and how often",
     once: "One time",
     recurring: "Recurring",
+    spareTime: "In spare time",
+    spareTimeHint: "The planner handles sleep, commitments and deadlines first, then gives this item available time.",
     date: "Date",
     optionalDate: "Date (optional)",
     dateHint: "Leave it empty and the planner will choose a suitable day in the planning horizon.",
@@ -211,6 +223,11 @@ export default function CommitmentsEditor({
     start: "Starts",
     end: "Ends",
     activityDuration: "Item duration",
+    exactDuration: "A specific amount of time",
+    indefiniteDuration: "An open-ended amount of time",
+    indefiniteDurationHint: "Set bounds: the minimum protects the item from being crowded out, while the maximum stops it taking the whole free day.",
+    minimumDuration: "At least",
+    maximumDuration: "At most",
     durationMeaning: "What does this duration mean?",
     perOccurrence: "This much on every selected day",
     perOccurrenceHint: "For example, 1 hour on Monday, Wednesday and Friday means 1 hour on each day.",
@@ -391,7 +408,7 @@ export default function CommitmentsEditor({
   function saveCommitment() {
     if (!editor) return;
     if (!editor.title.trim()) return setFormError(ru ? "Введите название дела." : "Enter a title.");
-    if (editor.occurrenceMode === "recurring" && !editor.weekdays.length) {
+    if (editor.occurrenceMode !== "once" && !editor.weekdays.length) {
       return setFormError(ru ? "Выберите хотя бы один день недели." : "Choose at least one weekday.");
     }
     if (editor.timeMode === "fixed") {
@@ -402,17 +419,24 @@ export default function CommitmentsEditor({
         return setFormError(ru ? "Укажите время начала и окончания." : "Enter both start and end times.");
       }
     } else {
-      if (!Number.isFinite(editor.durationMinutes) || editor.durationMinutes < 5 || editor.durationMinutes > 1440) {
+      const rangeDuration = editor.occurrenceMode === "spare_time" && editor.durationType === "range";
+      const effectiveDuration = rangeDuration ? editor.maxDurationMinutes : editor.durationMinutes;
+      if (rangeDuration && (!Number.isFinite(editor.minDurationMinutes) || !Number.isFinite(editor.maxDurationMinutes)
+        || editor.minDurationMinutes < 5 || editor.maxDurationMinutes > 1440
+        || editor.minDurationMinutes > editor.maxDurationMinutes)) {
+        return setFormError(ru ? "Укажите корректный диапазон: минимум от 5 минут и не больше максимума." : "Enter a valid range: at least 5 minutes, with the minimum no greater than the maximum.");
+      }
+      if (!rangeDuration && (!Number.isFinite(editor.durationMinutes) || editor.durationMinutes < 5 || editor.durationMinutes > 1440)) {
         return setFormError(ru ? "Укажите длительность от 5 минут до 24 часов." : "Enter a duration from 5 minutes to 24 hours.");
       }
       if (Boolean(editor.allowedStartTime) !== Boolean(editor.allowedEndTime)) {
         return setFormError(ru ? "Для допустимого интервала нужны оба времени." : "Enter both ends of the allowed window.");
       }
       if (editor.allowedStartTime && editor.allowedEndTime
-        && plannerCommitmentDuration(editor.allowedStartTime, editor.allowedEndTime) < editor.durationMinutes) {
+        && plannerCommitmentDuration(editor.allowedStartTime, editor.allowedEndTime) < effectiveDuration) {
         return setFormError(ru ? "Дело не помещается в допустимый интервал." : "The item does not fit inside the allowed window.");
       }
-      if (editor.canSplit && (editor.minChunkMinutes < 5 || editor.minChunkMinutes > editor.durationMinutes)) {
+      if (editor.canSplit && (editor.minChunkMinutes < 5 || editor.minChunkMinutes > effectiveDuration)) {
         return setFormError(ru ? "Минимальная часть должна быть от 5 минут до полной длительности." : "The minimum part must be between 5 minutes and the full duration.");
       }
       if (editor.deadlineType !== "none" && !editor.deadlineDate) {
@@ -501,7 +525,7 @@ export default function CommitmentsEditor({
 
       <fieldset className={styles.commitmentFieldset}>
         <legend>{copy.when}</legend>
-        <div className={styles.routeToggle}><button type="button" className={editor.occurrenceMode === "once" ? styles.segmentedActive : ""} aria-pressed={editor.occurrenceMode === "once"} onClick={() => patchEditor({ occurrenceMode: "once" })}>{copy.once}</button><button type="button" className={editor.occurrenceMode === "recurring" ? styles.segmentedActive : ""} aria-pressed={editor.occurrenceMode === "recurring"} onClick={() => patchEditor({ occurrenceMode: "recurring" })}>{copy.recurring}</button></div>
+        <div className={`${styles.routeToggle} ${styles.threeWayToggle}`}><button type="button" className={editor.occurrenceMode === "once" ? styles.segmentedActive : ""} aria-pressed={editor.occurrenceMode === "once"} onClick={() => patchEditor({ occurrenceMode: "once", durationType: "fixed" })}>{copy.once}</button><button type="button" className={editor.occurrenceMode === "recurring" ? styles.segmentedActive : ""} aria-pressed={editor.occurrenceMode === "recurring"} onClick={() => patchEditor({ occurrenceMode: "recurring", durationType: "fixed" })}>{copy.recurring}</button><button type="button" className={editor.occurrenceMode === "spare_time" ? styles.segmentedActive : ""} aria-pressed={editor.occurrenceMode === "spare_time"} onClick={() => patchEditor({ occurrenceMode: "spare_time", timeMode: "flexible", durationType: "range", durationMode: "per_cycle", weekdays: editor.weekdays.length ? editor.weekdays : WEEKDAYS, canSplit: true })}>{copy.spareTime}<small>{copy.spareTimeHint}</small></button></div>
         {editor.occurrenceMode === "once"
           ? <label>{editor.timeMode === "fixed" ? copy.date : copy.optionalDate}<input type="date" value={editor.date ?? ""} onChange={(event) => patchEditor({ date: event.target.value || undefined })} />{editor.timeMode === "flexible" && <small>{copy.dateHint}</small>}</label>
           : <div><span className={styles.fieldTitle}>{copy.days}</span><div className={styles.commitmentWeekdays}>{WEEKDAYS.map((day, index) => <button type="button" key={day} className={editor.weekdays.includes(day) ? styles.weekdayActive : ""} aria-pressed={editor.weekdays.includes(day)} onClick={() => toggleWeekday(day)}>{dayNames[index]}</button>)}</div></div>}
@@ -509,12 +533,20 @@ export default function CommitmentsEditor({
 
       <fieldset className={styles.commitmentFieldset}>
         <legend>{copy.timing}</legend>
-        <div className={styles.routeToggle}><button type="button" className={editor.timeMode === "fixed" ? styles.segmentedActive : ""} aria-pressed={editor.timeMode === "fixed"} onClick={() => patchEditor({ timeMode: "fixed", canSplit: false })}>{copy.fixed}<small>{copy.fixedHint}</small></button><button type="button" className={editor.timeMode === "flexible" ? styles.segmentedActive : ""} aria-pressed={editor.timeMode === "flexible"} onClick={() => patchEditor({ timeMode: "flexible" })}>{copy.flexible}<small>{copy.flexibleHint}</small></button></div>
+        {editor.occurrenceMode === "spare_time"
+          ? <small>{copy.spareTimeHint}</small>
+          : <div className={styles.routeToggle}><button type="button" className={editor.timeMode === "fixed" ? styles.segmentedActive : ""} aria-pressed={editor.timeMode === "fixed"} onClick={() => patchEditor({ timeMode: "fixed", canSplit: false })}>{copy.fixed}<small>{copy.fixedHint}</small></button><button type="button" className={editor.timeMode === "flexible" ? styles.segmentedActive : ""} aria-pressed={editor.timeMode === "flexible"} onClick={() => patchEditor({ timeMode: "flexible" })}>{copy.flexible}<small>{copy.flexibleHint}</small></button></div>}
         {editor.timeMode === "fixed"
           ? <div className={styles.formGrid}><label>{copy.start}<input type="time" value={editor.startTime} onChange={(event) => patchEditor({ startTime: event.target.value })} /></label><label>{copy.end}<input type="time" value={editor.endTime} onChange={(event) => patchEditor({ endTime: event.target.value })} /></label></div>
           : <>
-            <DurationInput label={copy.activityDuration} valueMinutes={editor.durationMinutes} minMinutes={5} maxMinutes={1440} locale={locale} onChangeMinutes={(durationMinutes) => patchEditor({ durationMinutes })} />
-            {editor.occurrenceMode === "recurring" && <div><span className={styles.fieldTitle}>{copy.durationMeaning}</span><div className={styles.routeToggle}>
+            {editor.occurrenceMode === "spare_time" && <div><span className={styles.fieldTitle}>{copy.activityDuration}</span><div className={styles.routeToggle}>
+              <button type="button" className={editor.durationType === "fixed" ? styles.segmentedActive : ""} aria-pressed={editor.durationType === "fixed"} onClick={() => patchEditor({ durationType: "fixed", canSplit: false })}>{copy.exactDuration}</button>
+              <button type="button" className={editor.durationType === "range" ? styles.segmentedActive : ""} aria-pressed={editor.durationType === "range"} onClick={() => patchEditor({ durationType: "range", canSplit: true })}>{copy.indefiniteDuration}<small>{copy.indefiniteDurationHint}</small></button>
+            </div></div>}
+            {editor.occurrenceMode === "spare_time" && editor.durationType === "range"
+              ? <div className={styles.formGrid}><DurationInput label={copy.minimumDuration} valueMinutes={editor.minDurationMinutes} minMinutes={5} maxMinutes={editor.maxDurationMinutes} locale={locale} onChangeMinutes={(minDurationMinutes) => patchEditor({ minDurationMinutes })} /><DurationInput label={copy.maximumDuration} valueMinutes={editor.maxDurationMinutes} minMinutes={editor.minDurationMinutes} maxMinutes={1440} locale={locale} onChangeMinutes={(maxDurationMinutes) => patchEditor({ maxDurationMinutes })} /></div>
+              : <DurationInput label={copy.activityDuration} valueMinutes={editor.durationMinutes} minMinutes={5} maxMinutes={1440} locale={locale} onChangeMinutes={(durationMinutes) => patchEditor({ durationMinutes })} />}
+            {editor.occurrenceMode !== "once" && <div><span className={styles.fieldTitle}>{copy.durationMeaning}</span><div className={styles.routeToggle}>
               <button type="button" className={editor.durationMode === "per_occurrence" ? styles.segmentedActive : ""} aria-pressed={editor.durationMode === "per_occurrence"} onClick={() => patchEditor({ durationMode: "per_occurrence" })}>{copy.perOccurrence}<small>{copy.perOccurrenceHint}</small></button>
               <button type="button" className={editor.durationMode === "per_cycle" ? styles.segmentedActive : ""} aria-pressed={editor.durationMode === "per_cycle"} onClick={() => patchEditor({ durationMode: "per_cycle", canSplit: true })}>{copy.perCycle}<small>{copy.perCycleHint}</small></button>
             </div></div>}
@@ -526,7 +558,7 @@ export default function CommitmentsEditor({
         <legend>{copy.planning}</legend>
         <div className={styles.formGrid}><label>{copy.priority}<select value={editor.priority} onChange={(event) => patchEditor({ priority: event.target.value as PlannerPriority })}>{PRIORITIES.map((priority) => <option key={priority} value={priority}>{priorityLabels[priority]}</option>)}</select></label>{editor.timeMode === "flexible" && <label>{copy.deadlineType}<select value={editor.deadlineType} onChange={(event) => patchEditor({ deadlineType: event.target.value as PlannerDeadlineType })}><option value="none">{copy.noDeadline}</option><option value="target">{copy.targetDeadline}</option><option value="hard">{copy.hardDeadline}</option></select></label>}</div>
         {editor.timeMode === "flexible" && editor.deadlineType !== "none" && <div className={styles.formGrid}><label>{copy.deadlineDate}<input type="date" value={editor.deadlineDate ?? ""} onChange={(event) => patchEditor({ deadlineDate: event.target.value || undefined })} /></label><label>{copy.deadlineTime}<input type="time" value={editor.deadlineTime ?? "23:59"} onChange={(event) => patchEditor({ deadlineTime: event.target.value })} /></label></div>}
-        {editor.timeMode === "flexible" && <><label className={styles.choiceCheck}><input type="checkbox" checked={editor.canSplit} onChange={(event) => patchEditor({ canSplit: event.target.checked })} />{copy.canSplit}</label>{editor.canSplit && <DurationInput label={copy.minChunk} valueMinutes={editor.minChunkMinutes} minMinutes={5} maxMinutes={editor.durationMinutes} locale={locale} onChangeMinutes={(minChunkMinutes) => patchEditor({ minChunkMinutes })} />}</>}
+        {editor.timeMode === "flexible" && <><label className={styles.choiceCheck}><input type="checkbox" checked={editor.canSplit} onChange={(event) => patchEditor({ canSplit: event.target.checked })} />{copy.canSplit}</label>{editor.canSplit && <DurationInput label={copy.minChunk} valueMinutes={editor.minChunkMinutes} minMinutes={5} maxMinutes={editor.occurrenceMode === "spare_time" && editor.durationType === "range" ? editor.maxDurationMinutes : editor.durationMinutes} locale={locale} onChangeMinutes={(minChunkMinutes) => patchEditor({ minChunkMinutes })} />}</>}
       </fieldset>
 
       <fieldset className={styles.commitmentFieldset}>
@@ -560,12 +592,14 @@ export default function CommitmentsEditor({
       {formError && <p className={styles.inlineError} role="alert">{formError}</p>}
       <div className={styles.commitmentList}>{commitments.map((rawCommitment) => {
         const commitment = normalizeStructuredCommitment(rawCommitment);
-        const occurrence = commitment.occurrenceMode === "recurring"
-          ? commitment.weekdays.map((day) => dayNames[day - 1]).join(", ")
+        const occurrence = commitment.occurrenceMode !== "once"
+          ? `${commitment.occurrenceMode === "spare_time" ? `${copy.spareTime}: ` : ""}${commitment.weekdays.map((day) => dayNames[day - 1]).join(", ")}`
           : commitment.date || copy.anyDay;
         const timing = commitment.timeMode === "fixed"
           ? `${commitment.startTime}–${commitment.endTime}`
-          : `${plannerDurationLabel(commitment.durationMinutes, locale)}${commitment.occurrenceMode === "recurring"
+          : `${commitment.occurrenceMode === "spare_time" && commitment.durationType === "range"
+              ? `${plannerDurationLabel(commitment.minDurationMinutes, locale)}–${plannerDurationLabel(commitment.maxDurationMinutes, locale)}`
+              : plannerDurationLabel(commitment.durationMinutes, locale)}${commitment.occurrenceMode !== "once"
               ? commitment.durationMode === "per_cycle"
                 ? (ru ? " всего на выбранные дни за неделю" : " total across the selected days per week")
                 : (ru ? " в каждый выбранный день" : " on every selected day")

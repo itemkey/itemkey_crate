@@ -156,6 +156,10 @@ export type PlannerRecurrence = {
   weekdays?: number[];
   /** Whether estimateMinutes applies to every selected day or once to the whole calendar-week cycle. */
   durationMode?: "per_occurrence" | "per_cycle";
+  /** Spare-time items yield to required work but keep a small protected minimum when capacity exists. */
+  schedulingMode?: "required" | "spare_time";
+  /** Lower bound for a spare-time item; estimateMinutes remains its upper bound. */
+  minimumMinutes?: number;
   startDate?: string;
   startTime?: string;
   endTime?: string;
