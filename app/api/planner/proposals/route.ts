@@ -35,6 +35,13 @@ export async function POST(request: NextRequest) {
     };
     const command = typeof body.command === "string" ? body.command.slice(0, 12_000) : undefined;
     const drafts = Array.isArray(body.drafts) ? body.drafts.slice(0, 100) : undefined;
+    const extensionMinutes = Math.round(Number(body.blockExtension?.minutes));
+    const blockExtension = typeof body.blockExtension?.blockId === "string"
+      && Number.isFinite(extensionMinutes)
+      && extensionMinutes >= 5
+      && extensionMinutes <= 1440
+      ? { blockId: body.blockExtension.blockId.slice(0, 160), minutes: extensionMinutes }
+      : undefined;
     const missedOccurrence = body.missedOccurrence
       && typeof body.missedOccurrence.blockId === "string"
       && (body.missedOccurrence.disposition === "carry_remaining"
@@ -78,7 +85,7 @@ export async function POST(request: NextRequest) {
           distribution: transferDistribution,
         } satisfies NonNullable<PlannerProposalInput["remainderTransfer"]>
       : undefined;
-    if (!command && !body.draft && !drafts?.length && !body.profilePatch && !body.sleepEvent && !body.blockExtension
+    if (!command && !body.draft && !drafts?.length && !body.profilePatch && !body.sleepEvent && !blockExtension
       && !missedOccurrence && !remainderTransfer && body.trigger !== "autoplan" && body.trigger !== "plans_changed"
       && body.trigger !== "day_refresh" && body.trigger !== "assistant_update") {
       throw new Error("Запрос не содержит данных для изменения плана.");
@@ -94,9 +101,7 @@ export async function POST(request: NextRequest) {
       planningFocusOverride: body.planningFocusOverride === "sleep" || body.planningFocusOverride === "work"
         ? body.planningFocusOverride as PlannerPlanningFocus
         : undefined,
-      blockExtension: typeof body.blockExtension?.blockId === "string" && Number(body.blockExtension.minutes) === 15
-        ? { blockId: body.blockExtension.blockId.slice(0, 160), minutes: 15 }
-        : undefined,
+      blockExtension,
       missedOccurrence,
       remainderTransfer,
     });

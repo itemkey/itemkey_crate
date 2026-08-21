@@ -1728,16 +1728,20 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
   };
 
   if (input.blockExtension) {
+    const extensionMinutes = Math.round(Number(input.blockExtension.minutes));
+    if (!Number.isFinite(extensionMinutes) || extensionMinutes < 5 || extensionMinutes > 1440) {
+      throw new Error("Укажите продление от 5 минут до 24 часов.");
+    }
     const original = workingBlocks.find((block) => block.id === input.blockExtension!.blockId);
     if (!original || !["planned", "in_progress"].includes(original.status) || original.fixed) {
       throw new Error("Продлить можно только текущее или будущее гибкое дело.");
     }
-    const extended = { ...original, endAt: addIsoMinutes(original.endAt, input.blockExtension.minutes) };
+    const extended = { ...original, endAt: addIsoMinutes(original.endAt, extensionMinutes) };
     for (const block of [...workingBlocks, ...sleepBlocks]) {
       if (block.id === original.id || !rangesOverlap(blockInterval(extended), blockInterval(block))) continue;
       if (block.soft) {
         changes.push({
-          id: uniqueId("consume-reserve", block.id, input.blockExtension.minutes),
+          id: uniqueId("consume-reserve", block.id, extensionMinutes),
           kind: "remove_block",
           blockId: block.id,
           title: block.title,
@@ -1752,8 +1756,8 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
           kind: block.status === "in_progress" ? "active_overlap" : "fixed_overlap",
           title: original.title,
           message: block.id.startsWith("sleep-")
-            ? `Дополнительные ${input.blockExtension.minutes} минут пересекаются с защищённым сном. Продление не применено.`
-            : `Дополнительные ${input.blockExtension.minutes} минут пересекаются с защищённым или уже начатым делом.`,
+            ? `Дополнительные ${extensionMinutes} минут пересекаются с защищённым сном. Продление не применено.`
+            : `Дополнительные ${extensionMinutes} минут пересекаются с защищённым или уже начатым делом.`,
           blockIds: [original.id, block.id],
         });
       } else {
@@ -1771,12 +1775,12 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
       fromEndAt: original.endAt,
       toStartAt: original.startAt,
       toEndAt: extended.endAt,
-      reason: `Добавлено ${input.blockExtension.minutes} минут; всё последующее пересчитано без молчаливого сдвига сна или другого срока.`,
+      reason: `Добавлено ${extensionMinutes} минут; всё последующее пересчитано без молчаливого сдвига сна или другого срока.`,
     });
     const itemIndex = items.findIndex((item) => item.id === original.itemId);
     if (itemIndex >= 0) {
       const currentItem = items[itemIndex];
-      const likelyMinutes = currentItem.uncertaintyPolicy.duration.likelyMinutes + input.blockExtension.minutes;
+      const likelyMinutes = currentItem.uncertaintyPolicy.duration.likelyMinutes + extensionMinutes;
       items[itemIndex] = normalizePlannerItem({
         ...currentItem,
         estimateMinutes: likelyMinutes,
@@ -1794,7 +1798,7 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
         id: uniqueId("extend-item", items[itemIndex].id, items[itemIndex].estimateMinutes),
         kind: "update_item",
         item: items[itemIndex],
-        reason: `Обычная оценка длительности увеличена на подтверждённые ${input.blockExtension.minutes} минут.`,
+        reason: `Обычная оценка длительности увеличена на подтверждённые ${extensionMinutes} минут.`,
       });
     }
   }

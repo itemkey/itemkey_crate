@@ -10,6 +10,7 @@ const store = source("lib/planner/store.ts");
 const plannerUpgrade = source("postgres/planner-upgrade.sql");
 const freshSchema = source("postgres/schema.sql");
 const proposalsRoute = source("app/api/planner/proposals/route.ts");
+const plannerWorkspace = source("components/planner/planner-workspace.tsx");
 const mutationRoutes = [
   "app/api/planner/settings/route.ts",
   "app/api/planner/items/route.ts",
@@ -80,6 +81,15 @@ test("proposal endpoint accepts replanning, missed-occurrence and remainder-tran
   assert.match(proposalsRoute, /const remainderTransfer = body\.remainderTransfer/);
   assert.match(proposalsRoute, /remainderTransfer,/);
   assert.doesNotMatch(proposalsRoute, /Опишите новое дело или запустите автоплан/);
+});
+
+test("live extension buttons use proposal preview for fifteen, thirty and sixty minutes", () => {
+  assert.match(proposalsRoute, /extensionMinutes >= 5/);
+  assert.match(proposalsRoute, /extensionMinutes <= 1440/);
+  assert.doesNotMatch(proposalsRoute, /Number\(body\.blockExtension\.minutes\) === 15/);
+  assert.match(plannerWorkspace, /\[15, 30, 60\]/);
+  assert.match(plannerWorkspace, /reviewBlockExtension\(currentBlock, minutes\)/);
+  assert.doesNotMatch(plannerWorkspace, /blockAction\(currentBlock, "snooze"/);
 });
 
 test("legacy import is idempotent and never mutates legacy category/message tables", () => {

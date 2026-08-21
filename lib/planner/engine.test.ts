@@ -1772,3 +1772,49 @@ test("a queued hard-deadline remainder expires at the earlier deadline", () => {
   assert.equal(proposal.impact?.scheduledMinutes, 0);
   assert.equal(proposal.impact?.queueExpiresAt, deadlineAt);
 });
+
+test("a sixty-minute live extension previews and moves later flexible work atomically", () => {
+  const currentItem = item({ id: "live-editing", title: "Монтаж проекта", estimateMinutes: 60, commitmentLevel: "required", planningRank: 0 });
+  const laterItem = item({ id: "later-music", title: "Музыка", estimateMinutes: 60, commitmentLevel: "desired", planningRank: 10 });
+  const current: PlannerBlock = {
+    id: "live-editing-block",
+    itemId: currentItem.id,
+    title: currentItem.title,
+    startAt: "2026-08-21T10:00:00.000Z",
+    endAt: "2026-08-21T11:00:00.000Z",
+    actualStartAt: "2026-08-21T10:00:00.000Z",
+    status: "in_progress",
+    source: "auto",
+    fixed: false,
+  };
+  const later: PlannerBlock = {
+    id: "later-music-block",
+    itemId: laterItem.id,
+    title: laterItem.title,
+    startAt: "2026-08-21T11:00:00.000Z",
+    endAt: "2026-08-21T12:00:00.000Z",
+    status: "planned",
+    source: "auto",
+    fixed: false,
+  };
+  const proposal = buildPlannerProposal({
+    profile: { ...profile, reserveRatio: 0 },
+    items: [currentItem, laterItem],
+    blocks: [current, later],
+    now: new Date("2026-08-21T10:30:00.000Z"),
+    trigger: "plans_changed",
+    blockExtension: { blockId: current.id, minutes: 60 },
+  });
+  assert.equal(current.endAt, "2026-08-21T11:00:00.000Z", "preview must not mutate the live block");
+  assert.equal(proposal.conflicts.length, 0);
+  assert.equal(proposal.blockExtension?.minutes, 60);
+  const extension = proposal.changes.find((change) => change.kind === "move_block" && change.blockId === current.id);
+  assert.ok(extension?.kind === "move_block");
+  assert.equal(extension.toEndAt, "2026-08-21T12:00:00.000Z");
+  const laterMove = proposal.changes.find((change) => change.kind === "move_block" && change.blockId === later.id);
+  assert.ok(laterMove?.kind === "move_block");
+  assert.ok(new Date(laterMove.toStartAt) >= new Date(extension.toEndAt));
+  const applied = applyProposalChanges([currentItem, laterItem], [current, later], proposal);
+  assert.equal(applied.blocks.find((block) => block.id === current.id)?.endAt, extension.toEndAt);
+  assert.equal(applied.blocks.find((block) => block.id === later.id)?.startAt, laterMove.toStartAt);
+});
