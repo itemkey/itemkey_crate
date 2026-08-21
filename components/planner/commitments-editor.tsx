@@ -86,7 +86,7 @@ export default function CommitmentsEditor({
   const [estimateError, setEstimateError] = useState("");
 
   const copy = ru ? {
-    addPlaceholder: "Название дела, например «Художка»",
+    addPlaceholder: "Работа, занятия, тренировка или другое регулярное дело",
     add: "Добавить дело",
     empty: "Пока ничего не добавлено. Каждое дело появится здесь отдельной карточкой.",
     edit: "Изменить",
@@ -119,7 +119,7 @@ export default function CommitmentsEditor({
     routeHint: "После расчёта время можно поправить вручную. Планировщик освободит его перед началом дела.",
     navigatorPrivacy: "Для расчёта начальный и конечный адреса передаются сервисам OpenStreetMap. Если не хотите передавать адреса, укажите время в пути вручную.",
     notes: "Дополнительные детали (необязательно)",
-    notesPlaceholder: "Например: взять папку и материалы",
+    notesPlaceholder: "Что взять, подготовить или учесть перед делом",
     cancel: "Отмена",
     save: "Сохранить дело",
     editTitle: "Подробный план дела",
@@ -128,7 +128,7 @@ export default function CommitmentsEditor({
     savedNavigator: "рассчитано по навигатору",
     manualRoute: "указано вручную",
   } : {
-    addPlaceholder: "Item name, for example “Art class”",
+    addPlaceholder: "Work, class, workout or another recurring item",
     add: "Add item",
     empty: "Nothing has been added yet. Each commitment will appear as a separate card.",
     edit: "Edit",
@@ -161,7 +161,7 @@ export default function CommitmentsEditor({
     routeHint: "You can adjust the estimate manually. The planner will protect this time before the commitment.",
     navigatorPrivacy: "Route calculation sends the origin and destination to OpenStreetMap services. Enter travel time manually if you prefer not to share addresses.",
     notes: "Extra details (optional)",
-    notesPlaceholder: "For example: bring a folder and supplies",
+    notesPlaceholder: "What to bring, prepare or keep in mind",
     cancel: "Cancel",
     save: "Save item",
     editTitle: "Detailed item plan",
@@ -336,7 +336,7 @@ export default function CommitmentsEditor({
           <label>{copy.from}<select value={originMode} onChange={(event) => { const next = event.target.value as OriginMode; setOriginMode(next); setEstimateError(""); if (next === "home") { setOriginAddress(home?.address ?? ""); setSelectedPlaceId(home?.id ?? ""); } else if (next === "saved") { const first = savedPlaces[0]; setSelectedPlaceId(first?.id ?? ""); setOriginAddress(first?.address ?? ""); } else { setSelectedPlaceId(""); setOriginAddress(""); } }}><option value="home">{copy.home}</option><option value="saved" disabled={!savedPlaces.length}>{copy.saved}</option><option value="temporary">{copy.temporary}</option></select></label>
           {originMode === "home" && (home ? <div className={styles.savedPlacePreview}><strong>{home.label}</strong><span>{home.address}</span><button type="button" onClick={() => { setPlaces((current) => current.filter((place) => place.id !== home.id)); setOriginAddress(""); }}>{ru ? "Изменить адрес" : "Change address"}</button></div> : <label>{copy.homeAddress}<input value={originAddress} onChange={(event) => setOriginAddress(event.target.value)} placeholder={ru ? "Город, улица, дом" : "City, street, house"} /><small>{ru ? "Спросим один раз и запомним как «Дом» только в этом браузере." : "We will ask once and remember it as Home in this browser."}</small></label>)}
           {originMode === "saved" && <label>{copy.savedPlace}<select value={selectedPlaceId} onChange={(event) => setSelectedPlaceId(event.target.value)}>{savedPlaces.map((place) => <option value={place.id} key={place.id}>{place.label} — {place.address}</option>)}</select></label>}
-          {originMode === "temporary" && <><label>{copy.address}<input value={originAddress} onChange={(event) => setOriginAddress(event.target.value)} placeholder={ru ? "Адрес, откуда поедете" : "Starting address"} /></label><label className={styles.choiceCheck}><input type="checkbox" checked={rememberOrigin} onChange={(event) => setRememberOrigin(event.target.checked)} />{copy.remember}</label>{rememberOrigin && <label>{copy.placeName}<input value={originLabel} onChange={(event) => setOriginLabel(event.target.value)} placeholder={ru ? "Например, дом Миры" : "For example, Mira's home"} /></label>}</>}
+          {originMode === "temporary" && <><label>{copy.address}<input value={originAddress} onChange={(event) => setOriginAddress(event.target.value)} placeholder={ru ? "Адрес, откуда поедете" : "Starting address"} /></label><label className={styles.choiceCheck}><input type="checkbox" checked={rememberOrigin} onChange={(event) => setRememberOrigin(event.target.checked)} />{copy.remember}</label>{rememberOrigin && <label>{copy.placeName}<input value={originLabel} onChange={(event) => setOriginLabel(event.target.value)} placeholder={ru ? "Дом родителей, офис или другое понятное название" : "Parents’ home, office or another clear name"} /></label>}</>}
           <label>{copy.to}<input value={editor.travel.destinationAddress ?? ""} onChange={(event) => patchTravel({ destinationAddress: event.target.value, estimatedByNavigator: false })} placeholder={ru ? "Город, улица, дом" : "City, street, house"} /></label>
           <div><span className={styles.fieldTitle}>{copy.mode}</span><div className={styles.travelModes}>{TRAVEL_MODES.map((mode) => <button type="button" key={mode} className={editor.travel.mode === mode ? styles.segmentedActive : ""} aria-pressed={editor.travel.mode === mode} onClick={() => patchTravel({ mode, estimatedByNavigator: false })}>{plannerTravelModeLabel(mode, locale)}</button>)}</div></div>
           <button type="button" className={styles.routeEstimateButton} disabled={estimating} onClick={() => void estimateRoute()}>{estimating ? copy.calculating : copy.calculate}</button>

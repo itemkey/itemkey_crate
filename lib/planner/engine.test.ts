@@ -62,7 +62,7 @@ function item(overrides: Partial<PlannerItem> = {}): PlannerItem {
 }
 
 test("quick command extracts date, time and fixed event", () => {
-  const draft = parsePlannerCommand("сегодня позвали гулять с 18 до 20", profile, new Date("2026-08-19T10:00:00Z"));
+  const draft = parsePlannerCommand("встреча сегодня с 18 до 20", profile, new Date("2026-08-19T10:00:00Z"));
   assert.equal(draft.date, "2026-08-19");
   assert.equal(draft.start, "18:00");
   assert.equal(draft.end, "20:00");

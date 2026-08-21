@@ -1031,7 +1031,7 @@ function QuickModal({ command, setCommand, onSubmit, onClose, trigger, busy, loc
   return <ModalShell title={changed ? (locale === "ru" ? "Что изменилось?" : "What changed?") : (locale === "ru" ? "Быстрое добавление" : "Quick add")} onClose={onClose} locale={locale}>
     <form onSubmit={(event) => void onSubmit(event)} className={styles.form}>
       <p className={styles.modalLead}>{locale === "ru" ? "Напишите как обычно. Перед применением вы увидите распознанные поля и все переносы." : "Use natural language. You will review every parsed field and move before applying."}</p>
-      <textarea autoFocus value={command} onChange={(e) => setCommand(e.target.value)} placeholder={locale === "ru" ? "Сегодня позвали гулять с 18 до 20" : "Meeting today from 18 to 20"} />
+      <textarea autoFocus value={command} onChange={(e) => setCommand(e.target.value)} placeholder={locale === "ru" ? "Встреча сегодня с 18:00 до 20:00" : "Meeting today from 18:00 to 20:00"} />
       <div className={styles.modalActions}><button type="button" onClick={onClose}>{locale === "ru" ? "Отмена" : "Cancel"}</button><button className={styles.primaryButton} disabled={busy || !command.trim()}>{locale === "ru" ? "Проверить план" : "Review plan"}</button></div>
     </form>
   </ModalShell>;

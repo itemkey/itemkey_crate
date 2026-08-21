@@ -6,7 +6,7 @@ import { commitmentToPlannerDraft, plannerCommitmentDuration } from "./commitmen
 test("structured commitment becomes a fixed recurring event with protected travel", () => {
   const draft = commitmentToPlannerDraft({
     id: "art-class",
-    title: "Художка",
+    title: "Вечерние курсы",
     category: "education",
     weekdays: [4],
     startTime: "17:00",
