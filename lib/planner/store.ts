@@ -127,6 +127,24 @@ const ITEM_COLUMNS = `id,kind,title,notes,area,location,priority,energy,estimate
 const BLOCK_COLUMNS = `id,item_id,title,start_at,end_at,status,source,fixed,occurrence_key,
   actual_start_at,actual_end_at,created_at,updated_at`;
 
+let plannerSchemaPromise: Promise<void> | null = null;
+
+async function ensurePlannerSchema(executor: SqlExecutor): Promise<void> {
+  if (plannerSchemaPromise) return plannerSchemaPromise;
+
+  plannerSchemaPromise = (async () => {
+    await executor.query(`
+      alter table if exists public.planner_items
+        add column if not exists allowed_windows jsonb not null default '[]'::jsonb
+    `);
+  })().catch((error) => {
+    plannerSchemaPromise = null;
+    throw error;
+  });
+
+  return plannerSchemaPromise;
+}
+
 function toIso(value: Date | string | null | undefined): string | undefined {
   if (!value) return undefined;
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
@@ -862,6 +880,7 @@ function createPlannerStore(): PlannerStore {
 let cachedPlannerStore: PlannerStore | null = null;
 
 export async function getPlannerStore(): Promise<PlannerStore> {
+  await ensurePlannerSchema(getPostgresPool());
   cachedPlannerStore ??= createPlannerStore();
   return cachedPlannerStore;
 }

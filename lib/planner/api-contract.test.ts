@@ -100,3 +100,10 @@ test("planner upgrade is idempotent and fresh installs include protected sleep",
   assert.match(freshSchema, /allowed_windows jsonb not null default '\[\]'/);
   assert.match(freshSchema, /sleepiness_level integer null/);
 });
+
+test("planner store repairs additive schema changes before serving requests", () => {
+  assert.match(store, /async function ensurePlannerSchema/);
+  assert.match(store, /alter table if exists public\.planner_items/);
+  assert.match(store, /add column if not exists allowed_windows/);
+  assert.match(store, /await ensurePlannerSchema\(getPostgresPool\(\)\)/);
+});
