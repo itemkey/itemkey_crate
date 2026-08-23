@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { commitmentToPlannerDraft, normalizeStructuredCommitment, plannerCommitmentDuration } from "./commitments.ts";
+import { commitmentToPlannerDraft, normalizeStructuredCommitment, plannerCommitmentDuration, plannerDraftToCommitment } from "./commitments.ts";
 
 test("structured commitment becomes a fixed recurring event with protected travel", () => {
   const draft = commitmentToPlannerDraft(normalizeStructuredCommitment({
@@ -194,4 +194,37 @@ test("recurrence count range keeps allowed days and min-usual-max counts", () =>
     maxOccurrences: 4,
     allowedWeekdays: [1, 2, 3, 4, 5],
   });
+});
+
+test("a saved item round-trips through the unified editor without changing its id or travel", () => {
+  const original = commitmentToPlannerDraft(normalizeStructuredCommitment({
+    id: "saved-class",
+    title: "Учёба",
+    category: "education",
+    occurrenceMode: "recurring",
+    weekdays: [2, 4],
+    timeMode: "flexible",
+    durationMinutes: 180,
+    travel: {
+      enabled: true,
+      originLabel: "Дом",
+      originAddress: "Минск, дом",
+      destinationLabel: "Университет",
+      destinationAddress: "Минск, университет",
+      mode: "transit",
+      direction: "round_trip",
+      durationMinutes: 35,
+      bufferMinutes: 10,
+    },
+  }), "ru");
+  const restored = plannerDraftToCommitment(original, "Europe/Minsk", "saved-class");
+  const roundTrip = commitmentToPlannerDraft(restored, "ru");
+
+  assert.equal(roundTrip.id, "saved-class");
+  assert.equal(restored.category, "education");
+  assert.equal(restored.travel.enabled, true);
+  assert.equal(restored.travel.originAddress, "Дом");
+  assert.equal(restored.travel.destinationAddress, "Минск, университет");
+  assert.equal(roundTrip.bufferBeforeMinutes, 45);
+  assert.equal(roundTrip.bufferAfterMinutes, 35);
 });

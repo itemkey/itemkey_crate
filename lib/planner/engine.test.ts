@@ -7,9 +7,6 @@ import {
   annotateTentativeBlocks,
   buildPlannerProposal,
   normalizePlannerItem,
-  parsePlannerCommand,
-  parsePlannerCommands,
-  parseSleepCommand,
   plannerCompletionSuggestion,
   plannerCompletionRangeSuggestion,
   resolvePlannerTargetFinish,
@@ -64,13 +61,23 @@ function item(overrides: Partial<PlannerItem> = {}): PlannerItem {
   });
 }
 
-test("quick command extracts date, time and fixed event", () => {
-  const draft = parsePlannerCommand("встреча сегодня с 18 до 20", profile, new Date("2026-08-19T10:00:00Z"));
-  assert.equal(draft.date, "2026-08-19");
-  assert.equal(draft.start, "18:00");
-  assert.equal(draft.end, "20:00");
-  assert.equal(draft.estimateMinutes, 120);
-  assert.equal(draft.kind, "fixed_event");
+test("constructor adds a structured fixed event without interpreting text", () => {
+  const proposal = buildPlannerProposal({
+    profile,
+    items: [],
+    blocks: [],
+    now: new Date("2026-08-19T08:00:00Z"),
+    operation: {
+      kind: "add_item",
+      draft: { title: "Встреча 18 до 20", kind: "fixed_event", date: "2026-08-20", start: "18:00", end: "20:00", estimateMinutes: 120 },
+    },
+  });
+  const added = proposal.changes.find((change) => change.kind === "add_block");
+  assert.equal(proposal.trigger, "constructor");
+  assert.equal(proposal.operation?.kind, "add_item");
+  assert.ok(added?.kind === "add_block");
+  assert.equal(added.block.title, "Встреча 18 до 20");
+  assert.equal(isoDurationMinutes(added.block.startAt, added.block.endAt), 120);
 });
 
 test("autoplan respects a fixed block and never overlaps it", () => {
@@ -231,8 +238,8 @@ test("reserve can make a task impossible instead of silently overfilling the day
   const proposal = buildPlannerProposal({ profile: tight, items: [impossible], blocks: [], now: new Date("2026-08-19T04:00:00Z") });
   assert.equal(proposal.changes.filter((change) => change.kind === "add_block").length, 0);
   assert.match(proposal.unplaced[0]?.reason ?? "", /резерв/i);
-  const applied = applyProposalChanges([impossible], [], proposal);
-  assert.match(applied.items[0].unplacedReason ?? "", /резерв/i);
+  assert.ok(proposal.decisionGroups?.some((group) => group.blocking));
+  assert.throws(() => applyProposalChanges([impossible], [], proposal), /нерешёнными/);
 });
 
 test("the 20 percent reserve is calculated after fixed commitments", () => {
@@ -678,37 +685,43 @@ test("recurring fixed commitments fill missing occurrences without duplicates", 
   assert.equal(new Set(occurrences).size, occurrences.length);
 });
 
-test("multiline RU and EN parsing marks only genuinely ambiguous rows", () => {
-  const parsed = parsePlannerCommands(
-    "Каждый понедельник спорт с 19 до 20\nSubmit report tomorrow 2 hours urgent\nПрочитать книгу",
+test("constructor moves an occurrence relative to another block", () => {
+  const source: PlannerBlock = { id: "move-source", itemId: "task-1", title: "Источник", startAt: "2026-08-20T12:00:00.000Z", endAt: "2026-08-20T13:00:00.000Z", status: "planned", source: "auto", fixed: false };
+  const anchor: PlannerBlock = { id: "move-anchor", title: "Опора", startAt: "2026-08-20T08:00:00.000Z", endAt: "2026-08-20T09:00:00.000Z", status: "planned", source: "manual", fixed: true };
+  const proposal = buildPlannerProposal({
     profile,
-    new Date("2026-08-19T10:00:00.000Z")
-  );
-  assert.equal(parsed.drafts.length, 3);
-  assert.equal(parsed.drafts[0].kind, "fixed_event");
-  assert.deepEqual(parsed.drafts[0].recurrence?.weekdays, [1]);
-  assert.equal(parsed.drafts[1].priority, "critical");
-  assert.equal(parsed.drafts[1].estimateMinutes, 120);
-  assert.equal(formatDateInTimeZone(new Date(parsed.drafts[1].deadlineAt!), profile.timezone), "2026-08-20");
-  assert.ok(parsed.ambiguities.some((entry) => entry.index === 2 && entry.field === "duration"));
-  assert.ok(!parsed.ambiguities.some((entry) => entry.index === 0));
+    items: [item()],
+    blocks: [source, anchor],
+    now: new Date("2026-08-19T04:00:00.000Z"),
+    operation: { kind: "move_item", blockId: source.id, scope: "occurrence", placement: { mode: "after", anchorBlockId: anchor.id } },
+  });
+  const move = proposal.changes.find((change) => change.kind === "move_block" && change.blockId === source.id);
+  assert.ok(move?.kind === "move_block");
+  assert.equal(move.toStartAt, addIsoMinutes(anchor.endAt, profile.defaultBufferMinutes));
 });
 
-test("sleep phrases parse deterministically and require missing fields", () => {
-  assert.deepEqual(parseSleepCommand("Ложусь спать в 23:30, сплю 8 часов"), {
-    mode: "fixed",
-    bedtime: "23:30",
-    durationMinutes: 480,
-    durationRange: undefined,
-    exactDurationsMinutes: undefined,
-    planningFocus: undefined,
-    sleepinessLevel: undefined,
-    wakeDayPart: undefined,
-    changeKind: undefined,
-    estimatedBedtimeRange: undefined,
-    ambiguities: [],
+test("constructor protects a midnight sleep boundary from later work", () => {
+  const late: PlannerBlock = { id: "after-midnight", itemId: "task-1", title: "Позднее дело", startAt: "2026-08-19T21:30:00.000Z", endAt: "2026-08-19T22:30:00.000Z", status: "planned", source: "auto", fixed: false };
+  const proposal = buildPlannerProposal({
+    profile,
+    items: [item()],
+    blocks: [late],
+    now: new Date("2026-08-19T04:00:00.000Z"),
+    operation: { kind: "set_sleep_boundary", boundary: "bedtime", date: "2026-08-20", time: "00:00" },
   });
-  assert.ok(parseSleepCommand("обычный сон").ambiguities.length >= 2);
+  const sleep = proposal.changes.find((change) => change.kind === "upsert_sleep_event");
+  assert.ok(sleep?.kind === "upsert_sleep_event");
+  assert.equal(formatTimeInTimeZone(new Date(sleep.event.plannedStartAt!), profile.timezone), "00:00");
+  assert.ok(proposal.changes.some((change) => change.kind === "move_block" || change.kind === "remove_block"));
+  const sleepStart = new Date(sleep.event.plannedStartAt!).getTime();
+  const sleepEnd = new Date(sleep.event.plannedEndAt!).getTime();
+  for (const change of proposal.changes) {
+    const startAt = change.kind === "add_block" ? change.block.startAt : change.kind === "move_block" ? change.toStartAt : undefined;
+    const endAt = change.kind === "add_block" ? change.block.endAt : change.kind === "move_block" ? change.toEndAt : undefined;
+    if (startAt && endAt && (change.kind !== "add_block" || change.block.role === "work")) {
+      assert.ok(new Date(endAt).getTime() <= sleepStart || new Date(startAt).getTime() >= sleepEnd);
+    }
+  }
 });
 
 test("one-off late wake shifts that day's energy window", () => {
@@ -1123,29 +1136,29 @@ test("a one-off morning event does not silently replace the permanent automatic 
   assert.ok(proposal.conflicts.some((conflict) => conflict.kind === "fixed_overlap"));
 });
 
-test("adaptive RU and EN sleep phrases expose ranges, day parts and tentative changes", () => {
-  const adaptive = parseSleepCommand("Графика сна нет, обычно хватает 7–9 часов, хочу вставать утром");
-  assert.equal(adaptive.mode, "adaptive");
-  assert.deepEqual(adaptive.durationRange, { minMinutes: 420, maxMinutes: 540 });
-  assert.equal(adaptive.wakeDayPart, "morning");
-  assert.equal(adaptive.ambiguities.length, 0);
-
-  const english = parseSleepCommand("No regular sleep schedule, 7 to 9 hours, early morning");
-  assert.equal(english.mode, "adaptive");
-  assert.equal(english.wakeDayPart, "early_morning");
-
-  const automaticRu = parseSleepCommand("Графика сна нет, хватает 7–9 часов, без разницы когда вставать");
-  assert.equal(automaticRu.mode, "adaptive");
-  assert.equal(automaticRu.wakeDayPart, "auto");
-  assert.equal(automaticRu.ambiguities.length, 0);
-
-  const automaticEn = parseSleepCommand("No sleep schedule, 7 to 9 hours, choose for me");
-  assert.equal(automaticEn.wakeDayPart, "auto");
-  assert.equal(automaticEn.ambiguities.length, 0);
-
-  const late = parseSleepCommand("Сегодня лягу примерно с 3 до 6");
-  assert.equal(late.changeKind, "later_unknown");
-  assert.deepEqual(late.estimatedBedtimeRange, { start: "03:00", end: "06:00" });
+test("fixed event endings keep exact, approximate, range and unknown structure", () => {
+  const estimates = [
+    { mode: "exact" as const, likelyAt: "2026-08-20T16:00:00.000Z" },
+    { mode: "approximate" as const, earliestAt: "2026-08-20T15:30:00.000Z", likelyAt: "2026-08-20T16:00:00.000Z", latestAt: "2026-08-20T16:30:00.000Z", toleranceMinutes: 30 },
+    { mode: "range" as const, earliestAt: "2026-08-20T15:30:00.000Z", likelyAt: "2026-08-20T16:00:00.000Z", latestAt: "2026-08-20T17:00:00.000Z" },
+    { mode: "unknown" as const },
+  ];
+  for (const [index, endEstimate] of estimates.entries()) {
+    const proposal = buildPlannerProposal({
+      profile,
+      items: [],
+      blocks: [],
+      now: new Date("2026-08-19T04:00:00.000Z"),
+      operation: { kind: "add_item", draft: { title: `Событие ${index}`, kind: "fixed_event", date: "2026-08-20", start: "18:00", end: "19:00", estimateMinutes: 60, endEstimate } },
+    });
+    const block = proposal.changes.find((change) => change.kind === "add_block" && !change.block.soft);
+    assert.ok(block?.kind === "add_block");
+    assert.equal(block.block.endEstimate?.mode, endEstimate.mode);
+    if (endEstimate.mode === "unknown") assert.equal(block.block.tentative, true);
+    if (endEstimate.mode === "approximate" || endEstimate.mode === "range") {
+      assert.ok(proposal.changes.some((change) => change.kind === "add_block" && change.block.soft && change.block.role === "uncertainty_reserve"));
+    }
+  }
 });
 
 test("tentative late bedtime uses the midpoint and stays explicitly tentative", () => {
@@ -1350,7 +1363,7 @@ test("only a hard deadline can borrow below the minimum and creates recovery nig
   assert.ok(!proposal.unplaced.some((entry) => entry.itemId === hard.id));
 });
 
-test("deadline buffer, milestones, risk and parser use deterministic deadline rules", () => {
+test("deadline rules stay deterministic while date bounds remain structured", () => {
   const hard = normalizePlannerItem({
     ...item({ id: "deadline-core", estimateMinutes: 500 }),
     deadlineType: "hard",
@@ -1361,13 +1374,18 @@ test("deadline buffer, milestones, risk and parser use deterministic deadline ru
   assert.ok(target && target < hard.deadlineAt!);
   assert.equal(suggestPlannerMilestones(hard, target, new Date("2026-08-19T04:00:00.000Z")).length, 5);
   assert.equal(analyzePlannerDeadlines([hard], [], profile, new Date("2026-08-19T04:00:00.000Z"))[0].deadlineType, "hard");
-  const parsedTask = parsePlannerCommand("жёсткий дедлайн завтра к 18:00, отчёт 2 часа", profile, new Date("2026-08-19T04:00:00.000Z"));
-  assert.equal(parsedTask.deadlineType, "hard");
-  assert.equal(formatTimeInTimeZone(new Date(parsedTask.deadlineAt!), profile.timezone), "18:00");
-  const parsedSleep = parseSleepCommand("Мне подходит 7 или 9 часов, работа важнее сна");
-  assert.deepEqual(parsedSleep.exactDurationsMinutes, [420, 540]);
-  assert.equal(parsedSleep.planningFocus, "work");
-  assert.equal(parseSleepCommand("Еле держусь и засыпаю на ходу").sleepinessLevel, 4);
+  const protectedFree = buildPlannerProposal({
+    profile, items: [], blocks: [], now: new Date("2026-08-19T04:00:00.000Z"),
+    operation: { kind: "protect_interval", date: "2026-08-20", start: "12:00", end: "13:00" },
+  });
+  assert.ok(protectedFree.changes.some((change) => change.kind === "add_block" && change.block.role === "protected_free"));
+  const bounds = buildPlannerProposal({
+    profile, items: [], blocks: [], now: new Date("2026-08-19T04:00:00.000Z"),
+    operation: { kind: "set_day_bounds", date: "2026-08-21", start: "10:00", end: "17:00" },
+  });
+  const profileChange = bounds.changes.find((change) => change.kind === "update_profile");
+  assert.ok(profileChange?.kind === "update_profile");
+  assert.deepEqual(profileChange.profile.availabilityOverrides["2026-08-21"], [{ start: "10:00", end: "17:00" }]);
 });
 
 test("sleepiness levels create bounded recovery without treating an exact 8-hour fact as debt", () => {
@@ -1412,19 +1430,153 @@ test("old items normalize to an exact uncertainty policy without changing behavi
     source: "user",
   });
   assert.equal(legacy.commitmentLevel, "required");
+  assert.deepEqual(legacy.uncertaintyPolicy.reduction, { mode: "forbidden" });
 });
 
-test("text commands recognize approximate and ranged work without confusing hours with clock time", () => {
-  const approximate = parsePlannerCommand("Монтаж примерно 3 часа, желательно", profile, new Date("2026-08-19T04:00:00.000Z"));
-  assert.equal(approximate.kind, "flexible_task");
-  assert.equal(approximate.uncertaintyPolicy?.duration.mode, "approximate");
-  assert.equal(approximate.uncertaintyPolicy?.duration.likelyMinutes, 180);
-  assert.equal(approximate.commitmentLevel, "desired");
-  const ranged = parsePlannerCommand("Творческая работа 2–5 часов в свободное время", profile, new Date("2026-08-19T04:00:00.000Z"));
-  assert.equal(ranged.kind, "flexible_task");
-  assert.equal(ranged.uncertaintyPolicy?.duration.mode, "range");
-  assert.deepEqual([ranged.uncertaintyPolicy?.duration.minMinutes, ranged.uncertaintyPolicy?.duration.maxMinutes], [120, 300]);
-  assert.equal(ranged.commitmentLevel, "if_time");
+test("constructor changes duration and explicit reduction rules together", () => {
+  const source = item({ id: "duration-change" });
+  const proposal = buildPlannerProposal({
+    profile,
+    items: [source],
+    blocks: [],
+    now: new Date("2026-08-19T04:00:00.000Z"),
+    operation: {
+      kind: "change_item_duration",
+      itemId: source.id,
+      duration: { mode: "range", minMinutes: 45, likelyMinutes: 90, maxMinutes: 120, source: "user" },
+      reduction: { mode: "to_minimum", minimumMinutes: 45 },
+    },
+  });
+  const changed = proposal.changes.find((change) => change.kind === "update_item" && change.item.id === source.id);
+  assert.ok(changed?.kind === "update_item");
+  assert.equal(changed.item.estimateMinutes, 90);
+  assert.deepEqual(changed.item.uncertaintyPolicy.reduction, { mode: "to_minimum", minimumMinutes: 45 });
+});
+
+test("constructor edits an item through a typed operation", () => {
+  const source = item({ id: "edit-typed" });
+  const proposal = buildPlannerProposal({
+    profile, items: [source], blocks: [], now: new Date("2026-08-19T04:00:00.000Z"),
+    operation: { kind: "edit_item", scope: "item", draft: { ...source, title: "Новое точное название" } },
+  });
+  assert.ok(proposal.changes.some((change) => change.kind === "update_item" && change.item.id === source.id && change.item.title === "Новое точное название"));
+});
+
+test("constructor applies bulk commitment and order changes together", () => {
+  const first = item({ id: "bulk-first", planningRank: 10 });
+  const second = item({ id: "bulk-second", planningRank: 20 });
+  const proposal = buildPlannerProposal({
+    profile, items: [first, second], blocks: [], now: new Date("2026-08-19T04:00:00.000Z"),
+    operation: { kind: "bulk_update_items", drafts: [{ ...first, commitmentLevel: "desired", planningRank: 2 }, { ...second, commitmentLevel: "must_not_skip", planningRank: 1 }] },
+  });
+  const updates = proposal.changes.flatMap((change) => change.kind === "update_item" ? [change.item] : []);
+  assert.equal(updates.find((entry) => entry.id === first.id)?.commitmentLevel, "desired");
+  assert.equal(updates.find((entry) => entry.id === second.id)?.planningRank, 1);
+});
+
+test("constructor cancels a selected occurrence without deleting its history", () => {
+  const source = item({ id: "cancel-occurrence", kind: "routine", recurrence: { frequency: "daily" } });
+  const block: PlannerBlock = { id: "cancel-block", itemId: source.id, title: source.title, startAt: "2026-08-20T10:00:00.000Z", endAt: "2026-08-20T11:00:00.000Z", status: "planned", source: "auto", fixed: false, occurrenceKey: `${source.id}:2026-08-20` };
+  const proposal = buildPlannerProposal({
+    profile, items: [source], blocks: [block], now: new Date("2026-08-19T04:00:00.000Z"),
+    operation: { kind: "cancel_item", blockId: block.id, itemId: source.id, scope: "occurrence" },
+  });
+  assert.ok(proposal.changes.some((change) => change.kind === "update_block_status" && change.blockId === block.id && change.status === "cancelled"));
+  assert.ok(!proposal.changes.some((change) => change.kind === "remove_block" && change.blockId === block.id));
+});
+
+test("constructor changes a calendar block time through proposal changes", () => {
+  const source = item({ id: "time-change" });
+  const block: PlannerBlock = { id: "time-block", itemId: source.id, title: source.title, startAt: "2026-08-20T10:00:00.000Z", endAt: "2026-08-20T11:00:00.000Z", status: "planned", source: "auto", fixed: false };
+  const proposal = buildPlannerProposal({
+    profile, items: [source], blocks: [block], now: new Date("2026-08-19T04:00:00.000Z"),
+    operation: { kind: "change_block_time", blockId: block.id, scope: "occurrence", startAt: "2026-08-20T12:00:00.000Z", endAt: "2026-08-20T13:30:00.000Z" },
+  });
+  const move = proposal.changes.find((change) => change.kind === "move_block" && change.blockId === block.id);
+  assert.ok(move?.kind === "move_block");
+  assert.equal(move.toEndAt, "2026-08-20T13:30:00.000Z");
+});
+
+test("constructor occupies an interval with a new fixed event", () => {
+  const proposal = buildPlannerProposal({
+    profile, items: [], blocks: [], now: new Date("2026-08-19T04:00:00.000Z"),
+    operation: { kind: "occupy_interval", draft: { title: "Занятый интервал", date: "2026-08-20", start: "14:00", end: "15:00", estimateMinutes: 60 } },
+  });
+  const block = proposal.changes.find((change) => change.kind === "add_block" && change.block.title === "Занятый интервал");
+  assert.ok(block?.kind === "add_block");
+  assert.equal(block.block.fixed, true);
+});
+
+test("constructor replaces the current item atomically and preserves its completed history", () => {
+  const current: PlannerBlock = {
+    id: "current-replace",
+    itemId: "task-1",
+    title: "Старое дело",
+    startAt: "2026-08-19T10:00:00.000Z",
+    endAt: "2026-08-19T11:00:00.000Z",
+    actualStartAt: "2026-08-19T10:00:00.000Z",
+    status: "in_progress",
+    source: "manual",
+    fixed: false,
+  };
+  const now = new Date("2026-08-19T10:30:00.000Z");
+  const proposal = buildPlannerProposal({
+    profile,
+    items: [item()],
+    blocks: [current],
+    now,
+    operation: {
+      kind: "replace_item",
+      blockId: current.id,
+      scope: "occurrence",
+      replacement: { title: "Новое текущее дело", kind: "flexible_task", estimateMinutes: 60 },
+      duration: { mode: "same" },
+    },
+  });
+  const finished = proposal.changes.find((change) => change.kind === "update_block_status" && change.blockId === current.id);
+  const replacement = proposal.changes.find((change) => change.kind === "add_block" && change.block.title === "Новое текущее дело");
+  assert.ok(finished?.kind === "update_block_status");
+  assert.equal(finished.status, "done");
+  assert.equal(finished.actualEndAt, now.toISOString());
+  assert.ok(replacement?.kind === "add_block");
+  assert.equal(replacement.block.status, "in_progress");
+  assert.equal(replacement.block.startAt, now.toISOString());
+});
+
+test("rebuild from 17:20 leaves the past and completed blocks unchanged", () => {
+  const required = item({ id: "required-rebuild", title: "Обязательное", commitmentLevel: "required" });
+  const optional = item({ id: "optional-rebuild", title: "Необязательное", commitmentLevel: "desired" });
+  const past: PlannerBlock = { id: "past-rebuild", itemId: required.id, title: required.title, startAt: "2026-08-19T11:00:00.000Z", endAt: "2026-08-19T12:00:00.000Z", status: "planned", source: "manual", fixed: false };
+  const done: PlannerBlock = { id: "done-rebuild", itemId: required.id, title: required.title, startAt: "2026-08-19T12:00:00.000Z", endAt: "2026-08-19T13:00:00.000Z", status: "done", source: "manual", fixed: false, actualStartAt: "2026-08-19T12:00:00.000Z", actualEndAt: "2026-08-19T12:45:00.000Z" };
+  const future: PlannerBlock = { id: "future-rebuild", itemId: optional.id, title: optional.title, startAt: "2026-08-19T16:00:00.000Z", endAt: "2026-08-19T17:00:00.000Z", status: "planned", source: "auto", fixed: false };
+  const fromAt = zonedPlannerDateTimeToUtc("2026-08-19", "17:20", profile.timezone);
+  const proposal = buildPlannerProposal({
+    profile,
+    items: [required, optional],
+    blocks: [past, done, future],
+    now: new Date("2026-08-19T13:30:00.000Z"),
+    operation: { kind: "rebuild_remaining", fromAt, decisions: [{ itemId: optional.id, disposition: "cancel" }] },
+  });
+  assert.ok(proposal.changes.some((change) => change.kind === "update_block_status" && change.blockId === future.id && change.status === "cancelled"));
+  assert.ok(!proposal.changes.some((change) => "blockId" in change && (change.blockId === past.id || change.blockId === done.id)));
+  assert.ok(!proposal.changes.some((change) => change.kind === "move_block" && new Date(change.fromStartAt) < new Date(fromAt)));
+});
+
+test("future recurrence scope moves the selected and later executions together", () => {
+  const routine = item({ id: "routine-scope", kind: "routine", recurrence: { frequency: "daily" } });
+  const first: PlannerBlock = { id: "routine-first", itemId: routine.id, title: routine.title, startAt: "2026-08-20T10:00:00.000Z", endAt: "2026-08-20T11:00:00.000Z", status: "planned", source: "auto", fixed: false };
+  const second: PlannerBlock = { ...first, id: "routine-second", startAt: "2026-08-21T10:00:00.000Z", endAt: "2026-08-21T11:00:00.000Z" };
+  const proposal = buildPlannerProposal({
+    profile,
+    items: [routine],
+    blocks: [first, second],
+    now: new Date("2026-08-19T04:00:00.000Z"),
+    operation: { kind: "move_item", blockId: first.id, scope: "future", placement: { mode: "exact", date: "2026-08-20", start: "14:00" } },
+  });
+  const moves = proposal.changes.flatMap((change) => change.kind === "move_block" && [first.id, second.id].includes(change.blockId) ? [change] : []);
+  assert.equal(moves.length, 2);
+  assert.equal(isoDurationMinutes(first.startAt, moves[0].toStartAt), 60);
+  assert.equal(isoDurationMinutes(second.startAt, moves[1].toStartAt), 60);
 });
 
 test("range duration plans the likely volume and adds a non-blocking reserve to the maximum", () => {
@@ -1817,4 +1969,62 @@ test("a sixty-minute live extension previews and moves later flexible work atomi
   const applied = applyProposalChanges([currentItem, laterItem], [current, later], proposal);
   assert.equal(applied.blocks.find((block) => block.id === current.id)?.endAt, extension.toEndAt);
   assert.equal(applied.blocks.find((block) => block.id === later.id)?.startAt, laterMove.toStartAt);
+});
+
+test("the all-items editor updates a saved item by id instead of duplicating it", () => {
+  const existing = item({ id: "saved-item", title: "Старое название" });
+  const proposal = buildPlannerProposal({
+    profile,
+    items: [existing],
+    blocks: [],
+    now: new Date("2026-08-22T08:00:00.000Z"),
+    trigger: "assistant_update",
+    draft: { ...existing, id: existing.id, title: "Новое название" },
+  });
+
+  assert.ok(proposal.changes.some((change) => change.kind === "update_item"
+    && change.item.id === existing.id
+    && change.item.title === "Новое название"));
+  assert.ok(!proposal.changes.some((change) => change.kind === "add_item" && change.item.id === existing.id));
+  const applied = applyProposalChanges([existing], [], proposal);
+  assert.equal(applied.items.length, 1);
+  assert.equal(applied.items[0].title, "Новое название");
+});
+
+test("removing a saved card archives the item and removes only its future planned blocks", () => {
+  const existing = item({ id: "removed-item", title: "Больше не нужно" });
+  const pastDone: PlannerBlock = {
+    id: "past-done",
+    itemId: existing.id,
+    title: existing.title,
+    startAt: "2026-08-21T08:00:00.000Z",
+    endAt: "2026-08-21T09:00:00.000Z",
+    status: "done",
+    source: "auto",
+    fixed: false,
+  };
+  const future: PlannerBlock = {
+    id: "future-planned",
+    itemId: existing.id,
+    title: existing.title,
+    startAt: "2026-08-23T08:00:00.000Z",
+    endAt: "2026-08-23T09:00:00.000Z",
+    status: "planned",
+    source: "auto",
+    fixed: false,
+  };
+  const proposal = buildPlannerProposal({
+    profile,
+    items: [existing],
+    blocks: [pastDone, future],
+    now: new Date("2026-08-22T08:00:00.000Z"),
+    trigger: "assistant_update",
+    removedItemIds: [existing.id],
+  });
+
+  assert.deepEqual(proposal.removedItemIds, [existing.id]);
+  const applied = applyProposalChanges([existing], [pastDone, future], proposal);
+  assert.equal(applied.items[0].status, "archived");
+  assert.ok(applied.blocks.some((block) => block.id === pastDone.id));
+  assert.ok(!applied.blocks.some((block) => block.id === future.id));
 });

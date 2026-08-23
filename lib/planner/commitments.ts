@@ -326,6 +326,7 @@ export function commitmentToPlannerDraft(
     ? likelyMinutes
     : commitment.maxDurationMinutes;
   return {
+    id: commitment.id,
     title: commitment.title.trim(),
     kind: fixed ? "fixed_event" : recurring ? "routine" : "flexible_task",
     area: plannerCommitmentCategoryLabel(commitment.category, locale),
@@ -409,6 +410,41 @@ export function commitmentToPlannerDraft(
   };
 }
 
+function categoryFromPlannerArea(area: string | undefined): PlannerCommitmentCategory {
+  const normalized = area?.trim().toLocaleLowerCase() ?? "";
+  if (normalized === "работа" || normalized === "work") return "work";
+  if (normalized === "учёба" || normalized === "education") return "education";
+  if (normalized === "здоровье" || normalized === "health") return "health";
+  if (normalized === "спорт" || normalized === "sport") return "sport";
+  if (normalized === "личное" || normalized === "personal") return "personal";
+  return "other";
+}
+
+function parseStoredTravelNote(notes: string | undefined): {
+  origin?: string;
+  destination?: string;
+  mode?: PlannerTravelMode;
+  direction?: PlannerTravelDirection;
+  notes?: string;
+} {
+  if (!notes) return {};
+  const lines = notes.split("\n");
+  const route = lines[0]?.match(/^(?:Дорога|Travel):\s*(.*?)\s*→\s*(.*?);\s*(.*?);/i);
+  if (!route) return { notes };
+  const modeText = route[3].toLocaleLowerCase();
+  return {
+    origin: route[1]?.trim(),
+    destination: route[2]?.trim(),
+    mode: modeText.includes("пеш") || modeText.includes("walk")
+      ? "walk"
+      : modeText.includes("маш") || modeText.includes("car")
+        ? "car"
+        : "transit",
+    direction: /туда и обратно|round trip/i.test(lines[0]) ? "round_trip" : "one_way",
+    notes: lines.slice(1).join("\n").trim() || undefined,
+  };
+}
+
 export function plannerDraftToCommitment(
   draft: PlannerDraft,
   timezone: string,
@@ -420,10 +456,20 @@ export function plannerDraftToCommitment(
   const spareTime = recurring && recurrence?.schedulingMode === "spare_time";
   const uncertainty = draft.uncertaintyPolicy;
   const deadline = draft.deadlineAt ? new Date(draft.deadlineAt) : undefined;
+  const storedTravel = parseStoredTravelNote(draft.notes);
+  const travelEnabled = Boolean(uncertainty?.travel)
+    || (draft.bufferBeforeMinutes ?? 0) > 0
+    || (draft.bufferAfterMinutes ?? 0) > 0;
+  const bufferedTravelMinutes = (draft.bufferAfterMinutes ?? 0) > 0
+    ? draft.bufferAfterMinutes!
+    : (draft.bufferBeforeMinutes ?? 0) > 0
+      ? draft.bufferBeforeMinutes!
+      : 30;
+  const travelMinutes = Math.max(1, Math.round(uncertainty?.travel?.likelyMinutes ?? bufferedTravelMinutes));
   return normalizeStructuredCommitment({
     id,
     title: draft.title,
-    category: "other",
+    category: categoryFromPlannerArea(draft.area),
     occurrenceMode: spareTime ? "spare_time" : recurring ? "recurring" : "once",
     date: recurrence?.frequency === "once" ? recurrence.startDate : fixed ? draft.date : undefined,
     weekdays: recurrence?.weekdays ?? (recurrence?.frequency === "daily" ? [1, 2, 3, 4, 5, 6, 7] : []),
@@ -464,17 +510,21 @@ export function plannerDraftToCommitment(
     canSplit: Boolean(draft.canSplit),
     minChunkMinutes: draft.minChunkMinutes ?? 25,
     travel: {
-      enabled: false,
-      mode: "transit",
-      direction: "one_way",
-      durationMinutes: 30,
-      estimateMode: "exact",
-      minDurationMinutes: 30,
-      maxDurationMinutes: 30,
-      tolerancePercent: 30,
-      punctuality: "normal",
-      bufferMinutes: 10,
+      enabled: travelEnabled,
+      originLabel: storedTravel.origin,
+      originAddress: storedTravel.origin,
+      destinationLabel: storedTravel.destination,
+      destinationAddress: draft.location ?? storedTravel.destination,
+      mode: storedTravel.mode ?? "transit",
+      direction: (draft.bufferAfterMinutes ?? 0) > 0 ? "round_trip" : storedTravel.direction ?? "one_way",
+      durationMinutes: travelMinutes,
+      estimateMode: uncertainty?.travel?.mode ?? "exact",
+      minDurationMinutes: uncertainty?.travel?.minMinutes ?? travelMinutes,
+      maxDurationMinutes: uncertainty?.travel?.maxMinutes ?? travelMinutes,
+      tolerancePercent: uncertainty?.travel?.tolerancePercent ?? 30,
+      punctuality: uncertainty?.travel?.punctuality ?? "normal",
+      bufferMinutes: Math.max(0, (draft.bufferBeforeMinutes ?? 0) - travelMinutes),
     },
-    notes: draft.notes,
+    notes: storedTravel.notes,
   });
 }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 function source(relativeFromRepository: string): string {
@@ -11,11 +11,12 @@ const plannerUpgrade = source("postgres/planner-upgrade.sql");
 const freshSchema = source("postgres/schema.sql");
 const proposalsRoute = source("app/api/planner/proposals/route.ts");
 const plannerWorkspace = source("components/planner/planner-workspace.tsx");
+const autoplannerModal = source("components/planner/autoplanner-modal.tsx");
+const constructorModal = source("components/planner/plan-constructor-modal.tsx");
 const mutationRoutes = [
   "app/api/planner/settings/route.ts",
   "app/api/planner/items/route.ts",
   "app/api/planner/items/[id]/route.ts",
-  "app/api/planner/blocks/[id]/route.ts",
   "app/api/planner/blocks/[id]/action/route.ts",
   "app/api/planner/proposals/route.ts",
   "app/api/planner/proposals/[id]/apply/route.ts",
@@ -41,7 +42,6 @@ test("direct mutations require a revision while proposal apply verifies its base
     "app/api/planner/settings/route.ts",
     "app/api/planner/items/route.ts",
     "app/api/planner/items/[id]/route.ts",
-    "app/api/planner/blocks/[id]/route.ts",
     "app/api/planner/blocks/[id]/action/route.ts",
     "app/api/planner/legacy-import/route.ts",
     "app/api/planner/reset/route.ts",
@@ -53,11 +53,12 @@ test("direct mutations require a revision while proposal apply verifies its base
   assert.match(store, /throw new PlannerRevisionError\(\)/);
 });
 
-test("assistant parsing stays private and reset verifies password, revision and rate limits", () => {
-  const assistant = source("app/api/planner/assistant/parse/route.ts");
+test("free-text parsing is removed and reset still verifies password, revision and rate limits", () => {
   const reset = source("app/api/planner/reset/route.ts");
-  assert.match(assistant, /getRequestUser\(request\)/);
-  assert.match(assistant, /assertPlannerCsrf\(request\)/);
+  assert.equal(existsSync(new URL("../../app/api/planner/assistant/parse/route.ts", import.meta.url)), false);
+  assert.doesNotMatch(proposalsRoute, /\bcommand\b/);
+  assert.doesNotMatch(plannerWorkspace, /Напишите как обычно|Use natural language|assistant\/parse/);
+  assert.doesNotMatch(autoplannerModal, /onParseTasks|onParseSleep|assistant\/parse/);
   assert.match(reset, /assertPlannerRevision/);
   assert.match(reset, /assertAuthRateLimit/);
   assert.match(reset, /planner_reset/);
@@ -72,9 +73,15 @@ test("proposal application and undo are transactional and account-scoped", () =>
   assert.match(store, /where id=\$1::uuid and app_user_id=\$2::uuid for update/);
   assert.match(store, /where id=\$1::uuid and app_user_id=\$2::uuid and undone_at is null for update/);
   assert.match(store, /Number\(change\.to_revision\) !== current\.revision/);
+  assert.match(store, /decisionGroups\?\.some\(\(group\) => group\.blocking\)/);
+  assert.match(store, /proposal\.conflicts\.length > 0/);
 });
 
-test("proposal endpoint accepts replanning, missed-occurrence and remainder-transfer workflows", () => {
+test("proposal endpoint accepts typed constructor decisions and legacy atomic workflows", () => {
+  assert.match(proposalsRoute, /constructorOperation\(body\.operation\)/);
+  assert.match(proposalsRoute, /const decisions = Array\.isArray\(body\.decisions\)/);
+  assert.match(proposalsRoute, /operation,/);
+  assert.match(proposalsRoute, /decisions,/);
   assert.match(proposalsRoute, /body\.trigger !== "plans_changed"/);
   assert.match(proposalsRoute, /const missedOccurrence = body\.missedOccurrence/);
   assert.match(proposalsRoute, /missedOccurrence,/);
@@ -83,13 +90,25 @@ test("proposal endpoint accepts replanning, missed-occurrence and remainder-tran
   assert.doesNotMatch(proposalsRoute, /Опишите новое дело или запустите автоплан/);
 });
 
-test("live extension buttons use proposal preview for fifteen, thirty and sixty minutes", () => {
+test("calendar and duration changes enter the constructor proposal flow", () => {
+  assert.equal(existsSync(new URL("../../app/api/planner/blocks/[id]/route.ts", import.meta.url)), false);
   assert.match(proposalsRoute, /extensionMinutes >= 5/);
   assert.match(proposalsRoute, /extensionMinutes <= 1440/);
   assert.doesNotMatch(proposalsRoute, /Number\(body\.blockExtension\.minutes\) === 15/);
-  assert.match(plannerWorkspace, /\[15, 30, 60\]/);
-  assert.match(plannerWorkspace, /reviewBlockExtension\(currentBlock, minutes\)/);
-  assert.doesNotMatch(plannerWorkspace, /blockAction\(currentBlock, "snooze"/);
+  assert.match(plannerWorkspace, /kind: "change_block_time"/);
+  assert.match(plannerWorkspace, /kind: "change_item_duration"/);
+  assert.match(plannerWorkspace, /openConstructor\("replace", currentBlock\.id\)/);
+  assert.match(constructorModal, /kind: "replace_item"/);
+  assert.doesNotMatch(plannerWorkspace, /\/api\/planner\/blocks\/\$\{block\.id\}[\s\S]*method:\s*"PATCH"/);
+});
+
+test("the unified all-items step loads saved items and preserves edits and removals", () => {
+  assert.match(autoplannerModal, /savedCommitments\(items, blocks, profile\.timezone\)/);
+  assert.match(autoplannerModal, /baselineCommitments/);
+  assert.match(autoplannerModal, /changedCommitmentDrafts/);
+  assert.match(autoplannerModal, /removedItemIds:/);
+  assert.match(proposalsRoute, /const removedItemIds = Array\.isArray\(body\.removedItemIds\)/);
+  assert.match(plannerWorkspace, /blocks=\{blocks\}/);
 });
 
 test("legacy import is idempotent and never mutates legacy category/message tables", () => {
@@ -112,6 +131,9 @@ test("planner upgrade is idempotent and fresh installs include protected sleep",
   assert.match(plannerUpgrade, /add column if not exists commitment_level/);
   assert.match(plannerUpgrade, /add column if not exists planning_rank/);
   assert.match(plannerUpgrade, /add column if not exists role/);
+  assert.match(plannerUpgrade, /add column if not exists availability_overrides/);
+  assert.match(plannerUpgrade, /add column if not exists end_estimate/);
+  assert.match(plannerUpgrade, /protected_free/);
   assert.match(plannerUpgrade, /add column if not exists soft/);
   assert.match(plannerUpgrade, /add column if not exists planned_duration_minutes/);
   assert.match(plannerUpgrade, /add column if not exists sleepiness_level/);
@@ -129,6 +151,9 @@ test("planner upgrade is idempotent and fresh installs include protected sleep",
   assert.match(freshSchema, /uncertainty_policy jsonb not null default '\{\}'/);
   assert.match(freshSchema, /commitment_level text not null default 'required'/);
   assert.match(freshSchema, /role text not null default 'work'/);
+  assert.match(freshSchema, /availability_overrides jsonb not null default '\{\}'/);
+  assert.match(freshSchema, /end_estimate jsonb null/);
+  assert.match(freshSchema, /protected_free/);
   assert.match(freshSchema, /sleepiness_level integer null/);
   assert.match(freshSchema, /create table public\.planner_deferred_remainders/);
   assert.match(freshSchema, /pending_minutes integer not null/);
@@ -144,6 +169,8 @@ test("planner store repairs additive schema changes before serving requests", ()
   assert.match(store, /add column if not exists uncertainty_policy/);
   assert.match(store, /add column if not exists commitment_level/);
   assert.match(store, /add column if not exists role/);
+  assert.match(store, /add column if not exists availability_overrides/);
+  assert.match(store, /add column if not exists end_estimate/);
   assert.match(store, /create table if not exists public\.planner_deferred_remainders/);
   assert.match(store, /delete from public\.planner_deferred_remainders where app_user_id=\$1::uuid/);
   assert.match(store, /deferredRemainders: beforeDeferredRemainders/);

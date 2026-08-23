@@ -34,6 +34,7 @@ type ProfileRow = {
   reserve_ratio: string | number;
   default_buffer_minutes: number;
   availability: PlannerProfile["availability"];
+  availability_overrides: PlannerProfile["availabilityOverrides"];
   energy_windows: PlannerProfile["energyWindows"];
   sleep_schedule: PlannerProfile["sleepSchedule"];
   planning_policy: PlannerProfile["planningPolicy"];
@@ -110,6 +111,7 @@ type BlockRow = {
   source: PlannerBlock["source"];
   fixed: boolean;
   role: PlannerBlock["role"];
+  end_estimate: PlannerBlock["endEstimate"] | null;
   soft: boolean;
   occurrence_key: string | null;
   actual_start_at: Date | string | null;
@@ -146,7 +148,7 @@ const ITEM_COLUMNS = `id,kind,title,notes,area,location,priority,energy,estimate
   earliest_at,deadline_at,deadline_type,target_finish_at,target_finish_mode,estimate_confidence,
   deadline_policy,milestones,allowed_windows,preferred_windows,avoided_windows,can_split,min_chunk_minutes,
   buffer_before_minutes,buffer_after_minutes,recurrence,auto_plan,status,unplaced_reason,created_at,updated_at`;
-const BLOCK_COLUMNS = `id,item_id,title,start_at,end_at,status,source,fixed,role,soft,occurrence_key,
+const BLOCK_COLUMNS = `id,item_id,title,start_at,end_at,status,source,fixed,role,end_estimate,soft,occurrence_key,
   actual_start_at,actual_end_at,created_at,updated_at`;
 
 let plannerSchemaPromise: Promise<void> | null = null;
@@ -155,6 +157,10 @@ async function ensurePlannerSchema(executor: SqlExecutor): Promise<void> {
   if (plannerSchemaPromise) return plannerSchemaPromise;
 
   plannerSchemaPromise = (async () => {
+    await executor.query(`
+      alter table if exists public.planner_profiles
+        add column if not exists availability_overrides jsonb not null default '{}'::jsonb
+    `);
     await executor.query(`
       alter table if exists public.planner_items
         add column if not exists allowed_windows jsonb not null default '[]'::jsonb,
@@ -165,7 +171,13 @@ async function ensurePlannerSchema(executor: SqlExecutor): Promise<void> {
     await executor.query(`
       alter table if exists public.planner_blocks
         add column if not exists role text not null default 'work',
+        add column if not exists end_estimate jsonb null,
         add column if not exists soft boolean not null default false
+    `);
+    await executor.query(`
+      alter table if exists public.planner_blocks drop constraint if exists planner_blocks_role_check;
+      alter table if exists public.planner_blocks add constraint planner_blocks_role_check
+        check (role in ('work', 'uncertainty_reserve', 'calibration', 'protected_free'))
     `);
     await executor.query(`
       create table if not exists public.planner_deferred_remainders (
@@ -231,6 +243,7 @@ function profileFromRow(row: ProfileRow): PlannerProfile {
     reserveRatio: Number(row.reserve_ratio),
     defaultBufferMinutes: row.default_buffer_minutes,
     availability: row.availability,
+    availabilityOverrides: row.availability_overrides,
     energyWindows: row.energy_windows,
     sleepSchedule: row.sleep_schedule,
     planningPolicy: row.planning_policy,
@@ -314,6 +327,7 @@ function blockFromRow(row: BlockRow): PlannerBlock {
     source: row.source,
     fixed: row.fixed,
     role: row.role,
+    endEstimate: row.end_estimate ?? undefined,
     soft: row.soft,
     occurrenceKey: row.occurrence_key ?? undefined,
     actualStartAt: toIso(row.actual_start_at),
@@ -360,11 +374,11 @@ async function ensureProfile(executor: SqlExecutor, userId: string): Promise<Pla
   const { rows } = await executor.query<ProfileRow>(
     `insert into public.planner_profiles (
        app_user_id,timezone,horizon,reserve_ratio,default_buffer_minutes,
-       availability,energy_windows,sleep_schedule,planning_policy,assistant_setup_version,onboarding_completed
-     ) values ($1::uuid,$2::text,$3::text,$4::numeric,$5::integer,$6::jsonb,$7::jsonb,$8::jsonb,$9::jsonb,0,false)
+       availability,availability_overrides,energy_windows,sleep_schedule,planning_policy,assistant_setup_version,onboarding_completed
+     ) values ($1::uuid,$2::text,$3::text,$4::numeric,$5::integer,$6::jsonb,$7::jsonb,$8::jsonb,$9::jsonb,$10::jsonb,0,false)
      on conflict (app_user_id) do update set app_user_id = excluded.app_user_id
      returning app_user_id,timezone,horizon,reserve_ratio,default_buffer_minutes,
-       availability,energy_windows,sleep_schedule,planning_policy,assistant_setup_version,revision,onboarding_completed`,
+       availability,availability_overrides,energy_windows,sleep_schedule,planning_policy,assistant_setup_version,revision,onboarding_completed`,
     [
       userId,
       defaults.timezone,
@@ -372,6 +386,7 @@ async function ensureProfile(executor: SqlExecutor, userId: string): Promise<Pla
       defaults.reserveRatio,
       defaults.defaultBufferMinutes,
       JSON.stringify(defaults.availability),
+      JSON.stringify(defaults.availabilityOverrides),
       JSON.stringify(defaults.energyWindows),
       JSON.stringify(defaults.sleepSchedule),
       JSON.stringify(defaults.planningPolicy),
@@ -539,18 +554,18 @@ async function insertItem(executor: SqlExecutor, userId: string, value: PlannerI
 async function insertBlock(executor: SqlExecutor, userId: string, block: PlannerBlock): Promise<void> {
   await executor.query(
     `insert into public.planner_blocks (
-       app_user_id,id,item_id,title,start_at,end_at,status,source,fixed,role,soft,occurrence_key,
+       app_user_id,id,item_id,title,start_at,end_at,status,source,fixed,role,end_estimate,soft,occurrence_key,
        actual_start_at,actual_end_at
      ) values ($1::uuid,$2::text,$3::text,$4::text,$5::timestamptz,$6::timestamptz,
-       $7::text,$8::text,$9::boolean,$10::text,$11::boolean,$12::text,$13::timestamptz,$14::timestamptz)
+       $7::text,$8::text,$9::boolean,$10::text,$11::jsonb,$12::boolean,$13::text,$14::timestamptz,$15::timestamptz)
      on conflict (app_user_id,id) do update set
        item_id=excluded.item_id,title=excluded.title,start_at=excluded.start_at,end_at=excluded.end_at,
-       status=excluded.status,source=excluded.source,fixed=excluded.fixed,role=excluded.role,soft=excluded.soft,
+       status=excluded.status,source=excluded.source,fixed=excluded.fixed,role=excluded.role,end_estimate=excluded.end_estimate,soft=excluded.soft,
        occurrence_key=excluded.occurrence_key,actual_start_at=excluded.actual_start_at,
        actual_end_at=excluded.actual_end_at`,
     [
       userId, block.id, block.itemId ?? null, block.title, block.startAt, block.endAt,
-      block.status, block.source, block.fixed, block.role ?? "work", Boolean(block.soft), block.occurrenceKey ?? null,
+      block.status, block.source, block.fixed, block.role ?? "work", block.endEstimate ? JSON.stringify(block.endEstimate) : null, Boolean(block.soft), block.occurrenceKey ?? null,
       block.actualStartAt ?? null, block.actualEndAt ?? null,
     ]
   );
@@ -560,7 +575,7 @@ async function lockProfile(client: PoolClient, userId: string): Promise<PlannerP
   await ensureProfile(client, userId);
   const { rows } = await client.query<ProfileRow>(
     `select app_user_id,timezone,horizon,reserve_ratio,default_buffer_minutes,
-       availability,energy_windows,sleep_schedule,planning_policy,assistant_setup_version,revision,onboarding_completed
+       availability,availability_overrides,energy_windows,sleep_schedule,planning_policy,assistant_setup_version,revision,onboarding_completed
      from public.planner_profiles where app_user_id=$1::uuid for update`,
     [userId]
   );
@@ -605,7 +620,6 @@ export type PlannerStore = {
   createProposal(userId: string, input: PlannerProposalInput): Promise<PlannerProposal>;
   applyProposal(userId: string, proposalId: string): Promise<{ revision: number; changeSetId: string }>;
   actOnBlock(userId: string, blockId: string, action: string, expectedRevision: number, minutes?: number): Promise<{ block: PlannerBlock; revision: number }>;
-  moveBlock(userId: string, blockId: string, startAt: string, endAt: string, expectedRevision: number): Promise<{ block: PlannerBlock; revision: number }>;
   undoChangeSet(userId: string, changeSetId: string): Promise<number>;
   importLegacy(userId: string, sources: Array<{ sourceKey: string; title: string; items: PlannerItem[]; blocks: PlannerBlock[] }>, expectedRevision: number): Promise<{ revision: number; importedSources: number; importedItems: number; importedBlocks: number }>;
   checkInSleep(userId: string, input: PlannerSleepCheckInInput): Promise<PlannerSleepCheckInResult>;
@@ -660,14 +674,14 @@ function createPlannerStore(): PlannerStore {
         const { rows } = await client.query<ProfileRow>(
           `update public.planner_profiles set timezone=$2::text,horizon=$3::text,
              reserve_ratio=$4::numeric,default_buffer_minutes=$5::integer,
-             availability=$6::jsonb,energy_windows=$7::jsonb,
-             sleep_schedule=$8::jsonb,planning_policy=$9::jsonb,assistant_setup_version=$10::integer,
-             onboarding_completed=$11::boolean,revision=revision+1
+             availability=$6::jsonb,availability_overrides=$7::jsonb,energy_windows=$8::jsonb,
+             sleep_schedule=$9::jsonb,planning_policy=$10::jsonb,assistant_setup_version=$11::integer,
+             onboarding_completed=$12::boolean,revision=revision+1
            where app_user_id=$1::uuid
            returning app_user_id,timezone,horizon,reserve_ratio,default_buffer_minutes,
-             availability,energy_windows,sleep_schedule,planning_policy,assistant_setup_version,revision,onboarding_completed`,
+             availability,availability_overrides,energy_windows,sleep_schedule,planning_policy,assistant_setup_version,revision,onboarding_completed`,
           [userId,next.timezone,next.horizon,next.reserveRatio,next.defaultBufferMinutes,
-            JSON.stringify(next.availability),JSON.stringify(next.energyWindows),JSON.stringify(next.sleepSchedule),JSON.stringify(next.planningPolicy),
+            JSON.stringify(next.availability),JSON.stringify(next.availabilityOverrides),JSON.stringify(next.energyWindows),JSON.stringify(next.sleepSchedule),JSON.stringify(next.planningPolicy),
             next.assistantSetupVersion,next.onboardingCompleted]
         );
         return profileFromRow(rows[0]);
@@ -737,7 +751,9 @@ function createPlannerStore(): PlannerStore {
         }
         if (Number(row.base_revision) !== current.revision) throw new PlannerRevisionError();
         const proposal = row.proposal_data;
-        if (proposal.conflicts.length > 0) throw new PlannerConflictError();
+        if (proposal.conflicts.length > 0 || proposal.decisionGroups?.some((group) => group.blocking)) {
+          throw new PlannerConflictError();
+        }
         const [beforeItems, beforeBlocks, beforeSleepEvents, beforeDeferredRemainders] = await Promise.all([
           listItems(client, userId), listBlocks(client, userId), listSleepEvents(client, userId), listDeferredRemainders(client, userId),
         ]);
@@ -755,11 +771,11 @@ function createPlannerStore(): PlannerStore {
           await client.query(
             `update public.planner_profiles set timezone=$2::text,horizon=$3::text,
                reserve_ratio=$4::numeric,default_buffer_minutes=$5::integer,
-               availability=$6::jsonb,energy_windows=$7::jsonb,sleep_schedule=$8::jsonb,
-               planning_policy=$9::jsonb,assistant_setup_version=$10::integer,onboarding_completed=$11::boolean
+               availability=$6::jsonb,availability_overrides=$7::jsonb,energy_windows=$8::jsonb,sleep_schedule=$9::jsonb,
+               planning_policy=$10::jsonb,assistant_setup_version=$11::integer,onboarding_completed=$12::boolean
              where app_user_id=$1::uuid`,
             [userId,next.timezone,next.horizon,next.reserveRatio,next.defaultBufferMinutes,
-              JSON.stringify(next.availability),JSON.stringify(next.energyWindows),JSON.stringify(next.sleepSchedule),JSON.stringify(next.planningPolicy),
+              JSON.stringify(next.availability),JSON.stringify(next.availabilityOverrides),JSON.stringify(next.energyWindows),JSON.stringify(next.sleepSchedule),JSON.stringify(next.planningPolicy),
               next.assistantSetupVersion,next.onboardingCompleted]
           );
         }
@@ -859,34 +875,6 @@ function createPlannerStore(): PlannerStore {
         return { block: blockFromRow(updated[0]), revision };
       });
     },
-    async moveBlock(userId, blockId, startAt, endAt, expectedRevision) {
-      return withTransaction(pool, async (client) => {
-        const currentProfile = await lockProfile(client, userId);
-        if (currentProfile.revision !== expectedRevision) throw new PlannerRevisionError();
-        const start = new Date(startAt);
-        const end = new Date(endAt);
-        if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || end <= start) {
-          throw new Error("Некорректное время блока.");
-        }
-        const { rows: conflicts } = await client.query<{ id: string }>(
-          `select id from public.planner_blocks
-           where app_user_id=$1::uuid and id<>$2::text
-             and status not in ('skipped','cancelled')
-             and start_at<$4::timestamptz and end_at>$3::timestamptz limit 1`,
-          [userId, blockId, start.toISOString(), end.toISOString()]
-        );
-        if (conflicts.length > 0) throw new PlannerConflictError();
-        const { rows } = await client.query<BlockRow>(
-          `update public.planner_blocks set start_at=$3::timestamptz,end_at=$4::timestamptz,source='manual'
-           where app_user_id=$1::uuid and id=$2::text and status='planned' and start_at>=now()
-           returning ${BLOCK_COLUMNS}`,
-          [userId, blockId, start.toISOString(), end.toISOString()]
-        );
-        if (!rows[0]) throw new Error("Блок расписания не найден или уже завершён.");
-        const revision = await bumpRevision(client, userId);
-        return { block: blockFromRow(rows[0]), revision };
-      });
-    },
     async undoChangeSet(userId, changeSetId) {
       return withTransaction(pool, async (client) => {
         const current = await lockProfile(client, userId);
@@ -917,11 +905,11 @@ function createPlannerStore(): PlannerStore {
           await client.query(
             `update public.planner_profiles set timezone=$2::text,horizon=$3::text,
                reserve_ratio=$4::numeric,default_buffer_minutes=$5::integer,
-               availability=$6::jsonb,energy_windows=$7::jsonb,sleep_schedule=$8::jsonb,
-               planning_policy=$9::jsonb,assistant_setup_version=$10::integer,onboarding_completed=$11::boolean
+               availability=$6::jsonb,availability_overrides=$7::jsonb,energy_windows=$8::jsonb,sleep_schedule=$9::jsonb,
+               planning_policy=$10::jsonb,assistant_setup_version=$11::integer,onboarding_completed=$12::boolean
              where app_user_id=$1::uuid`,
             [userId,previous.timezone,previous.horizon,previous.reserveRatio,previous.defaultBufferMinutes,
-              JSON.stringify(previous.availability),JSON.stringify(previous.energyWindows),JSON.stringify(previous.sleepSchedule),JSON.stringify(previous.planningPolicy),
+              JSON.stringify(previous.availability),JSON.stringify(previous.availabilityOverrides),JSON.stringify(previous.energyWindows),JSON.stringify(previous.sleepSchedule),JSON.stringify(previous.planningPolicy),
               previous.assistantSetupVersion,previous.onboardingCompleted]
           );
         }
@@ -1024,11 +1012,11 @@ function createPlannerStore(): PlannerStore {
         const defaults = createDefaultPlannerProfile(current.timezone);
         const { rows: updated } = await client.query<{ revision: string | number }>(
           `update public.planner_profiles set horizon=$2::text,reserve_ratio=$3::numeric,
-             default_buffer_minutes=$4::integer,availability=$5::jsonb,energy_windows=$6::jsonb,
-             sleep_schedule=$7::jsonb,planning_policy=$8::jsonb,assistant_setup_version=0,onboarding_completed=false,
+             default_buffer_minutes=$4::integer,availability=$5::jsonb,availability_overrides=$6::jsonb,energy_windows=$7::jsonb,
+             sleep_schedule=$8::jsonb,planning_policy=$9::jsonb,assistant_setup_version=0,onboarding_completed=false,
              revision=revision+1 where app_user_id=$1::uuid returning revision`,
           [userId,defaults.horizon,defaults.reserveRatio,defaults.defaultBufferMinutes,
-            JSON.stringify(defaults.availability),JSON.stringify(defaults.energyWindows),JSON.stringify(defaults.sleepSchedule),
+            JSON.stringify(defaults.availability),JSON.stringify(defaults.availabilityOverrides),JSON.stringify(defaults.energyWindows),JSON.stringify(defaults.sleepSchedule),
             JSON.stringify(defaults.planningPolicy)]
         );
         return Number(updated[0].revision);

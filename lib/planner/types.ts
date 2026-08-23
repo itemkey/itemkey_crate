@@ -9,7 +9,7 @@ export type PlannerBlockStatus =
   | "skipped"
   | "cancelled";
 export type PlannerBlockSource = "manual" | "auto" | "migrated";
-export type PlannerBlockRole = "work" | "uncertainty_reserve" | "calibration";
+export type PlannerBlockRole = "work" | "uncertainty_reserve" | "calibration" | "protected_free";
 
 export type PlannerEstimateMode = "exact" | "approximate" | "range" | "unknown";
 export type PlannerEstimateSource = "user" | "calibration" | "statistics";
@@ -70,6 +70,10 @@ export type PlannerUncertaintyPolicy = {
   };
   /** What to do after a skipped occurrence. Old items default to asking every time. */
   missedOccurrencePolicy?: PlannerMissedOccurrencePolicy;
+  /** Explicit permission for the planner to reduce scope while resolving a conflict. */
+  reduction?:
+    | { mode: "forbidden" }
+    | { mode: "to_minimum"; minimumMinutes: number };
 };
 
 export type PlannerTimeWindow = {
@@ -295,6 +299,8 @@ export type PlannerProfile = {
   reserveRatio: number;
   defaultBufferMinutes: number;
   availability: PlannerAvailability;
+  /** One-off availability for a calendar date. It overrides the regular weekday window. */
+  availabilityOverrides: Record<string, PlannerTimeWindow[]>;
   energyWindows: PlannerEnergyWindow[];
   sleepSchedule: PlannerSleepSchedule;
   planningPolicy: PlannerPlanningPolicy;
@@ -384,6 +390,8 @@ export type PlannerBlock = {
   source: PlannerBlockSource;
   fixed: boolean;
   role?: PlannerBlockRole;
+  /** Structured certainty shown by the constructor for fixed-event endings. */
+  endEstimate?: PlannerBlockEndEstimate;
   /** Soft blocks reserve likely-to-maximum capacity without making the interval unavailable. */
   soft?: boolean;
   /** A lower-priority block currently using another item's soft reserve. */
@@ -400,6 +408,83 @@ export type PlannerDraft = Partial<PlannerItem> & {
   date?: string;
   start?: string;
   end?: string;
+  endEstimate?: PlannerBlockEndEstimate;
+};
+
+export type PlannerBlockEndEstimate = {
+  mode: "exact" | "approximate" | "range" | "unknown";
+  earliestAt?: string;
+  likelyAt?: string;
+  latestAt?: string;
+  toleranceMinutes?: number;
+};
+
+export type PlannerOperationScope = "occurrence" | "future" | "item";
+
+export type PlannerPlacement =
+  | { mode: "date"; date: string }
+  | { mode: "exact"; date: string; start: string }
+  | { mode: "before" | "after"; anchorBlockId: string; gapMinutes?: number }
+  | { mode: "first_free"; date?: string };
+
+export type PlannerConstructorOperation =
+  | { kind: "add_item"; draft: PlannerDraft }
+  | { kind: "edit_item"; draft: PlannerDraft; scope?: PlannerOperationScope; blockId?: string }
+  | { kind: "bulk_update_items"; drafts: PlannerDraft[]; archiveItemIds?: string[] }
+  | { kind: "move_item"; blockId: string; scope: PlannerOperationScope; placement: PlannerPlacement }
+  | { kind: "cancel_item"; blockId?: string; itemId?: string; scope: PlannerOperationScope }
+  | {
+      kind: "replace_item";
+      blockId: string;
+      scope: PlannerOperationScope;
+      replacement: PlannerDraft;
+      duration:
+        | { mode: "same" }
+        | { mode: "minutes"; minutes: number }
+        | { mode: "until_next" }
+        | { mode: "until"; date: string; time: string };
+    }
+  | { kind: "change_block_time"; blockId: string; scope?: PlannerOperationScope; startAt: string; endAt: string }
+  | { kind: "change_item_duration"; itemId: string; blockId?: string; scope?: PlannerOperationScope; duration: PlannerDurationEstimate; reduction?: PlannerUncertaintyPolicy["reduction"] }
+  | { kind: "protect_interval"; date: string; start: string; end: string; title?: string }
+  | { kind: "occupy_interval"; draft: PlannerDraft }
+  | { kind: "set_sleep_boundary"; boundary: "bedtime" | "wake"; date: string; time: string }
+  | { kind: "set_day_bounds"; date: string; start: string; end: string }
+  | {
+      kind: "rebuild_remaining";
+      fromAt: string;
+      decisions: Array<{ itemId: string; disposition: "required" | "desired" | "if_time" | "cancel" }>;
+      bedtime?: { date: string; time: string };
+    };
+
+export type PlannerDecisionOption = {
+  id: string;
+  kind: "move" | "shorten" | "cancel" | "queue" | "edit";
+  title: string;
+  description: string;
+};
+
+export type PlannerDecisionSelection = {
+  groupId: string;
+  optionId: string;
+};
+
+export type PlannerDecisionGroup = {
+  id: string;
+  title: string;
+  message: string;
+  blocking: boolean;
+  options: PlannerDecisionOption[];
+  selectedOptionId?: string;
+};
+
+export type PlannerHumanSummary = {
+  additions: string[];
+  cancellations: string[];
+  moves: string[];
+  reductions: string[];
+  sleepChanges: string[];
+  freedIntervals: string[];
 };
 
 export type PlannerProposalChange =
@@ -531,9 +616,12 @@ export type PlannerProposal = {
     | "day_refresh"
     | "assistant_setup"
     | "assistant_update"
-    | "sleep_changed";
+    | "sleep_changed"
+    | "constructor";
+  operation?: PlannerConstructorOperation;
   normalizedDraft?: PlannerDraft;
   normalizedDrafts?: PlannerDraft[];
+  removedItemIds?: string[];
   blockExtension?: PlannerProposalInput["blockExtension"];
   missedOccurrence?: PlannerProposalInput["missedOccurrence"];
   remainderTransfer?: PlannerRemainderTransferInput & {
@@ -543,6 +631,9 @@ export type PlannerProposal = {
   impact?: PlannerProposalImpact;
   changes: PlannerProposalChange[];
   conflicts: PlannerConflict[];
+  decisionGroups?: PlannerDecisionGroup[];
+  decisions?: PlannerDecisionSelection[];
+  humanSummary?: PlannerHumanSummary;
   unplaced: PlannerUnplaced[];
   effectiveFocus?: PlannerPlanningFocus;
   deadlineAnalysis?: PlannerDeadlineAnalysis[];
@@ -604,13 +695,17 @@ export type PlannerBootstrap = {
 };
 
 export type PlannerProposalInput = {
-  command?: string;
+  operation?: PlannerConstructorOperation;
+  decisions?: PlannerDecisionSelection[];
   draft?: PlannerDraft;
   drafts?: PlannerDraft[];
+  /** Existing active items removed in the unified all-items editor. */
+  removedItemIds?: string[];
   profilePatch?: Partial<PlannerProfile>;
   sleepEvent?: PlannerSleepEvent;
   trigger?: PlannerProposal["trigger"];
   rebuildFuture?: boolean;
+  rebuildFromAt?: string;
   planningFocusOverride?: PlannerPlanningFocus;
   blockExtension?: {
     blockId: string;
@@ -640,34 +735,6 @@ export type PlannerSleepCheckInResult = {
   event: PlannerSleepEvent;
   revision: number;
   suggestion?: PlannerBootstrap["sleepDurationSuggestion"];
-};
-
-export type PlannerAssistantAmbiguity = {
-  index: number;
-  field: "title" | "kind" | "duration" | "date" | "time";
-  message: string;
-};
-
-export type PlannerAssistantParseResult = {
-  drafts: PlannerDraft[];
-  ambiguities: PlannerAssistantAmbiguity[];
-};
-
-export type PlannerSleepParseResult = {
-  mode?: "fixed" | "adaptive";
-  bedtime?: string;
-  durationMinutes?: number;
-  durationRange?: {
-    minMinutes: number;
-    maxMinutes: number;
-  };
-  exactDurationsMinutes?: number[];
-  planningFocus?: PlannerPlanningFocus;
-  sleepinessLevel?: PlannerSleepinessLevel;
-  wakeDayPart?: PlannerWakeDayPart;
-  changeKind?: "later_unknown" | "bedtime_now" | "wake_now";
-  estimatedBedtimeRange?: PlannerTimeWindow;
-  ambiguities: string[];
 };
 
 export const DEFAULT_PLANNER_AVAILABILITY: PlannerAvailability = {
@@ -708,6 +775,7 @@ export function createDefaultPlannerProfile(timezone = "Europe/Minsk"): PlannerP
     reserveRatio: 0.2,
     defaultBufferMinutes: 15,
     availability: DEFAULT_PLANNER_AVAILABILITY,
+    availabilityOverrides: {},
     energyWindows: DEFAULT_PLANNER_ENERGY_WINDOWS,
     sleepSchedule: DEFAULT_PLANNER_SLEEP_SCHEDULE,
     planningPolicy: DEFAULT_PLANNER_PLANNING_POLICY,

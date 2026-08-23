@@ -6,7 +6,6 @@ import {
   type PlannerDeferredRemainder,
   type PlannerDraft,
   type PlannerEnergy,
-  type PlannerAssistantParseResult,
   type PlannerItem,
   type PlannerMilestone,
   type PlannerPriority,
@@ -16,7 +15,6 @@ import {
   type PlannerProposalInput,
   type PlannerProposalChange,
   type PlannerSleepEvent,
-  type PlannerSleepParseResult,
   type PlannerTimeWindow,
   type PlannerUncertaintyPolicy,
   type PlannerUnplaced,
@@ -30,6 +28,7 @@ import {
   normalizeSleepSchedule,
   preferredSleepDurations,
   sleepDurationBounds,
+  sleepRuleForWakeDate,
   sleepWindowForWakeDate,
   validateAdaptiveSleepSchedule,
 } from "./sleep.ts";
@@ -124,6 +123,13 @@ export function normalizePlannerProfile(value: Partial<PlannerProfile>): Planner
         Object.entries(value.availability).map(([day, windows]) => [day, normalizeWindows(windows)])
       )
     : fallback.availability;
+  const availabilityOverrides = value.availabilityOverrides && typeof value.availabilityOverrides === "object"
+    ? Object.fromEntries(
+        Object.entries(value.availabilityOverrides).flatMap(([date, windows]) =>
+          normalizePlannerDate(date) ? [[date, normalizeWindows(windows)]] : []
+        )
+      )
+    : {};
   const rawPolicy = value.planningPolicy;
   const planningPolicy: PlannerProfile["planningPolicy"] = {
     focus: rawPolicy?.focus === "work" ? "work" : "sleep",
@@ -144,6 +150,7 @@ export function normalizePlannerProfile(value: Partial<PlannerProfile>): Planner
     reserveRatio: clamp(Number(value.reserveRatio ?? 0.2), 0, 0.6),
     defaultBufferMinutes: clamp(Math.round(Number(value.defaultBufferMinutes ?? 15)), 0, 120),
     availability,
+    availabilityOverrides,
     energyWindows: Array.isArray(value.energyWindows)
       ? value.energyWindows.flatMap((window) => {
           const start = normalizePlannerTime(window?.start);
@@ -284,6 +291,16 @@ export function normalizePlannerItem(value: Partial<PlannerItem> & { id: string;
       || rawUncertainty?.missedOccurrencePolicy === "reestimate_total"
       ? rawUncertainty.missedOccurrencePolicy
       : rawUncertainty?.missedOccurrencePolicy === "ask" ? "ask" : undefined,
+    reduction: rawUncertainty?.reduction?.mode === "to_minimum"
+      ? {
+          mode: "to_minimum",
+          minimumMinutes: clamp(
+            Math.round(Number(rawUncertainty.reduction.minimumMinutes ?? minMinutes)),
+            5,
+            likelyMinutes
+          ),
+        }
+      : { mode: "forbidden" },
   };
   const normalizedCommitment = value.commitmentLevel === "must_not_skip" || value.commitmentLevel === "desired" || value.commitmentLevel === "if_time"
     ? value.commitmentLevel
@@ -344,346 +361,6 @@ export function normalizePlannerItem(value: Partial<PlannerItem> & { id: string;
     unplacedReason: value.unplacedReason?.trim().slice(0, 500) || undefined,
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
-  };
-}
-
-function inferDateFromText(text: string, baseDate: string): string | undefined {
-  const lower = text.toLocaleLowerCase();
-  const iso = lower.match(/\b(\d{4}-\d{2}-\d{2})\b/)?.[1];
-  if (iso) return normalizePlannerDate(iso);
-  if (lower.includes("послезавтра") || lower.includes("day after tomorrow")) return addPlannerDays(baseDate, 2);
-  if (lower.includes("завтра") || lower.includes("tomorrow")) return addPlannerDays(baseDate, 1);
-  if (lower.includes("сегодня") || lower.includes("today")) return baseDate;
-  const names = [
-    ["понедель", 1], ["monday", 1], ["вторник", 2], ["tuesday", 2],
-    ["сред", 3], ["wednesday", 3], ["четвер", 4], ["thursday", 4],
-    ["пятниц", 5], ["friday", 5], ["суббот", 6], ["saturday", 6],
-    ["воскрес", 7], ["sunday", 7],
-  ] as const;
-  for (const [fragment, weekday] of names) {
-    if (!lower.includes(fragment)) continue;
-    const offset = (weekday - plannerWeekday(baseDate) + 7) % 7;
-    return addPlannerDays(baseDate, offset || 7);
-  }
-  return undefined;
-}
-
-function parseDuration(text: string): number | undefined {
-  const hours = text.match(/(\d+(?:[.,]\d+)?)\s*(?:ч(?:ас(?:а|ов)?)?|h(?:ours?)?)/i)?.[1];
-  const minutes = text.match(/(\d+)\s*(?:мин(?:ут[аы]?)?|m(?:in(?:utes?)?)?)/i)?.[1];
-  if (hours) return Math.round(Number(hours.replace(",", ".")) * 60);
-  if (minutes) return Number(minutes);
-  return undefined;
-}
-
-function parseWorkDurationEstimate(text: string): {
-  mode: "exact" | "approximate" | "range" | "unknown";
-  minMinutes: number;
-  likelyMinutes: number;
-  maxMinutes: number;
-  tolerancePercent?: 30;
-  calibrationMinutes?: number;
-} | undefined {
-  const unknown = /(?:не знаю|неизвестн|не могу оценить|сколько получится|unknown|not sure|cannot estimate)/i.test(text);
-  if (unknown) return { mode: "unknown", minMinutes: 30, likelyMinutes: 30, maxMinutes: 30, calibrationMinutes: 30 };
-  const unitFactor = /(?:ч(?:ас(?:а|ов)?)?|h(?:ours?)?)/i.test(text) ? 60 : 1;
-  const unit = "(?:ч(?:ас(?:а|ов)?)?|h(?:ours?)?|мин(?:ут[аы]?)?|m(?:in(?:utes?)?)?)";
-  const triple = text.match(new RegExp(`(\\d+(?:[.,]\\d+)?)\\s*(?:-|—|–|до|to)\\s*(\\d+(?:[.,]\\d+)?)\\s*(?:-|—|–|до|to)\\s*(\\d+(?:[.,]\\d+)?)\\s*${unit}`, "i"));
-  if (triple) {
-    const values = triple.slice(1, 4).map((value) => Math.max(5, Math.round(Number(value.replace(",", ".")) * unitFactor)));
-    return { mode: "range", minMinutes: Math.min(values[0], values[1]), likelyMinutes: values[1], maxMinutes: Math.max(values[1], values[2]) };
-  }
-  const pair = text.match(new RegExp(`(\\d+(?:[.,]\\d+)?)\\s*(?:-|—|–|до|to)\\s*(\\d+(?:[.,]\\d+)?)\\s*${unit}`, "i"));
-  if (pair) {
-    const first = Math.max(5, Math.round(Number(pair[1].replace(",", ".")) * unitFactor));
-    const second = Math.max(5, Math.round(Number(pair[2].replace(",", ".")) * unitFactor));
-    const minMinutes = Math.min(first, second);
-    const maxMinutes = Math.max(first, second);
-    return { mode: "range", minMinutes, likelyMinutes: Math.round((minMinutes + maxMinutes) / 2), maxMinutes };
-  }
-  const likelyMinutes = parseDuration(text);
-  if (!likelyMinutes) return undefined;
-  if (/(?:примерно|около|приблизительно|плюс-минус|roughly|about|approximately)/i.test(text)) {
-    return {
-      mode: "approximate",
-      minMinutes: Math.max(5, Math.round(likelyMinutes * .7)),
-      likelyMinutes,
-      maxMinutes: Math.round(likelyMinutes * 1.3),
-      tolerancePercent: 30,
-    };
-  }
-  return { mode: "exact", minMinutes: likelyMinutes, likelyMinutes, maxMinutes: likelyMinutes };
-}
-
-function parseRecurrenceCount(text: string): { min: number; likely: number; max: number; period: "week" | "month" } | undefined {
-  const match = text.match(/(\d+)\s*(?:-|—|–|до|to)\s*(\d+)\s*(?:раз|times?)(?:\s*(?:в|за|per)\s*(недел\w*|месяц\w*|week|month))?/i);
-  if (!match) return undefined;
-  const min = Math.min(Number(match[1]), Number(match[2]));
-  const max = Math.max(Number(match[1]), Number(match[2]));
-  return { min, likely: Math.round((min + max) / 2), max, period: /месяц|month/i.test(match[3] ?? "") ? "month" : "week" };
-}
-
-function parseSleepDurationRange(text: string): { minMinutes: number; maxMinutes: number } | undefined {
-  const match = text.match(/(\d+(?:[.,]\d+)?)\s*(?:-|—|–|до|to)\s*(\d+(?:[.,]\d+)?)\s*(?:ч(?:ас(?:а|ов)?)?|h(?:ours?)?)/i);
-  if (!match) return undefined;
-  const first = Math.round(Number(match[1].replace(",", ".")) * 60);
-  const second = Math.round(Number(match[2].replace(",", ".")) * 60);
-  if (!Number.isFinite(first) || !Number.isFinite(second)) return undefined;
-  return { minMinutes: Math.min(first, second), maxMinutes: Math.max(first, second) };
-}
-
-function parseExactSleepDurations(text: string): number[] | undefined {
-  const match = text.match(/(\d+(?:[.,]\d+)?)\s*(?:ч(?:ас(?:а|ов)?)?|h(?:ours?)?)?\s*(?:,|\/|или|либо|и|or|and)\s*(\d+(?:[.,]\d+)?)\s*(?:ч(?:ас(?:а|ов)?)?|h(?:ours?)?)/i);
-  if (!match) return undefined;
-  const values = [match[1], match[2]]
-    .map((value) => Math.round(Number(value.replace(",", ".")) * 60 / 15) * 15)
-    .filter((value) => Number.isFinite(value) && value >= 3 * 60 && value <= 16 * 60);
-  return values.length === 2 ? Array.from(new Set(values)).sort((left, right) => left - right) : undefined;
-}
-
-function parseDeadlineClock(text: string): string | undefined {
-  const match = text.match(/(?:дедлайн|срок|сдать|закончить|готово|due|deadline)[^\d]{0,28}(?:к|до|by|at)?\s*(\d{1,2})(?::([0-5]\d))?/i);
-  if (!match) return undefined;
-  return normalizePlannerTime(`${String(Number(match[1])).padStart(2, "0")}:${match[2] ?? "00"}`) ?? undefined;
-}
-
-function parseTimeRange(text: string): { start: string; end: string } | undefined {
-  const match = text.match(/(?:с|from)?\s*(\d{1,2})(?::([0-5]\d))?\s*(?:-|—|–|до|to)\s*(\d{1,2})(?::([0-5]\d))?/i);
-  if (!match) return undefined;
-  const start = normalizePlannerTime(`${String(Number(match[1])).padStart(2, "0")}:${match[2] ?? "00"}`);
-  const end = normalizePlannerTime(`${String(Number(match[3])).padStart(2, "0")}:${match[4] ?? "00"}`);
-  return start && end ? { start, end } : undefined;
-}
-
-function parseRecurrence(text: string): PlannerDraft["recurrence"] | undefined {
-  const lower = text.toLocaleLowerCase();
-  if (!/(?:кажд|every|по будням|weekdays|ежеднев)/i.test(lower)) return undefined;
-  if (/(?:каждый день|ежеднев|every day|daily)/i.test(lower)) return { frequency: "daily" };
-  if (/(?:по будням|weekdays)/i.test(lower)) return { frequency: "custom", weekdays: [1, 2, 3, 4, 5] };
-  const names = [
-    [/(?:понедель|monday)/i, 1], [/(?:вторник|tuesday)/i, 2],
-    [/(?:сред|wednesday)/i, 3], [/(?:четвер|thursday)/i, 4],
-    [/(?:пятниц|friday)/i, 5], [/(?:суббот|saturday)/i, 6],
-    [/(?:воскрес|sunday)/i, 7],
-  ] as const;
-  const weekdays = names.filter(([pattern]) => pattern.test(lower)).map(([, day]) => day);
-  return weekdays.length === 1
-    ? { frequency: "weekly", weekdays }
-    : { frequency: "custom", weekdays: weekdays.length ? weekdays : [1, 2, 3, 4, 5, 6, 7] };
-}
-
-export function parsePlannerCommand(
-  command: string,
-  profile: PlannerProfile,
-  now = new Date()
-): PlannerDraft {
-  const text = command.trim();
-  const baseDate = formatDateInTimeZone(now, profile.timezone);
-  const durationEstimate = parseWorkDurationEstimate(text);
-  const durationRangeWritten = durationEstimate?.mode === "range";
-  const range = durationRangeWritten ? undefined : parseTimeRange(text);
-  const duration = range
-    ? Math.max(5, (plannerTimeToMinutes(range.end) - plannerTimeToMinutes(range.start) + 1440) % 1440)
-    : durationEstimate?.likelyMinutes ?? 60;
-  const lower = text.toLocaleLowerCase();
-  const recurrence = parseRecurrence(text);
-  const recurrenceCount = parseRecurrenceCount(text);
-  const inferredDate = inferDateFromText(text, baseDate);
-  const kind = range || lower.includes("встреч") || lower.includes("appointment")
-    ? "fixed_event"
-    : recurrence || recurrenceCount || lower.includes("routine")
-      ? "routine"
-      : "flexible_task";
-  const title = text
-    .replace(/\b(?:сегодня|завтра|послезавтра|today|tomorrow)\b/gi, "")
-    .replace(/(?:с|from)?\s*\d{1,2}(?::[0-5]\d)?\s*(?:-|—|–|до|to)\s*\d{1,2}(?::[0-5]\d)?/gi, "")
-    .replace(/\b\d+(?:[.,]\d+)?\s*(?:час(?:а|ов)?|ч|мин(?:ут[аы]?)?|hours?|h|minutes?|min)\b/gi, "")
-    .replace(/\b(?:каждый|каждая|каждое|каждые|every|daily|ежедневно|по будням|weekdays)\b/gi, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/^[,.;:\-–—]+|[,.;:\-–—]+$/g, "") || "Новое дело";
-  const priority: PlannerPriority = lower.includes("сроч") || lower.includes("urgent")
-    ? "critical"
-    : lower.includes("важ") || lower.includes("important")
-      ? "high"
-      : "normal";
-  const deadlineType = /(?:ж[её]стк(?:ий|ого)?\s+(?:дедлайн|срок)|обязательн.{0,12}(?:сдать|закончить)|hard deadline|must be done)/i.test(lower)
-    ? "hard" as const
-    : inferredDate && kind === "flexible_task"
-      ? "target" as const
-      : "none" as const;
-  const deadlineClock = parseDeadlineClock(text) ?? "23:59";
-  const estimate = range
-    ? { mode: "exact" as const, minMinutes: duration, likelyMinutes: duration, maxMinutes: duration }
-    : durationEstimate ?? { mode: "exact" as const, minMinutes: duration, likelyMinutes: duration, maxMinutes: duration };
-  const outcomeMode = /(?:кажд(?:ый|ую|ое)\s+(?:день|раз)|per\s+(?:day|session)|выделять время|allocate time)/i.test(lower)
-    ? "time_budget" as const
-    : "deliverable" as const;
-  const commitmentLevel = deadlineType === "hard" || /(?:нельзя пропустить|must not skip)/i.test(lower)
-    ? "must_not_skip" as const
-    : /(?:если останется время|в свободное время|if time|spare time)/i.test(lower)
-      ? "if_time" as const
-      : /(?:желательно|would like|desired)/i.test(lower)
-        ? "desired" as const
-        : "required" as const;
-  const allowedWeekdays = recurrence?.weekdays ?? (recurrence?.frequency === "daily" ? [1, 2, 3, 4, 5, 6, 7] : recurrenceCount ? [1, 2, 3, 4, 5, 6, 7] : []);
-  return {
-    title,
-    kind,
-    estimateMinutes: duration,
-    uncertaintyPolicy: {
-      outcomeMode,
-      duration: { ...estimate, source: "user" },
-      date: {
-        mode: inferredDate ? /(?:примерно|желательно|around|prefer)/i.test(lower) ? "preferred" : "exact" : "any",
-        exactDate: inferredDate,
-        preferredDate: /(?:примерно|желательно|around|prefer)/i.test(lower) ? inferredDate : undefined,
-      },
-      time: { mode: range ? "exact" : "any", exactStart: range?.start },
-      recurrence: {
-        mode: recurrenceCount ? "count_range" : "exact_days",
-        period: recurrenceCount?.period ?? "week",
-        minOccurrences: recurrenceCount?.min ?? Math.max(1, allowedWeekdays.length || 1),
-        likelyOccurrences: recurrenceCount?.likely ?? Math.max(1, allowedWeekdays.length || 1),
-        maxOccurrences: recurrenceCount?.max ?? Math.max(1, allowedWeekdays.length || 1),
-        allowedWeekdays,
-      },
-      deadline: deadlineType === "none" ? { mode: "none" } : {
-        mode: deadlineType === "hard" ? "hard" : "preferred_range",
-        latestAt: inferredDate ? zonedPlannerDateTimeToUtc(inferredDate, deadlineClock, profile.timezone) : undefined,
-      },
-    },
-    commitmentLevel,
-    planningRank: 0,
-    priority,
-    energy: "normal",
-    date: inferredDate ?? baseDate,
-    deadlineAt: deadlineType !== "none" && inferredDate
-      ? zonedPlannerDateTimeToUtc(inferredDate, deadlineClock, profile.timezone)
-      : undefined,
-    deadlineType,
-    targetFinishMode: "auto",
-    estimateConfidence: "normal",
-    deadlinePolicy: { chainMode: "inherit" },
-    milestones: [],
-    start: range?.start,
-    end: range?.end,
-    canSplit: kind === "flexible_task" && duration >= 60,
-    minChunkMinutes: 25,
-    allowedWindows: [],
-    preferredWindows: [],
-    avoidedWindows: [],
-    recurrence: recurrence || recurrenceCount ? {
-      ...(recurrence ?? { frequency: "custom" as const, weekdays: allowedWeekdays }),
-      startDate: inferredDate ?? baseDate,
-      startTime: range?.start,
-      endTime: range?.end,
-      durationMode: outcomeMode === "deliverable" ? "per_cycle" : "per_occurrence",
-      schedulingMode: commitmentLevel === "if_time" ? "spare_time" : "required",
-    } : undefined,
-    autoPlan: kind !== "fixed_event",
-    status: "active",
-  };
-}
-
-export function parsePlannerCommands(
-  command: string,
-  profile: PlannerProfile,
-  now = new Date()
-): PlannerAssistantParseResult {
-  const lines = command.split(/\r?\n|;/).map((line) => line.trim()).filter(Boolean).slice(0, 100);
-  const drafts: PlannerDraft[] = [];
-  const ambiguities: PlannerAssistantParseResult["ambiguities"] = [];
-  lines.forEach((line, index) => {
-    const draft = parsePlannerCommand(line, profile, now);
-    drafts.push(draft);
-    const durationEstimate = parseWorkDurationEstimate(line);
-    if (!durationEstimate && !parseTimeRange(line)) {
-      ambiguities.push({ index, field: "duration", message: "Длительность не указана; временно поставлен 1 час." });
-    }
-    if (durationEstimate?.mode === "range") {
-      ambiguities.push({ index, field: "duration", message: "Диапазон распознан; проверьте значение «обычно», которое используется для основного плана." });
-    }
-    if (draft.kind === "fixed_event" && !draft.start) {
-      ambiguities.push({ index, field: "time", message: "Для фиксированного события нужно указать начало и конец." });
-    }
-    if (draft.kind === "fixed_event" && !inferDateFromText(line, formatDateInTimeZone(now, profile.timezone))) {
-      ambiguities.push({ index, field: "date", message: "Дата не указана; временно выбрано сегодня." });
-    }
-    if (!draft.title.trim()) {
-      ambiguities.push({ index, field: "title", message: "У дела нет понятного названия." });
-    }
-  });
-  return { drafts, ambiguities };
-}
-
-export function parseSleepCommand(command: string): PlannerSleepParseResult {
-  const text = command.trim();
-  const lower = text.toLocaleLowerCase();
-  const durationRange = parseSleepDurationRange(text);
-  const exactDurationsMinutes = durationRange ? undefined : parseExactSleepDurations(text);
-  const automaticWake = /(?:без разниц|не\s*важно|неважно|выбери сам|выберите сами|любое время).{0,32}(?:встав|подъ[её]м)?|(?:any wake time|wake whenever|choose for me|no wake preference)/i.test(lower);
-  const adaptive = /(?:нет|без|не имею|нестабильн|шатк|плавающ).{0,24}(?:график|режим)|(?:no|without|irregular|unstable|flexible).{0,24}(?:schedule|sleep)/i.test(lower)
-    || automaticWake
-    || Boolean(durationRange)
-    || Boolean(exactDurationsMinutes);
-  const timeMatch = text.match(/(?:лож(?:усь|иться|усь спать)|спать|bed(?:time)?|sleep)\D{0,20}(\d{1,2})(?::([0-5]\d))?/i)
-    ?? text.match(/\b(?:в|at)\s*(\d{1,2})(?::([0-5]\d))?/i);
-  const bedtime = timeMatch
-    ? normalizePlannerTime(`${String(Number(timeMatch[1])).padStart(2, "0")}:${timeMatch[2] ?? "00"}`)
-    : undefined;
-  const durationMinutes = durationRange ? undefined : parseDuration(text);
-  const planningFocus = /(?:работа|дедлайн|дела).{0,24}важн.{0,16}(?:сна|сон)|(?:work|deadlines?).{0,24}(?:over|before|more important).{0,12}sleep/i.test(lower)
-    ? "work" as const
-    : /(?:сон).{0,24}важн|(?:sleep).{0,24}(?:first|priority|more important)/i.test(lower)
-      ? "sleep" as const
-      : undefined;
-  const sleepinessLevel = /(?:еле держ|вырубает|засыпаю на ходу|extremely sleepy|can barely stay awake)/i.test(lower)
-    ? 4 as const
-    : /(?:очень сонн|очень плохо|сильно хочу спать|very sleepy)/i.test(lower)
-      ? 3 as const
-      : /(?:не высп|хренов|плохо|заметно сонн|tired|not rested)/i.test(lower)
-        ? 2 as const
-        : /(?:немного сонн|слегка сонн|a little sleepy)/i.test(lower)
-          ? 1 as const
-          : /(?:бодр|хорошо высп|alert|well rested)/i.test(lower)
-            ? 0 as const
-            : undefined;
-  const wakeDayPart = automaticWake
-    ? "auto" as const
-    : /(?:ранн.{0,8}утр|early morning)/i.test(lower)
-      ? "early_morning" as const
-      : /(?:ближе к полуд|поздн.{0,8}утр|late morning|near noon)/i.test(lower)
-        ? "late_morning" as const
-        : /(?:утр|morning)/i.test(lower)
-          ? "morning" as const
-          : undefined;
-  const estimatedBedtimeRange = !durationRange && /(?:лягу|ложусь|усну|bed|sleep)/i.test(lower)
-    ? parseTimeRange(text)
-    : undefined;
-  const changeKind = /(?:ложусь сейчас|иду спать|going to bed now)/i.test(lower)
-    ? "bedtime_now" as const
-    : /(?:проснул|проснулась|уже проснулся|woke up|already awake)/i.test(lower)
-      ? "wake_now" as const
-      : /(?:лягу позже|поздно лягу|лягу примерно|время неизвестно|sleep later|rough bedtime|bedtime unknown)/i.test(lower) || Boolean(estimatedBedtimeRange)
-        ? "later_unknown" as const
-        : undefined;
-  const ambiguities: string[] = [];
-  if (!adaptive && !bedtime && !changeKind) ambiguities.push("Не удалось определить время отхода ко сну.");
-  if (!durationMinutes && !durationRange && !exactDurationsMinutes && !changeKind && sleepinessLevel === undefined) ambiguities.push("Не удалось определить обычную длительность сна, диапазон или точные варианты.");
-  if (adaptive && !wakeDayPart) ambiguities.push("Укажите удобную часть дня для подъёма или выберите «Без разницы — выбери сам».");
-  return {
-    mode: changeKind ? undefined : adaptive ? "adaptive" : bedtime || durationMinutes ? "fixed" : undefined,
-    bedtime,
-    durationMinutes,
-    durationRange,
-    exactDurationsMinutes,
-    planningFocus,
-    sleepinessLevel,
-    wakeDayPart,
-    changeKind,
-    estimatedBedtimeRange,
-    ambiguities,
   };
 }
 
@@ -782,7 +459,9 @@ function blockMinutesInsideWindow(
 }
 
 function availabilityForDate(profile: PlannerProfile, date: string): PlannerTimeWindow[] {
-  return profile.availability[String(plannerWeekday(date))] ?? [];
+  return profile.availabilityOverrides[date]
+    ?? profile.availability[String(plannerWeekday(date))]
+    ?? [];
 }
 
 function deadlineBufferMinutes(item: PlannerItem): number {
@@ -1391,7 +1070,9 @@ function blockFromDraft(draft: PlannerDraft, item: PlannerItem, profile: Planner
     status: "planned",
     source: "manual",
     fixed: true,
+    tentative: draft.endEstimate?.mode === "unknown" || undefined,
     occurrenceKey: item.id,
+    endEstimate: draft.endEstimate,
   };
 }
 
@@ -1427,9 +1108,132 @@ function recurringFixedBlocks(
     });
 }
 
+function prepareConstructorInput(input: PlannerEngineInput): PlannerEngineInput {
+  const operation = input.operation;
+  if (!operation) return input;
+  const base: PlannerEngineInput = { ...input, trigger: "constructor" };
+
+  if (operation.kind === "add_item") {
+    return { ...base, draft: operation.draft, rebuildFuture: true };
+  }
+  if (operation.kind === "edit_item") {
+    if (operation.scope === "occurrence" && operation.blockId) return base;
+    const selected = operation.blockId ? input.blocks.find((block) => block.id === operation.blockId) : undefined;
+    return { ...base, draft: operation.draft, rebuildFuture: true, rebuildFromAt: selected?.startAt };
+  }
+  if (operation.kind === "bulk_update_items") {
+    return {
+      ...base,
+      drafts: operation.drafts,
+      removedItemIds: operation.archiveItemIds,
+      rebuildFuture: true,
+    };
+  }
+  if (operation.kind === "occupy_interval") {
+    return { ...base, draft: { ...operation.draft, kind: "fixed_event" }, rebuildFuture: true };
+  }
+  if (operation.kind === "change_item_duration") {
+    const item = input.items.find((candidate) => candidate.id === operation.itemId);
+    if (!item) throw new Error("Дело для изменения длительности не найдено.");
+    if (operation.scope === "occurrence" && operation.blockId) return base;
+    const selected = operation.blockId ? input.blocks.find((block) => block.id === operation.blockId) : undefined;
+    return {
+      ...base,
+      draft: {
+        ...item,
+        estimateMinutes: operation.duration.likelyMinutes,
+        uncertaintyPolicy: {
+          ...item.uncertaintyPolicy,
+          duration: operation.duration,
+          reduction: operation.reduction ?? item.uncertaintyPolicy.reduction,
+        },
+      },
+      rebuildFuture: true,
+      rebuildFromAt: selected?.startAt,
+    };
+  }
+  if (operation.kind === "set_day_bounds") {
+    return {
+      ...base,
+      profilePatch: {
+        ...input.profilePatch,
+        availabilityOverrides: {
+          ...input.profile.availabilityOverrides,
+          [operation.date]: [{ start: operation.start, end: operation.end }],
+        },
+      },
+      rebuildFuture: true,
+      rebuildFromAt: zonedPlannerDateTimeToUtc(operation.date, operation.start, input.profile.timezone),
+    };
+  }
+  if (operation.kind === "set_sleep_boundary") {
+    const now = input.now ?? new Date();
+    let wakeDate = operation.date;
+    let plannedStartAt: string;
+    let plannedEndAt: string;
+    if (operation.boundary === "bedtime") {
+      plannedStartAt = zonedPlannerDateTimeToUtc(operation.date, operation.time, input.profile.timezone);
+      if (new Date(plannedStartAt).getTime() <= now.getTime()) {
+        throw new Error("Прошедшую границу сна нельзя изменить; выберите будущую ночь.");
+      }
+      wakeDate = addPlannerDays(formatDateInTimeZone(new Date(plannedStartAt), input.profile.timezone), 1);
+      const duration = sleepRuleForWakeDate(input.profile.sleepSchedule, wakeDate).durationMinutes;
+      plannedEndAt = addIsoMinutes(plannedStartAt, duration);
+    } else {
+      plannedEndAt = zonedPlannerDateTimeToUtc(operation.date, operation.time, input.profile.timezone);
+      if (new Date(plannedEndAt).getTime() <= now.getTime()) {
+        throw new Error("Прошедшую границу подъёма нельзя изменить; выберите будущую ночь.");
+      }
+      const duration = sleepRuleForWakeDate(input.profile.sleepSchedule, wakeDate).durationMinutes;
+      plannedStartAt = addIsoMinutes(plannedEndAt, -duration);
+    }
+    return {
+      ...base,
+      sleepEvent: {
+        wakeDate,
+        eventKind: "planned_adjustment",
+        state: "planned",
+        plannedStartAt,
+        plannedEndAt,
+        plannedDurationMinutes: isoDurationMinutes(plannedStartAt, plannedEndAt),
+        selectionReason: "manual",
+      },
+      rebuildFuture: true,
+      rebuildFromAt: plannedStartAt,
+    };
+  }
+  if (operation.kind === "cancel_item" && operation.scope === "item" && operation.itemId) {
+    return { ...base, removedItemIds: [operation.itemId], rebuildFuture: true };
+  }
+  if (operation.kind === "rebuild_remaining") {
+    const decisions = new Map(operation.decisions.map((decision) => [decision.itemId, decision.disposition]));
+    const items = input.items.map((item) => {
+      const disposition = decisions.get(item.id);
+      if (!disposition || disposition === "cancel") return item;
+      return normalizePlannerItem({
+        ...item,
+        commitmentLevel: disposition === "required" ? "must_not_skip" : disposition,
+      });
+    });
+    const withBedtime = operation.bedtime
+      ? prepareConstructorInput({
+          ...base,
+          items,
+          operation: { kind: "set_sleep_boundary", boundary: "bedtime", ...operation.bedtime },
+        })
+      : { ...base, items };
+    return { ...withBedtime, operation, rebuildFuture: true, rebuildFromAt: operation.fromAt };
+  }
+  return base;
+}
+
 function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposal {
   const now = input.now ?? new Date();
-  const trigger = input.trigger ?? (input.command || input.draft || input.drafts?.length ? "quick_add" : "autoplan");
+  const requestedRebuildAt = input.rebuildFromAt ? new Date(input.rebuildFromAt) : now;
+  const rebuildAt = Number.isFinite(requestedRebuildAt.getTime()) && requestedRebuildAt > now
+    ? requestedRebuildAt
+    : now;
+  const trigger = input.trigger ?? (input.draft || input.drafts?.length ? "quick_add" : "autoplan");
   const baseProfile = normalizePlannerProfile(input.profile);
   const requestedProfilePatch = input.profilePatch && trigger === "assistant_setup"
     ? {
@@ -1463,9 +1267,7 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
     ? input.drafts
     : input.draft
       ? [input.draft]
-      : input.command
-        ? [parsePlannerCommand(input.command, profile, now)]
-        : [];
+      : [];
   const normalizedDraft = normalizedDrafts.length === 1 ? normalizedDrafts[0] : undefined;
   const changes: PlannerProposalChange[] = [];
   const conflicts: PlannerConflict[] = [];
@@ -1516,8 +1318,10 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
     return {
       baseRevision: baseProfile.revision,
       trigger,
+      operation: input.operation,
       normalizedDraft,
       normalizedDrafts: normalizedDrafts.length > 1 ? normalizedDrafts : undefined,
+      removedItemIds: input.removedItemIds,
       blockExtension: input.blockExtension,
       missedOccurrence: input.missedOccurrence,
       changes,
@@ -1666,11 +1470,42 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
     }
   }
 
+  for (const itemId of [...new Set(input.removedItemIds ?? [])]) {
+    const itemIndex = items.findIndex((item) => item.id === itemId && item.status === "active");
+    if (itemIndex < 0) continue;
+    const archivedItem: PlannerItem = { ...items[itemIndex], status: "archived", unplacedReason: undefined };
+    items[itemIndex] = archivedItem;
+    changes.push({
+      id: uniqueId("archive-item", itemId),
+      kind: "update_item",
+      item: archivedItem,
+      reason: "Дело удалено из общего списка; выполненная история сохранена.",
+    });
+    const futureBlocks = workingBlocks.filter((block) => block.itemId === itemId
+      && block.status === "planned"
+      && new Date(block.startAt).getTime() >= now.getTime());
+    const futureIds = new Set(futureBlocks.map((block) => block.id));
+    workingBlocks = workingBlocks.filter((block) => !futureIds.has(block.id));
+    for (const block of futureBlocks) {
+      changes.push({
+        id: uniqueId("remove-archived", block.id),
+        kind: "remove_block",
+        blockId: block.id,
+        title: block.title,
+        reason: "Будущее выполнение удалено вместе с делом; прошлое и выполненное не изменяются.",
+      });
+    }
+  }
+
   if (input.rebuildFuture) {
+    const explicitlyCancelledItemIds = input.operation?.kind === "rebuild_remaining"
+      ? new Set(input.operation.decisions.filter((decision) => decision.disposition === "cancel").map((decision) => decision.itemId))
+      : new Set<string>();
     const rebuilding = workingBlocks.filter((block) =>
       !block.fixed
       && block.status === "planned"
-      && new Date(block.startAt).getTime() >= now.getTime()
+      && new Date(block.startAt).getTime() >= rebuildAt.getTime()
+      && (!block.itemId || !explicitlyCancelledItemIds.has(block.itemId))
     );
     const rebuildingIds = new Set(rebuilding.map((block) => block.id));
     workingBlocks = workingBlocks.filter((block) => !rebuildingIds.has(block.id));
@@ -1726,6 +1561,286 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
     workingBlocks = workingBlocks.filter((block) => !movableBlocks.has(block.id));
     workingBlocks.push(fixedBlock);
   };
+
+  const cancelConstructorBlock = (block: PlannerBlock, reason: string) => {
+    const actualEndAt = block.status === "in_progress" ? now.toISOString() : block.actualEndAt;
+    workingBlocks = workingBlocks.map((candidate) => candidate.id === block.id
+      ? { ...candidate, status: "cancelled", actualEndAt }
+      : candidate);
+    changes.push({
+      id: uniqueId("constructor-cancel", block.id),
+      kind: "update_block_status",
+      blockId: block.id,
+      title: block.title,
+      status: "cancelled",
+      actualStartAt: block.actualStartAt,
+      actualEndAt,
+      reason,
+    });
+  };
+
+  const relocateConstructorBlock = (original: PlannerBlock, startAt: string, endAt: string, reason: string) => {
+    const start = new Date(startAt);
+    const end = new Date(endAt);
+    if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || end <= start) {
+      throw new Error("Укажите корректные начало и окончание дела.");
+    }
+    if (end <= now && original.status !== "in_progress") throw new Error("Прошедшее выполнение нельзя переносить.");
+    const relocated = { ...original, startAt: start.toISOString(), endAt: end.toISOString(), source: "manual" as const };
+    for (const block of [...workingBlocks, ...sleepBlocks]) {
+      if (block.id === original.id || block.soft || ["cancelled", "skipped"].includes(block.status)
+        || !rangesOverlap(blockInterval(relocated), blockInterval(block))) continue;
+      if (block.fixed || block.status === "done" || block.status === "in_progress" || new Date(block.startAt) < now) {
+        conflicts.push({
+          id: uniqueId("constructor-move-conflict", original.id, block.id),
+          kind: block.status === "in_progress" ? "active_overlap" : "fixed_overlap",
+          title: original.title,
+          message: block.id.startsWith("sleep-")
+            ? "Выбранное время пересекается с защищённым сном."
+            : `Выбранное время пересекается с защищённым делом «${block.title}».`,
+          blockIds: [original.id, block.id],
+        });
+      } else {
+        movableBlocks.set(block.id, block);
+      }
+    }
+    workingBlocks = workingBlocks.filter((block) => block.id !== original.id && !movableBlocks.has(block.id));
+    workingBlocks.push(relocated);
+    changes.push({
+      id: uniqueId("constructor-move", original.id, relocated.startAt),
+      kind: "move_block",
+      blockId: original.id,
+      title: original.title,
+      fromStartAt: original.startAt,
+      fromEndAt: original.endAt,
+      toStartAt: relocated.startAt,
+      toEndAt: relocated.endAt,
+      reason,
+    });
+  };
+
+  const constructorOperation = input.operation;
+  if (constructorOperation?.kind === "protect_interval") {
+    const startAt = zonedPlannerDateTimeToUtc(constructorOperation.date, constructorOperation.start, profile.timezone);
+    const endAt = zonedPlannerDateTimeToUtc(
+      plannerTimeToMinutes(constructorOperation.end) <= plannerTimeToMinutes(constructorOperation.start)
+        ? addPlannerDays(constructorOperation.date, 1)
+        : constructorOperation.date,
+      constructorOperation.end,
+      profile.timezone
+    );
+    considerFixedBlock({
+      id: uniqueId("protected-free", constructorOperation.date, constructorOperation.start, constructorOperation.end),
+      title: constructorOperation.title?.trim().slice(0, 160) || "Защищённое свободное время",
+      startAt,
+      endAt,
+      status: "planned",
+      source: "manual",
+      fixed: true,
+      role: "protected_free",
+      occurrenceKey: `protected-free:${constructorOperation.date}:${constructorOperation.start}`,
+    }, "Интервал явно оставлен свободным и защищён от автопланирования.");
+  }
+
+  if (constructorOperation?.kind === "cancel_item" && constructorOperation.scope !== "item") {
+    const selected = constructorOperation.blockId
+      ? workingBlocks.find((block) => block.id === constructorOperation.blockId)
+      : undefined;
+    const itemId = constructorOperation.itemId ?? selected?.itemId;
+    const targets = constructorOperation.scope === "future" && itemId
+      ? workingBlocks.filter((block) => block.itemId === itemId && block.status === "planned" && new Date(block.startAt) >= rebuildAt)
+      : selected ? [selected] : [];
+    if (!targets.length) throw new Error("Выполнение для отмены не найдено.");
+    targets.forEach((block) => cancelConstructorBlock(block, "Выполнение отменено в конструкторе; прошлая история сохранена."));
+    const itemIndex = itemId ? items.findIndex((item) => item.id === itemId) : -1;
+    if (itemIndex >= 0 && items[itemIndex].kind !== "routine" && (!items[itemIndex].recurrence || items[itemIndex].recurrence?.frequency === "once")) {
+      items[itemIndex] = { ...items[itemIndex], status: "completed" };
+      changes.push({
+        id: uniqueId("constructor-complete", items[itemIndex].id),
+        kind: "update_item",
+        item: items[itemIndex],
+        reason: "Одноразовое дело завершено отменой выбранного выполнения.",
+      });
+    }
+  }
+
+  if (constructorOperation?.kind === "edit_item" && constructorOperation.scope === "occurrence" && constructorOperation.blockId) {
+    const original = workingBlocks.find((block) => block.id === constructorOperation.blockId);
+    if (!original) throw new Error("Выполнение для изменения не найдено.");
+    const minutes = Math.max(5, Math.round(constructorOperation.draft.estimateMinutes ?? isoDurationMinutes(original.startAt, original.endAt)));
+    const updated: PlannerBlock = {
+      ...original,
+      title: constructorOperation.draft.title,
+      endAt: addIsoMinutes(original.startAt, minutes),
+      source: "manual",
+    };
+    workingBlocks = [...workingBlocks.filter((block) => block.id !== original.id), updated];
+    changes.push({ id: uniqueId("constructor-edit-occurrence", original.id), kind: "add_block", block: updated, reason: "Изменено только выбранное выполнение; правило всего дела сохранено." });
+  }
+
+  if (constructorOperation?.kind === "change_item_duration" && constructorOperation.scope === "occurrence" && constructorOperation.blockId) {
+    const original = workingBlocks.find((block) => block.id === constructorOperation.blockId);
+    if (!original) throw new Error("Выполнение для изменения длительности не найдено.");
+    relocateConstructorBlock(original, original.startAt, addIsoMinutes(original.startAt, constructorOperation.duration.likelyMinutes), "Длительность изменена только для выбранного выполнения.");
+  }
+
+  if (constructorOperation?.kind === "change_block_time") {
+    const original = workingBlocks.find((block) => block.id === constructorOperation.blockId);
+    if (!original) throw new Error("Дело для изменения времени не найдено.");
+    const targets = !constructorOperation.scope || constructorOperation.scope === "occurrence" || !original.itemId
+      ? [original]
+      : workingBlocks.filter((block) => block.itemId === original.itemId && block.status === "planned" && new Date(block.startAt) >= new Date(original.startAt));
+    const shiftMinutes = (new Date(constructorOperation.startAt).getTime() - new Date(original.startAt).getTime()) / 60_000;
+    const durationMinutes = isoDurationMinutes(constructorOperation.startAt, constructorOperation.endAt);
+    workingBlocks = workingBlocks.filter((block) => !targets.some((target) => target.id === block.id));
+    targets.forEach((target) => {
+      const startAt = addIsoMinutes(target.startAt, shiftMinutes);
+      relocateConstructorBlock(target, startAt, addIsoMinutes(startAt, durationMinutes), targets.length === 1
+        ? "Начало или окончание изменено для выбранного выполнения."
+        : "Время выбранного и последующих выполнений изменено вместе.");
+    });
+  }
+
+  if (constructorOperation?.kind === "move_item") {
+    const original = workingBlocks.find((block) => block.id === constructorOperation.blockId);
+    if (!original) throw new Error("Дело для переноса не найдено.");
+    const duration = isoDurationMinutes(original.startAt, original.endAt);
+    const placement = constructorOperation.placement;
+    let targetStartAt: string | undefined;
+    if (placement.mode === "exact") {
+      targetStartAt = zonedPlannerDateTimeToUtc(placement.date, placement.start, profile.timezone);
+    } else if (placement.mode === "date") {
+      targetStartAt = zonedPlannerDateTimeToUtc(
+        placement.date,
+        formatTimeInTimeZone(new Date(original.startAt), profile.timezone),
+        profile.timezone
+      );
+    } else if (placement.mode === "before" || placement.mode === "after") {
+      const anchor = workingBlocks.find((block) => block.id === placement.anchorBlockId);
+      if (!anchor) throw new Error("Опорное дело для переноса не найдено.");
+      targetStartAt = placement.mode === "after"
+        ? addIsoMinutes(anchor.endAt, placement.gapMinutes ?? profile.defaultBufferMinutes)
+        : addIsoMinutes(anchor.startAt, -(duration + (placement.gapMinutes ?? profile.defaultBufferMinutes)));
+    } else if (placement.mode === "first_free") {
+      const firstDate = placement.date ?? formatDateInTimeZone(now, profile.timezone);
+      const lastDate = placement.date ?? endDate;
+      const occupied = [...workingBlocks.filter((block) => block.id !== original.id), ...sleepBlocks];
+      for (let targetDate = firstDate; targetDate <= lastDate && !targetStartAt; targetDate = addPlannerDays(targetDate, 1)) {
+        for (const window of availabilityForDate(profile, targetDate)) {
+          const windowMinutes = durationForLocalRange(window.start, window.end);
+          for (let offset = 0; offset + duration <= windowMinutes; offset += STEP_MINUTES) {
+            const candidate = addIsoMinutes(zonedPlannerDateTimeToUtc(targetDate, window.start, profile.timezone), offset);
+            const end = addIsoMinutes(candidate, duration);
+            if (new Date(candidate) < now) continue;
+            if (plannerSlotAvailable(profile, occupied, new Date(candidate).getTime(), new Date(end).getTime())) {
+              targetStartAt = candidate;
+              break;
+            }
+          }
+          if (targetStartAt) break;
+        }
+      }
+      if (!targetStartAt) throw new Error("В выбранном периоде нет свободного окна подходящей длительности.");
+    }
+    if (!targetStartAt) throw new Error("Не удалось определить новое время дела.");
+    const sourceItem = original.itemId ? items.find((item) => item.id === original.itemId) : undefined;
+    const crossesDate = formatDateInTimeZone(new Date(targetStartAt), profile.timezone)
+      !== formatDateInTimeZone(new Date(original.startAt), profile.timezone);
+    if (crossesDate && sourceItem?.uncertaintyPolicy.date.mode === "exact") {
+      throw new Error("Правила этого дела запрещают перенос на другой день.");
+    }
+    const targets = constructorOperation.scope === "occurrence" || !original.itemId
+      ? [original]
+      : workingBlocks.filter((block) => block.itemId === original.itemId
+        && block.status === "planned"
+        && new Date(block.startAt) >= new Date(original.startAt));
+    const shiftMinutes = isoDurationMinutes(original.startAt, targetStartAt);
+    if (new Date(targetStartAt) < new Date(original.startAt)) {
+      const rawMinutes = (new Date(targetStartAt).getTime() - new Date(original.startAt).getTime()) / 60_000;
+      workingBlocks = workingBlocks.filter((block) => !targets.some((target) => target.id === block.id));
+      targets.forEach((target) => relocateConstructorBlock(
+        target,
+        addIsoMinutes(target.startAt, rawMinutes),
+        addIsoMinutes(target.endAt, rawMinutes),
+        constructorOperation.scope === "occurrence" ? "Выполнение перенесено выбранным структурированным способом." : "Выбранное и последующие выполнения перенесены вместе."
+      ));
+    } else {
+      workingBlocks = workingBlocks.filter((block) => !targets.some((target) => target.id === block.id));
+      targets.forEach((target) => relocateConstructorBlock(
+        target,
+        addIsoMinutes(target.startAt, shiftMinutes),
+        addIsoMinutes(target.endAt, shiftMinutes),
+        constructorOperation.scope === "occurrence" ? "Выполнение перенесено выбранным структурированным способом." : "Выбранное и последующие выполнения перенесены вместе."
+      ));
+    }
+  }
+
+  if (constructorOperation?.kind === "replace_item") {
+    const original = workingBlocks.find((block) => block.id === constructorOperation.blockId);
+    if (!original) throw new Error("Заменяемое дело не найдено.");
+    const replacementStartAt = original.status === "in_progress" ? now.toISOString() : original.startAt;
+    const nextBlock = workingBlocks
+      .filter((block) => block.id !== original.id && new Date(block.startAt) > new Date(replacementStartAt) && !["cancelled", "skipped"].includes(block.status))
+      .sort((left, right) => left.startAt.localeCompare(right.startAt))[0];
+    const replacementEndAt = constructorOperation.duration.mode === "same"
+      ? addIsoMinutes(replacementStartAt, isoDurationMinutes(original.startAt, original.endAt))
+      : constructorOperation.duration.mode === "minutes"
+        ? addIsoMinutes(replacementStartAt, clamp(Math.round(constructorOperation.duration.minutes), 5, 1440))
+        : constructorOperation.duration.mode === "until_next"
+          ? nextBlock?.startAt ?? original.endAt
+          : zonedPlannerDateTimeToUtc(constructorOperation.duration.date, constructorOperation.duration.time, profile.timezone);
+    if (new Date(replacementEndAt) <= new Date(replacementStartAt)) throw new Error("Окончание замены должно быть позже начала.");
+    if (original.status === "in_progress") {
+      workingBlocks = workingBlocks.map((block) => block.id === original.id
+        ? { ...block, status: "done", actualEndAt: now.toISOString() }
+        : block);
+      changes.push({
+        id: uniqueId("constructor-finish-replaced", original.id),
+        kind: "update_block_status",
+        blockId: original.id,
+        title: original.title,
+        status: "done",
+        actualStartAt: original.actualStartAt,
+        actualEndAt: now.toISOString(),
+        reason: "Текущее дело завершено в фактический момент замены; его история сохранена.",
+      });
+    } else {
+      cancelConstructorBlock(original, "Будущее выполнение отменено и заменено новым делом.");
+    }
+    const replacement = normalizePlannerItem({
+      ...constructorOperation.replacement,
+      id: constructorOperation.replacement.id || uniqueId("replacement-item", original.id, constructorOperation.replacement.title),
+      title: constructorOperation.replacement.title,
+      estimateMinutes: isoDurationMinutes(replacementStartAt, replacementEndAt),
+    });
+    items.push(replacement);
+    changes.push({ id: uniqueId("replacement-add", replacement.id), kind: "add_item", item: replacement, reason: "Новое дело создано как подтверждённая замена." });
+    considerFixedBlock({
+      id: uniqueId("replacement-block", replacement.id, replacementStartAt),
+      itemId: replacement.id,
+      title: replacement.title,
+      startAt: replacementStartAt,
+      endAt: replacementEndAt,
+      status: original.status === "in_progress" ? "in_progress" : "planned",
+      source: "manual",
+      fixed: replacement.kind === "fixed_event",
+      occurrenceKey: replacement.id,
+      actualStartAt: original.status === "in_progress" ? now.toISOString() : undefined,
+    }, "Новое дело поставлено на место отменённого выполнения.");
+    if (constructorOperation.scope === "item" && original.itemId) {
+      const sourceIndex = items.findIndex((item) => item.id === original.itemId);
+      if (sourceIndex >= 0) {
+        items[sourceIndex] = { ...items[sourceIndex], status: "archived" };
+        changes.push({ id: uniqueId("replacement-archive", items[sourceIndex].id), kind: "update_item", item: items[sourceIndex], reason: "Заменённое дело архивировано; история сохранена." });
+      }
+    }
+  }
+
+  if (constructorOperation?.kind === "rebuild_remaining") {
+    const cancelledIds = new Set(constructorOperation.decisions.filter((decision) => decision.disposition === "cancel").map((decision) => decision.itemId));
+    workingBlocks.filter((block) => block.itemId && cancelledIds.has(block.itemId) && block.status === "planned" && new Date(block.startAt) >= rebuildAt)
+      .forEach((block) => cancelConstructorBlock(block, "Выполнение отменено только для пересобираемой части плана."));
+  }
 
   if (input.blockExtension) {
     const extensionMinutes = Math.round(Number(input.blockExtension.minutes));
@@ -1810,18 +1925,65 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
       title: draft.title,
     });
     const existingIndex = items.findIndex((candidate) => candidate.id === item.id);
-    if (existingIndex >= 0) items[existingIndex] = item;
-    else items.push(item);
-    changes.push({ id: uniqueId("change-item", item.id), kind: "add_item", item, reason: "Новое дело подтверждено из формы." });
+    if (existingIndex >= 0) {
+      const replacedFixedBlocks = workingBlocks.filter((block) => block.itemId === item.id
+        && block.fixed
+        && block.status === "planned"
+        && new Date(block.startAt).getTime() >= now.getTime());
+      const replacedFixedIds = new Set(replacedFixedBlocks.map((block) => block.id));
+      workingBlocks = workingBlocks.filter((block) => !replacedFixedIds.has(block.id));
+      for (const block of replacedFixedBlocks) {
+        changes.push({
+          id: uniqueId("remove-edited-fixed", block.id),
+          kind: "remove_block",
+          blockId: block.id,
+          title: block.title,
+          reason: "Прежнее будущее время этого изменённого дела освобождено перед проверкой нового времени.",
+        });
+      }
+      items[existingIndex] = item;
+      changes.push({ id: uniqueId("change-item", item.id), kind: "update_item", item, reason: "Изменения существующего дела подтверждены из общего списка." });
+    } else {
+      items.push(item);
+      changes.push({ id: uniqueId("change-item", item.id), kind: "add_item", item, reason: "Новое дело подтверждено из формы." });
+    }
     const fixedBlocks = item.recurrence?.startTime
       ? recurringFixedBlocks(item, profile, startDate, endDate)
       : [blockFromDraft(draft, item, profile)].filter((block): block is PlannerBlock => Boolean(block));
-    fixedBlocks.filter((block) => !item.recurrence?.startTime || new Date(block.endAt) > now).forEach((block) => considerFixedBlock(block, item.recurrence
-      ? "Создано повторение постоянного обязательства."
-      : "Фиксированное событие занимает выбранное время."));
+    fixedBlocks.filter((block) => !item.recurrence?.startTime || new Date(block.endAt) > now).forEach((block) => {
+      considerFixedBlock(block, item.recurrence
+        ? "Создано повторение постоянного обязательства."
+        : block.endEstimate?.mode === "unknown"
+          ? "Создано событие с неизвестным окончанием; остаток дня защищён предварительно."
+          : "Фиксированное событие занимает выбранное время.");
+      const latestAt = block.endEstimate?.latestAt;
+      if (latestAt && new Date(latestAt) > new Date(block.endAt)) {
+        const reserve: PlannerBlock = {
+          id: uniqueId("event-end-reserve", block.id),
+          itemId: item.id,
+          title: `Запас окончания — ${item.title}`,
+          startAt: block.endAt,
+          endAt: latestAt,
+          status: "planned",
+          source: "auto",
+          fixed: false,
+          role: "uncertainty_reserve",
+          soft: true,
+          occurrenceKey: `${block.occurrenceKey ?? item.id}:end-reserve`,
+          endEstimate: block.endEstimate,
+        };
+        workingBlocks.push(reserve);
+        changes.push({
+          id: uniqueId("event-end-reserve-change", reserve.id),
+          kind: "add_block",
+          block: reserve,
+          reason: "Мягкий резерв учитывает возможное более позднее окончание и помечает дела внутри него как предварительные.",
+        });
+      }
+    });
   });
 
-  for (const item of items.filter((candidate) => candidate.kind === "fixed_event" && candidate.recurrence?.startTime)) {
+  for (const item of items.filter((candidate) => candidate.status === "active" && candidate.kind === "fixed_event" && candidate.recurrence?.startTime)) {
     for (const block of recurringFixedBlocks(item, profile, startDate, endDate).filter((candidate) => new Date(candidate.endAt) > now)) {
       if (workingBlocks.some((candidate) => candidate.itemId === item.id && candidate.occurrenceKey === block.occurrenceKey)) continue;
       considerFixedBlock(block, "Добавлено недостающее повторение постоянного обязательства.");
@@ -2124,15 +2286,74 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
     }
   }
 
+  const selectedDecisions = new Map((input.decisions ?? []).map((decision) => [decision.groupId, decision.optionId]));
+  const decisionGroups = unplaced.map((entry) => {
+    const item = items.find((candidate) => candidate.id === entry.itemId);
+    const options = [] as NonNullable<PlannerProposal["decisionGroups"]>[number]["options"];
+    if (item?.uncertaintyPolicy.date.mode !== "exact") {
+      options.push({
+        id: `move:${entry.itemId}`,
+        kind: "move",
+        title: "Перенести на другой день",
+        description: `Найти первое безопасное окно для «${entry.title}» в оставшемся горизонте.`,
+      });
+    }
+    if (item?.uncertaintyPolicy.reduction?.mode === "to_minimum"
+      && item.uncertaintyPolicy.reduction.minimumMinutes < entry.remainingMinutes) {
+      options.push({
+        id: `shorten:${entry.itemId}`,
+        kind: "shorten",
+        title: `Сократить до ${item.uncertaintyPolicy.reduction.minimumMinutes} мин`,
+        description: "Сокращение разрешено правилами этого дела и не опустится ниже выбранного минимума.",
+      });
+    }
+    if (item?.commitmentLevel === "desired" || item?.commitmentLevel === "if_time") {
+      options.push({
+        id: `cancel:${entry.itemId}`,
+        kind: "cancel",
+        title: "Отменить необязательное выполнение",
+        description: "История останется, а выбранное будущее выполнение не будет создано заново.",
+      });
+      options.push({
+        id: `queue:${entry.itemId}`,
+        kind: "queue",
+        title: "Явно оставить в очереди",
+        description: "Дело не потеряется, но не будет считаться размещённым в этом плане.",
+      });
+    }
+    options.push({
+      id: `edit:${entry.itemId}`,
+      kind: "edit",
+      title: "Изменить вводные",
+      description: "Вернуться в конструктор и изменить время, длительность или обязательность.",
+    });
+    const groupId = `unplaced:${entry.itemId}`;
+    const selectedOptionId = options.some((option) => option.id === selectedDecisions.get(groupId))
+      ? selectedDecisions.get(groupId)
+      : undefined;
+    return {
+      id: groupId,
+      title: `${entry.title} не помещается`,
+      message: `${entry.remainingMinutes} мин не удалось разместить без нарушения сна, фиксированных событий или границ дня.`,
+      blocking: item?.commitmentLevel === "must_not_skip" || item?.commitmentLevel === "required",
+      options,
+      selectedOptionId,
+    };
+  });
+
   return {
     baseRevision: baseProfile.revision,
     trigger,
+    operation: input.operation,
     normalizedDraft,
     normalizedDrafts: normalizedDrafts.length > 1 ? normalizedDrafts : undefined,
+    removedItemIds: input.removedItemIds,
     blockExtension: input.blockExtension,
     missedOccurrence: input.missedOccurrence,
     changes,
     conflicts,
+    decisionGroups,
+    decisions: input.decisions,
     unplaced,
     effectiveFocus,
     deadlineAnalysis,
@@ -2239,7 +2460,7 @@ function resolvePreferredSleepDuration(input: PlannerEngineInput): PlannerPropos
   const options = preferredSleepDurations(schedule).sort((left, right) => right - left);
   const items = [
     ...input.items.map((item) => normalizePlannerItem(item)),
-    ...draftsForProposal(input, requestedProfile, input.now ?? new Date()).map((draft, index) => normalizePlannerItem({
+    ...draftsForProposal(input).map((draft, index) => normalizePlannerItem({
       ...draft,
       id: draft.id || uniqueId("item", index, draft.title, draft.date, draft.start),
       title: draft.title,
@@ -2366,10 +2587,9 @@ function sameAvailability(left: PlannerProfile["availability"], right: PlannerPr
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function draftsForProposal(input: PlannerEngineInput, profile: PlannerProfile, now: Date): PlannerDraft[] {
+function draftsForProposal(input: PlannerEngineInput): PlannerDraft[] {
   if (input.drafts?.length) return input.drafts;
   if (input.draft) return [input.draft];
-  if (input.command) return [parsePlannerCommand(input.command, profile, now)];
   return [];
 }
 
@@ -2512,7 +2732,6 @@ function measureAutoWakeCandidate(
 }
 
 function resolveAutomaticWake(input: PlannerEngineInput): PlannerProposal | null {
-  const now = input.now ?? new Date();
   const baseProfile = normalizePlannerProfile(input.profile);
   const requestedProfile = normalizePlannerProfile({
     ...baseProfile,
@@ -2521,12 +2740,12 @@ function resolveAutomaticWake(input: PlannerEngineInput): PlannerProposal | null
   });
   const schedule = requestedProfile.sleepSchedule;
   if (schedule.mode !== "adaptive" || schedule.wakePreference.mode !== "any") return null;
-  const trigger = input.trigger ?? (input.command || input.draft || input.drafts?.length ? "quick_add" : "autoplan");
+  const trigger = input.trigger ?? (input.draft || input.drafts?.length ? "quick_add" : "autoplan");
   const shouldResolve = Boolean(input.profilePatch?.sleepSchedule)
     || Boolean(input.rebuildFuture && ["autoplan", "assistant_setup", "assistant_update"].includes(trigger));
   if (!shouldResolve) return null;
 
-  const drafts = draftsForProposal(input, requestedProfile, now);
+  const drafts = draftsForProposal(input);
   const draftItems = drafts.map((draft, index) => normalizePlannerItem({
     ...draft,
     id: draft.id || uniqueId("item", index, draft.title, draft.date, draft.start),
@@ -3188,6 +3407,11 @@ function summarizeProposalImpact(input: PlannerEngineInput, proposal: PlannerPro
   }));
   const consumedRemoved = new Set<string>();
   const placements: PlannerProposalImpact["placements"] = [];
+  const reductions: PlannerProposalImpact["reductions"] = proposal.changes.flatMap((change) => {
+    if (change.kind !== "move_block" || change.fromStartAt !== change.toStartAt) return [];
+    const minutes = isoDurationMinutes(change.fromStartAt, change.fromEndAt) - isoDurationMinutes(change.toStartAt, change.toEndAt);
+    return minutes > 0 ? [{ itemId: input.blocks.find((block) => block.id === change.blockId)?.itemId, title: change.title, minutes, reason: "optional_work" as const }] : [];
+  });
   const moves: PlannerProposalImpact["moves"] = proposal.changes.flatMap((change) => change.kind === "move_block"
     && (change.fromStartAt !== change.toStartAt || change.fromEndAt !== change.toEndAt)
     ? [{
@@ -3206,6 +3430,10 @@ function summarizeProposalImpact(input: PlannerEngineInput, proposal: PlannerPro
       && (block.occurrenceKey ?? "") === (change.block.occurrenceKey ?? ""));
     if (match) {
       consumedRemoved.add(match.id);
+      const reducedMinutes = isoDurationMinutes(match.startAt, match.endAt) - isoDurationMinutes(change.block.startAt, change.block.endAt);
+      if (match.startAt === change.block.startAt && reducedMinutes > 0) {
+        reductions.push({ itemId: change.block.itemId, title: change.block.title, minutes: reducedMinutes, reason: "optional_work" });
+      }
       if (match.startAt !== change.block.startAt || match.endAt !== change.block.endAt) {
         moves.push({
           itemId: change.block.itemId,
@@ -3236,13 +3464,45 @@ function summarizeProposalImpact(input: PlannerEngineInput, proposal: PlannerPro
       toMinutes: change.event.plannedDurationMinutes,
     }];
   });
-  return { kind: "general", placements, moves, reductions: [], sleepChanges };
+  return { kind: "general", placements, moves, reductions, sleepChanges };
+}
+
+function summarizeProposalChanges(proposal: PlannerProposal): NonNullable<PlannerProposal["humanSummary"]> {
+  const summary: NonNullable<PlannerProposal["humanSummary"]> = {
+    additions: [],
+    cancellations: [],
+    moves: [],
+    reductions: [],
+    sleepChanges: [],
+    freedIntervals: [],
+  };
+  for (const change of proposal.changes) {
+    if (change.kind === "add_block" && !change.block.soft) {
+      summary.additions.push(`${change.block.title}: ${change.block.startAt} — ${change.block.endAt}`);
+    } else if (change.kind === "update_block_status" && change.status === "cancelled") {
+      summary.cancellations.push(change.title);
+    } else if (change.kind === "move_block") {
+      summary.moves.push(`${change.title}: ${change.fromStartAt} → ${change.toStartAt}`);
+      summary.freedIntervals.push(`${change.fromStartAt} — ${change.fromEndAt}`);
+    } else if (change.kind === "remove_block") {
+      summary.freedIntervals.push(change.title);
+    } else if (change.kind === "upsert_sleep_event") {
+      summary.sleepChanges.push(`${change.event.wakeDate}: ${change.event.plannedStartAt ?? change.event.actualStartAt ?? "?"} — ${change.event.plannedEndAt ?? change.event.actualEndAt ?? change.event.projectedEndAt ?? "?"}`);
+    }
+  }
+  for (const reduction of proposal.impact?.reductions ?? []) {
+    summary.reductions.push(`${reduction.title}: −${reduction.minutes} мин`);
+  }
+  return summary;
 }
 
 export function buildPlannerProposal(input: PlannerEngineInput): PlannerProposal {
-  if (input.remainderTransfer) return buildRemainderTransferProposal(input);
-  const proposal = resolveAutomaticWake(input) ?? resolvePreferredSleepDuration(input);
-  return { ...proposal, impact: summarizeProposalImpact(input, proposal) };
+  const prepared = prepareConstructorInput(input);
+  if (prepared.remainderTransfer) return buildRemainderTransferProposal(prepared);
+  const proposal = resolveAutomaticWake(prepared) ?? resolvePreferredSleepDuration(prepared);
+  const impact = summarizeProposalImpact(prepared, proposal);
+  const withImpact = { ...proposal, impact };
+  return { ...withImpact, humanSummary: summarizeProposalChanges(withImpact) };
 }
 
 export function applyProposalChanges(
@@ -3250,7 +3510,9 @@ export function applyProposalChanges(
   blocks: PlannerBlock[],
   proposal: PlannerProposal
 ): { items: PlannerItem[]; blocks: PlannerBlock[] } {
-  if (proposal.conflicts.length > 0) throw new Error("Нельзя применить предложение с нерешёнными конфликтами.");
+  if (proposal.conflicts.length > 0 || proposal.decisionGroups?.some((group) => group.blocking)) {
+    throw new Error("Нельзя применить предложение с нерешёнными конфликтами или обязательными решениями.");
+  }
   let nextItems = [...items];
   let nextBlocks = [...blocks];
   for (const change of proposal.changes) {

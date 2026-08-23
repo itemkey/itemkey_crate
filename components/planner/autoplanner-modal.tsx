@@ -13,7 +13,6 @@ import {
   type PlannerTravelEstimateInput,
   type PlannerTravelEstimateResult,
 } from "@/lib/planner/commitments";
-import { createRuntimeId } from "@/lib/runtime-id";
 import {
   availabilityFromSleepSchedule,
   createAdaptiveSleepSchedule,
@@ -21,19 +20,18 @@ import {
   sleepRuleForWakeDate,
 } from "@/lib/planner/sleep";
 import {
-  type PlannerAssistantParseResult,
+  type PlannerBlock,
   type PlannerDraft,
   type PlannerEnergyWindow,
   type PlannerItem,
   type PlannerProfile,
   type PlannerProposalInput,
-  type PlannerSleepParseResult,
   type PlannerSleepSchedule,
   type PlannerSleepClockPreference,
   type PlannerWakeAnchorReason,
   type PlannerWakeDayPart,
 } from "@/lib/planner/types";
-import { plannerMinutesToTime, plannerTimeToMinutes } from "@/lib/planner/time";
+import { formatDateInTimeZone, formatTimeInTimeZone, plannerMinutesToTime, plannerTimeToMinutes } from "@/lib/planner/time";
 import styles from "./planner-workspace.module.css";
 
 type SleepClockDraft = {
@@ -47,7 +45,6 @@ type SleepClockDraft = {
 type AssistantDraft = {
   timezone: string;
   sleepMode: "fixed" | "adaptive";
-  sleepText: string;
   weekdayBedtime: string;
   weekdayDuration: string;
   separateWeekend: boolean;
@@ -69,13 +66,16 @@ type AssistantDraft = {
   commitments: PlannerStructuredCommitment[];
   energy: "auto" | "morning" | "day" | "evening";
   reserve: string;
-  tasks: string;
 };
 
 const STORAGE_KEY = "itemkey.planner.autoplanner.v4";
 const LEGACY_STORAGE_KEY = "itemkey.planner.autoplanner.v2";
 
-function initialDraft(profile: PlannerProfile, neutralEnergy = false): AssistantDraft {
+function initialDraft(
+  profile: PlannerProfile,
+  neutralEnergy = false,
+  commitments: PlannerStructuredCommitment[] = []
+): AssistantDraft {
   const fixed = fixedScheduleView(profile.sleepSchedule);
   const adaptive = profile.sleepSchedule.mode === "adaptive" ? profile.sleepSchedule : undefined;
   const highEnergy = profile.energyWindows.find((window) => window.energy === "high");
@@ -96,7 +96,6 @@ function initialDraft(profile: PlannerProfile, neutralEnergy = false): Assistant
   return {
     timezone: profile.timezone,
     sleepMode: profile.sleepSchedule.mode,
-    sleepText: "",
     weekdayBedtime: fixed.weekdays.bedtime,
     weekdayDuration: String(fixed.weekdays.durationMinutes),
     separateWeekend: Boolean(adaptive?.weekendOverride) || fixed.weekends.bedtime !== fixed.weekdays.bedtime
@@ -118,11 +117,32 @@ function initialDraft(profile: PlannerProfile, neutralEnergy = false): Assistant
     windDownMinutes: String(adaptive?.windDownMinutes ?? 30),
     morningPreparationMinutes: String(adaptive?.morningPreparationMinutes ?? 60),
     healthyMinimumConfirmed: !adaptive?.requiresHealthyMinimumConfirmation,
-    commitments: [],
+    commitments,
     energy: neutralEnergy || highEnergyOffset === undefined ? "auto" : highEnergyOffset < 3 * 60 ? "morning" : highEnergyOffset < 8 * 60 ? "day" : "evening",
     reserve: String(Math.round(profile.reserveRatio * 100)),
-    tasks: "",
   };
+}
+
+function savedCommitments(
+  items: PlannerItem[],
+  blocks: PlannerBlock[],
+  timezone: string
+): PlannerStructuredCommitment[] {
+  return items.filter((item) => item.status === "active").map((item) => {
+    const fixedBlock = item.kind === "fixed_event" && !item.recurrence?.startTime
+      ? blocks.filter((block) => block.itemId === item.id
+          && block.fixed
+          && block.status !== "cancelled"
+          && block.status !== "skipped")
+        .sort((left, right) => left.startAt.localeCompare(right.startAt))[0]
+      : undefined;
+    return plannerDraftToCommitment({
+      ...item,
+      date: fixedBlock ? formatDateInTimeZone(new Date(fixedBlock.startAt), timezone) : undefined,
+      start: fixedBlock ? formatTimeInTimeZone(new Date(fixedBlock.startAt), timezone) : undefined,
+      end: fixedBlock ? formatTimeInTimeZone(new Date(fixedBlock.endAt), timezone) : undefined,
+    }, timezone, item.id);
+  });
 }
 
 function clockPreference(value: SleepClockDraft): PlannerSleepClockPreference {
@@ -248,16 +268,14 @@ function SleepClockEditor({ title, value, onChange, locale }: {
 export default function AutoplannerModal({
   profile,
   items,
-  blocksCount,
+  blocks,
   sleepEventsCount,
   locale,
   firstRun,
   upgradeOnly,
   busy,
   onClose,
-  onParseTasks,
   onEstimateTravel,
-  onParseSleep,
   onPrepare,
   requestError,
   onClearRequestError,
@@ -266,16 +284,14 @@ export default function AutoplannerModal({
 }: {
   profile: PlannerProfile;
   items: PlannerItem[];
-  blocksCount: number;
+  blocks: PlannerBlock[];
   sleepEventsCount: number;
   locale: Locale;
   firstRun: boolean;
   upgradeOnly?: boolean;
   busy: boolean;
   onClose?: () => void;
-  onParseTasks: (text: string) => Promise<PlannerAssistantParseResult>;
   onEstimateTravel: (input: PlannerTravelEstimateInput) => Promise<PlannerTravelEstimateResult>;
-  onParseSleep: (text: string) => Promise<PlannerSleepParseResult>;
   onPrepare: (input: PlannerProposalInput) => Promise<void>;
   requestError?: string | null;
   onClearRequestError: () => void;
@@ -283,9 +299,9 @@ export default function AutoplannerModal({
   onReset: (password: string) => Promise<void>;
 }) {
   const ru = locale === "ru";
+  const [baselineCommitments] = useState<PlannerStructuredCommitment[]>(() => savedCommitments(items, blocks, profile.timezone));
   const [step, setStep] = useState(upgradeOnly ? 2 : firstRun ? 1 : 0);
-  const [value, setValue] = useState<AssistantDraft>(() => initialDraft(profile, firstRun));
-  const [localError, setLocalError] = useState("");
+  const [value, setValue] = useState<AssistantDraft>(() => initialDraft(profile, firstRun, baselineCommitments));
   const [profileChanged, setProfileChanged] = useState(firstRun);
   const [resetStage, setResetStage] = useState<0 | 1 | 2>(0);
   const [password, setPassword] = useState("");
@@ -308,10 +324,13 @@ export default function AutoplannerModal({
             ? restored.energy
             : "auto",
           commitments: Array.isArray(restored.commitments)
-            ? restored.commitments.flatMap((commitment) => commitment?.id && commitment?.title
-              ? [normalizeStructuredCommitment(commitment)]
-              : [])
-            : [],
+            ? [...new Map([
+                ...current.commitments,
+                ...restored.commitments.flatMap((commitment) => commitment?.id && commitment?.title
+                  ? [normalizeStructuredCommitment(commitment)]
+                  : []),
+              ].map((commitment) => [commitment.id, commitment])).values()]
+            : current.commitments,
         })), 0);
       }
     } catch { /* a draft is optional */ }
@@ -330,6 +349,20 @@ export default function AutoplannerModal({
     () => value.commitments.map((commitment) => commitmentToPlannerDraft(commitment, locale, value.timezone)),
     [locale, value.commitments, value.timezone]
   );
+  const baselineById = useMemo(
+    () => new Map(baselineCommitments.map((commitment) => [commitment.id, JSON.stringify(commitment)])),
+    [baselineCommitments]
+  );
+  const changedCommitmentDrafts = useMemo(
+    () => value.commitments
+      .filter((commitment) => baselineById.get(commitment.id) !== JSON.stringify(commitment))
+      .map((commitment) => commitmentToPlannerDraft(commitment, locale, value.timezone)),
+    [baselineById, locale, value.commitments, value.timezone]
+  );
+  const removedItemIds = useMemo(() => {
+    const retained = new Set(value.commitments.map((commitment) => commitment.id));
+    return baselineCommitments.map((commitment) => commitment.id).filter((id) => !retained.has(id));
+  }, [baselineCommitments, value.commitments]);
   const planningDrafts = commitmentDrafts;
 
   const profilePatch = useMemo<Partial<PlannerProfile>>(() => {
@@ -348,72 +381,10 @@ export default function AutoplannerModal({
 
   const update = <K extends keyof AssistantDraft>(key: K, next: AssistantDraft[K]) => setValue((current) => ({ ...current, [key]: next }));
 
-  async function recognizeSleep() {
-    setLocalError("");
-    try {
-      const result = await onParseSleep(value.sleepText);
-      if (result.mode) update("sleepMode", result.mode);
-      if (result.bedtime) {
-        update("weekdayBedtime", result.bedtime);
-        update("bedtimeClock", { ...value.bedtimeClock, mode: "approximate", time: result.bedtime });
-      }
-      if (result.durationMinutes) update("weekdayDuration", String(result.durationMinutes));
-      if (result.durationRange) {
-        update("adaptiveDurationMode", "range");
-        update("adaptiveMinDuration", String(result.durationRange.minMinutes));
-        update("adaptiveMaxDuration", String(result.durationRange.maxMinutes));
-        update("healthyMinimumConfirmed", false);
-      }
-      if (result.exactDurationsMinutes?.length) {
-        update("adaptiveDurationMode", "exact");
-        update("adaptiveExactDurations", result.exactDurationsMinutes);
-        update("healthyMinimumConfirmed", result.exactDurationsMinutes.some((minutes) => minutes >= 7 * 60));
-      }
-      if (result.planningFocus) update("planningFocus", result.planningFocus);
-      if (result.wakeDayPart) {
-        update("wakeDayPart", result.wakeDayPart);
-        const wakeTime = result.wakeDayPart === "auto" ? "09:00" : result.wakeDayPart === "early_morning" ? "07:30" : result.wakeDayPart === "late_morning" ? "11:00" : "09:00";
-        update("wakeClock", { ...value.wakeClock, mode: result.wakeDayPart === "auto" ? "any" : "approximate", time: wakeTime });
-      }
-      if (result.ambiguities.length) setLocalError(ru
-        ? result.ambiguities.join(" ")
-        : "Confirm both the regular bedtime and the usual sleep duration below.");
-      setProfileChanged(true);
-    } catch (error) {
-      setLocalError(error instanceof Error ? error.message : "Не удалось распознать сон.");
-    }
-  }
-
-  async function recognizeTasks(): Promise<boolean> {
-    setLocalError("");
-    if (!value.tasks.trim()) return true;
-    try {
-      const taskResult = await onParseTasks(value.tasks);
-      const imported = taskResult.drafts.map((draft) => plannerDraftToCommitment(
-        draft,
-        value.timezone,
-        createRuntimeId()
-      ));
-      setValue((current) => ({
-        ...current,
-        tasks: "",
-        commitments: [...current.commitments, ...imported],
-      }));
-      return true;
-    } catch (error) {
-      setLocalError(error instanceof Error ? error.message : "Не удалось разобрать список.");
-      return false;
-    }
-  }
-
-  async function finishItemsStep() {
-    if (commitmentEditorOpen) return;
-    if (await recognizeTasks()) setStep(5);
-  }
-
   async function prepare() {
     await onPrepare({
-      drafts: commitmentDrafts,
+      drafts: changedCommitmentDrafts.length ? changedCommitmentDrafts : undefined,
+      removedItemIds: removedItemIds.length ? removedItemIds : undefined,
       profilePatch: profileChanged || firstRun ? profilePatch : undefined,
       trigger: firstRun ? "assistant_setup" : "assistant_update",
       rebuildFuture: true,
@@ -432,8 +403,8 @@ export default function AutoplannerModal({
       <div className={styles.assistantBody}>
         {resetStage === 1 ? <>
           <p className={styles.dangerPanel}>{ru
-            ? `Будут удалены настройки, ${items.length} дел, ${blocksCount} блоков календаря, ${sleepEventsCount} изменений сна, история и отметки импорта. Данные Crate и оригинальные карточки сохранятся. Отменить сброс нельзя.`
-            : `Settings, ${items.length} items, ${blocksCount} calendar blocks, ${sleepEventsCount} sleep changes, history and import markers will be deleted. Crate data stays intact.`}</p>
+            ? `Будут удалены настройки, ${items.length} дел, ${blocks.length} блоков календаря, ${sleepEventsCount} изменений сна, история и отметки импорта. Данные Crate и оригинальные карточки сохранятся. Отменить сброс нельзя.`
+            : `Settings, ${items.length} items, ${blocks.length} calendar blocks, ${sleepEventsCount} sleep changes, history and import markers will be deleted. Crate data stays intact.`}</p>
           <div className={styles.modalActions}><button type="button" onClick={() => setResetStage(0)}>{ru ? "Отмена" : "Cancel"}</button><button type="button" className={styles.dangerButton} onClick={() => setResetStage(2)}>{ru ? "Продолжить" : "Continue"}</button></div>
         </> : <form onSubmit={(event) => { event.preventDefault(); void onReset(password); }} className={styles.form}>
           <label>{ru ? "Текущий пароль Item Key" : "Current Item Key password"}<input autoFocus type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
@@ -456,12 +427,9 @@ export default function AutoplannerModal({
           <article><span>{ru ? "Резерв" : "Reserve"}</span><strong>{Math.round(profile.reserveRatio * 100)}%</strong></article>
         </div>
         <div className={styles.assistantChoices}>
-          <button onClick={() => { setProfileChanged(false); setStep(4); }}>{ru ? "Добавить дела" : "Add items"}<small>{ru ? "Подробно или обычным списком" : "Detailed form or a quick list"}</small></button>
           <button onClick={() => { setProfileChanged(true); setStep(2); }}>{ru ? "Изменить режим сна" : "Change sleep mode"}<small>{ru ? "Точный режим или помощь в его формировании" : "Fixed schedule or an adaptive trial mode"}</small></button>
-          <button onClick={onOpenSleep}>{ru ? "Сон изменился сегодня" : "Sleep changed today"}<small>{ru ? "Учесть позднее засыпание или подъём" : "Record a late bedtime or wake-up"}</small></button>
-          <button onClick={() => { setProfileChanged(false); setStep(4); }}>{ru ? "Все дела и обязательства" : "All items and commitments"}<small>{ru ? "Разовые, регулярные, точные и гибкие" : "One-time, recurring, fixed and flexible"}</small></button>
+          <button onClick={onOpenSleep}>{ru ? "Изменить выбранную ночь" : "Change a selected night"}<small>{ru ? "Открыть структурированный конструктор сна" : "Open the structured sleep constructor"}</small></button>
           <button onClick={() => { setProfileChanged(true); setStep(5); }}>{ru ? "Изменить нагрузку" : "Change workload"}<small>{ru ? "Энергия и резерв времени" : "Energy and protected reserve"}</small></button>
-          <button onClick={() => void onPrepare({ trigger: "assistant_update", rebuildFuture: true })}>{ru ? "Пересобрать будущее" : "Rebuild future"}<small>{ru ? "Фиксированное и выполненное останется на месте" : "Fixed and completed work stays"}</small></button>
         </div>
         <button className={styles.resetLink} onClick={() => setResetStage(1)}>{ru ? "Обнулить весь план" : "Reset entire planner"}</button>
       </div>
@@ -480,7 +448,6 @@ export default function AutoplannerModal({
   return <ModalFrame title={ru ? "Автопланировщик" : "Autoplanner"} onClose={firstRun ? undefined : onClose} locale={locale}>
     <div className={styles.assistantProgress}><span>{upgradeOnly ? (step === 2 ? "1/2" : "2/2") : `${step}/6`}</span><strong>{upgradeOnly ? (ru ? "Новые правила сна и дедлайнов" : "New sleep and deadline rules") : currentLabel}</strong><i style={{ width: upgradeOnly ? `${step === 2 ? 50 : 100}%` : `${step / 6 * 100}%` }} /></div>
     <div className={styles.assistantBody}>
-      {localError && <p className={styles.inlineError}>{localError}</p>}
       {step === 1 && <section className={styles.assistantStep}><h3>{ru ? "Где считать ваше время?" : "Which time zone should be used?"}</h3><p>{ru ? "Он определён автоматически. Проверьте значение." : "It was detected automatically. Confirm it."}</p><label>{ru ? "Часовой пояс" : "Time zone"}<input value={value.timezone} onChange={(event) => { update("timezone", event.target.value); setProfileChanged(true); }} /></label></section>}
       {step === 2 && <section className={styles.assistantStep}>
         <h3>{ru ? "Как поступить со сном?" : "How should sleep be planned?"}</h3>
@@ -488,9 +455,7 @@ export default function AutoplannerModal({
           <button type="button" className={value.sleepMode === "fixed" ? styles.segmentedActive : ""} onClick={() => { update("sleepMode", "fixed"); setProfileChanged(true); }}>{ru ? "У меня есть обычный режим" : "I have a regular schedule"}<small>{ru ? "Укажу точное время и длительность" : "I will provide bedtime and duration"}</small></button>
           <button type="button" className={value.sleepMode === "adaptive" ? styles.segmentedActive : ""} onClick={() => { update("sleepMode", "adaptive"); setProfileChanged(true); }}>{ru ? "Графика нет — сформировать" : "No schedule — build one"}<small>{ru ? "Планировщик создаст пробный здоровый режим" : "Planner creates a cautious trial schedule"}</small></button>
         </div>
-        <textarea value={value.sleepText} onChange={(event) => update("sleepText", event.target.value)} placeholder={value.sleepMode === "adaptive" ? (ru ? "Графика нет, мне хватает 7–9 часов, хочу вставать утром" : "No schedule, I need 7–9 hours and prefer mornings") : (ru ? "Обычно ложусь в 23:30 и сплю 8 часов" : "I go to bed at 23:30 and sleep for 8 hours")} />
-        <p className={styles.fieldHelp}>{ru ? "Можно описать режим обычной фразой или заполнить точные поля ниже. После распознавания всё останется доступно для проверки." : "Describe your sleep in a normal sentence or use the exact fields below. Parsed values always remain editable."}</p>
-        <button type="button" onClick={() => void recognizeSleep()}>{ru ? "Распознать фразу" : "Parse phrase"}</button>
+        <p className={styles.fieldHelp}>{ru ? "Режим задаётся только точными полями и переключателями ниже." : "Use only the structured fields and choices below."}</p>
         {value.sleepMode === "fixed" ? <div className={styles.formGrid}>
           <label>{ru ? "Перед буднями, отбой" : "Before weekdays"}<input type="time" value={value.weekdayBedtime} onChange={(event) => { update("weekdayBedtime", event.target.value); setProfileChanged(true); }} /></label>
           <DurationInput label={ru ? "Длительность сна" : "Sleep duration"} valueMinutes={value.weekdayDuration} minMinutes={180} maxMinutes={960} minuteStep={15} locale={locale} onChangeMinutes={(minutes) => { update("weekdayDuration", String(minutes)); setProfileChanged(true); }} />
@@ -549,14 +514,11 @@ export default function AutoplannerModal({
       {step === 4 && <section className={`${styles.assistantStep} ${styles.commitmentsStep}`}>
         <h3>{ru ? "Все дела и обязательства" : "All items and commitments"}</h3>
         <p>{ru ? "Добавляйте разовые и регулярные дела. Точное время можно указать, а можно оставить только длительность — тогда сайт сам подберёт начало и время выезда." : "Add one-time and recurring items. Enter an exact time or only a duration and let the planner choose the start and departure time."}</p>
+        <p className={styles.fieldHelp}>{ru
+          ? `Здесь показаны все активные дела из календаря: ${value.commitments.length}. Их можно изменить или удалить, а новые карточки добавятся в этот же список.`
+          : `All active calendar items are shown here: ${value.commitments.length}. You can edit or remove them, and new cards join the same list.`}</p>
         <div className={styles.fieldExplanation}><strong>{ru ? "Как это повлияет на план" : "How this changes the plan"}</strong><p>{ru ? "Дело, дорога туда и выбранная обратная дорога будут защищены от других задач. Необязательный интервал ограничивает время самого дела." : "The item, outbound travel and an optional return trip are protected from other tasks. An optional window limits the item itself."}</p></div>
         <CommitmentsEditor commitments={value.commitments} locale={locale} onChange={(commitments) => update("commitments", commitments)} onEstimateTravel={onEstimateTravel} onEditingChange={setCommitmentEditorOpen} />
-        {!commitmentEditorOpen && <details className={styles.advanced}>
-          <summary>{ru ? "Быстро добавить несколько дел списком" : "Quickly add several items as a list"}</summary>
-          <p>{ru ? "Одно дело — одна строка. После распознавания каждое появится выше отдельной редактируемой карточкой." : "Use one item per line. Each parsed item appears above as an editable card."}</p>
-          <textarea className={styles.taskTextarea} value={value.tasks} onChange={(event) => update("tasks", event.target.value)} placeholder={ru ? "Подготовить отчёт 2 часа до пятницы, важно\nКупить продукты завтра 40 минут" : "Prepare report for 2 hours by Friday, important\nBuy groceries tomorrow, 40 minutes"} />
-          <button type="button" className={styles.primaryButton} disabled={busy || !value.tasks.trim()} onClick={() => void recognizeTasks()}>{ru ? "Распознать и добавить" : "Parse and add"}</button>
-        </details>}
       </section>}
       {step === 5 && <section className={styles.assistantStep}>
         <h3>{ru ? "Когда вам удобнее решать сложные задачи?" : "When is difficult work easiest?"}</h3>
@@ -564,11 +526,11 @@ export default function AutoplannerModal({
         <div className={styles.segmented}>{(["auto", "morning", "day", "evening"] as const).map((energy) => <button type="button" key={energy} className={value.energy === energy ? styles.segmentedActive : ""} aria-pressed={value.energy === energy} onClick={() => { update("energy", energy); setProfileChanged(true); }}>{energy === "auto" ? (ru ? "Без разницы — выбери сам" : "No preference — choose for me") : energy === "morning" ? (ru ? "После подъёма" : "After waking") : energy === "day" ? (ru ? "Днём" : "Day") : (ru ? "Вечером" : "Evening")}</button>)}</div>
         <label>{ru ? "Оставлять свободным, %" : "Protected free time, %"}<input type="number" min="0" max="60" value={value.reserve} onChange={(event) => { update("reserve", event.target.value); setProfileChanged(true); }} /><small>{ru ? "Доля доступного времени без автозадач. 20% помогает пережить задержки, отдых и внезапные планы." : "The share of available time kept free from automatic tasks. 20% leaves room for delays, rest and unexpected plans."}</small></label>
       </section>}
-      {step === 6 && <section className={styles.assistantStep} aria-busy={busy}><h3>{ru ? "Готово к предпросмотру" : "Ready for preview"}</h3><dl className={styles.assistantRecap}><div><dt>{ru ? "Часовой пояс" : "Time zone"}</dt><dd>{value.timezone}</dd></div><div><dt>{ru ? "Сон" : "Sleep"}</dt><dd>{draftSleepSchedule.mode === "adaptive" ? `${ru ? "адаптивный" : "adaptive"} · ${draftWakeTime} · ${Math.round(draftSleepSchedule.targetDurationMinutes / 6) / 10} ${ru ? "ч" : "h"}` : `${draftSleepSchedule.weekdays.bedtime} · ${draftSleepSchedule.weekdays.durationMinutes} ${ru ? "мин" : "min"}`}</dd></div>{draftSleepSchedule.mode === "adaptive" && <div><dt>{ru ? "Отход ко сну" : "Bedtime"}</dt><dd>{draftSleepRule.bedtime}</dd></div>}<div><dt>{ru ? "Новых дел" : "New items"}</dt><dd>{commitmentDrafts.length}</dd></div><div><dt>{ru ? "Продуктивность" : "Productivity"}</dt><dd>{value.energy === "auto" ? (ru ? "без разницы" : "no preference") : value.energy === "morning" ? (ru ? "после подъёма" : "after waking") : value.energy === "day" ? (ru ? "днём" : "day") : (ru ? "вечером" : "evening")}</dd></div><div><dt>{ru ? "Резерв" : "Reserve"}</dt><dd>{value.reserve}%</dd></div></dl>{draftSleepSchedule.mode === "adaptive" && <div className={styles.fieldExplanation}><strong>{ru ? "Предварительная причина" : "Preliminary reason"}</strong><p>{wakeReasonText(draftSleepSchedule.wakeAnchor.selectionReason, ru)}</p>{value.wakeDayPart === "auto" && <small>{ru ? "Движок выведет подходящий ориентир подъёма из обязательств, временных окон, дороги и сроков, затем один раз соберёт весь план." : "The planner derives a suitable wake anchor from commitments, time windows, travel and deadlines, then builds the full plan once."}</small>}</div>}<p>{ru ? "Следующий экран покажет каждый перенос, защищённый сон и конфликт. Ничего ещё не будет применено." : "The next screen shows every move, protected sleep block and conflict. Nothing is applied yet."}</p>{requestError && <div className={styles.requestErrorPanel} role="alert"><strong>{ru ? "Предпросмотр не был создан" : "The preview was not created"}</strong><p>{requestError}</p><small>{ru ? "Введённые дела сохранены в этом мастере. Можно изменить их в пункте «Все дела» или повторить расчёт — заполнять всё заново не нужно." : "Your items are still saved in this wizard. Edit them under All items or retry; you do not need to enter everything again."}</small><button type="button" onClick={() => { onClearRequestError(); setStep(4); }}>{ru ? "Вернуться к делам" : "Return to items"}</button></div>}</section>}
+      {step === 6 && <section className={styles.assistantStep} aria-busy={busy}><h3>{ru ? "Готово к предпросмотру" : "Ready for preview"}</h3><dl className={styles.assistantRecap}><div><dt>{ru ? "Часовой пояс" : "Time zone"}</dt><dd>{value.timezone}</dd></div><div><dt>{ru ? "Сон" : "Sleep"}</dt><dd>{draftSleepSchedule.mode === "adaptive" ? `${ru ? "адаптивный" : "adaptive"} · ${draftWakeTime} · ${Math.round(draftSleepSchedule.targetDurationMinutes / 6) / 10} ${ru ? "ч" : "h"}` : `${draftSleepSchedule.weekdays.bedtime} · ${draftSleepSchedule.weekdays.durationMinutes} ${ru ? "мин" : "min"}`}</dd></div>{draftSleepSchedule.mode === "adaptive" && <div><dt>{ru ? "Отход ко сну" : "Bedtime"}</dt><dd>{draftSleepRule.bedtime}</dd></div>}<div><dt>{ru ? "Дел в плане" : "Items in plan"}</dt><dd>{commitmentDrafts.length}</dd></div><div><dt>{ru ? "Изменено или добавлено" : "Changed or added"}</dt><dd>{changedCommitmentDrafts.length}</dd></div>{removedItemIds.length > 0 && <div><dt>{ru ? "Удаляется" : "Removed"}</dt><dd>{removedItemIds.length}</dd></div>}<div><dt>{ru ? "Продуктивность" : "Productivity"}</dt><dd>{value.energy === "auto" ? (ru ? "без разницы" : "no preference") : value.energy === "morning" ? (ru ? "после подъёма" : "after waking") : value.energy === "day" ? (ru ? "днём" : "day") : (ru ? "вечером" : "evening")}</dd></div><div><dt>{ru ? "Резерв" : "Reserve"}</dt><dd>{value.reserve}%</dd></div></dl>{draftSleepSchedule.mode === "adaptive" && <div className={styles.fieldExplanation}><strong>{ru ? "Предварительная причина" : "Preliminary reason"}</strong><p>{wakeReasonText(draftSleepSchedule.wakeAnchor.selectionReason, ru)}</p>{value.wakeDayPart === "auto" && <small>{ru ? "Движок выведет подходящий ориентир подъёма из обязательств, временных окон, дороги и сроков, затем один раз соберёт весь план." : "The planner derives a suitable wake anchor from commitments, time windows, travel and deadlines, then builds the full plan once."}</small>}</div>}<p>{ru ? "Следующий экран покажет каждый перенос, защищённый сон и конфликт. Ничего ещё не будет применено." : "The next screen shows every move, protected sleep block and conflict. Nothing is applied yet."}</p>{requestError && <div className={styles.requestErrorPanel} role="alert"><strong>{ru ? "Предпросмотр не был создан" : "The preview was not created"}</strong><p>{requestError}</p><small>{ru ? "Введённые дела сохранены в этом мастере. Можно изменить их в пункте «Все дела» или повторить расчёт — заполнять всё заново не нужно." : "Your items are still saved in this wizard. Edit them under All items or retry; you do not need to enter everything again."}</small><button type="button" onClick={() => { onClearRequestError(); setStep(4); }}>{ru ? "Вернуться к делам" : "Return to items"}</button></div>}</section>}
       <div className={styles.assistantFooter}>
         <button type="button" disabled={busy} onClick={goBack}>{ru ? "Назад" : "Back"}</button>
         {step < 4 && <button type="button" className={styles.primaryButton} disabled={busy || healthyMinimumNeedsConfirmation} onClick={() => setStep(upgradeOnly && step === 2 ? 6 : step + 1)}>{ru ? "Дальше" : "Next"}</button>}
-        {step === 4 && <button type="button" className={styles.primaryButton} disabled={busy || commitmentEditorOpen} onClick={() => void finishItemsStep()}>{commitmentEditorOpen ? (ru ? "Сначала сохраните дело" : "Save the item first") : (ru ? "Дальше" : "Next")}</button>}
+        {step === 4 && <button type="button" className={styles.primaryButton} disabled={busy || commitmentEditorOpen} onClick={() => setStep(5)}>{commitmentEditorOpen ? (ru ? "Сначала сохраните дело" : "Save the item first") : (ru ? "Дальше" : "Next")}</button>}
         {step === 5 && <button type="button" className={styles.primaryButton} disabled={busy} onClick={() => setStep(6)}>{ru ? "К итогу" : "Continue"}</button>}
         {step === 6 && <button type="button" className={styles.primaryButton} disabled={busy} onClick={() => { onClearRequestError(); void prepare(); }}>{busy ? (ru ? "Составляю план…" : "Building plan…") : requestError ? (ru ? "Повторить расчёт" : "Retry") : (ru ? "Показать изменения" : "Review changes")}</button>}
       </div>

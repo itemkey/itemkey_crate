@@ -4,13 +4,13 @@ import { useState } from "react";
 
 import type { Locale } from "@/lib/i18n";
 import { createOpenSleepEvent, createPlannerSleepEvent, createTentativeSleepEvent } from "@/lib/planner/sleep";
-import type { PlannerProfile, PlannerSleepEvent, PlannerSleepinessLevel, PlannerSleepParseResult, PlannerSleepRestedness } from "@/lib/planner/types";
+import type { PlannerProfile, PlannerSleepEvent, PlannerSleepinessLevel, PlannerSleepRestedness } from "@/lib/planner/types";
 import { addPlannerDays, formatDateInTimeZone, formatTimeInTimeZone, plannerTimeToMinutes, zonedPlannerDateTimeToUtc } from "@/lib/planner/time";
 import styles from "./planner-workspace.module.css";
 
 export type SleepMode = "later" | "bedtime" | "woke" | "checkin";
 
-export default function SleepChangedModal({ profile, locale, busy, initialMode = "later", initialWakeDate, onClose, onSubmit, onCheckIn, onParseFeedback }: {
+export default function SleepChangedModal({ profile, locale, busy, initialMode = "later", initialWakeDate, onClose, onSubmit, onCheckIn }: {
   profile: PlannerProfile;
   locale: Locale;
   busy: boolean;
@@ -19,7 +19,6 @@ export default function SleepChangedModal({ profile, locale, busy, initialMode =
   onClose: () => void;
   onSubmit: (event: PlannerSleepEvent) => Promise<void>;
   onCheckIn: (wakeDate: string, level: PlannerSleepinessLevel, feedbackText?: string) => Promise<void>;
-  onParseFeedback: (text: string) => Promise<PlannerSleepParseResult>;
 }) {
   const ru = locale === "ru";
   const now = new Date();
@@ -33,7 +32,6 @@ export default function SleepChangedModal({ profile, locale, busy, initialMode =
   const [estimateTo, setEstimateTo] = useState("06:00");
   const [fullyUnknown, setFullyUnknown] = useState(false);
   const [restedness, setRestedness] = useState<PlannerSleepRestedness | "">("");
-  const [feedbackText, setFeedbackText] = useState("");
   const [sleepinessLevel, setSleepinessLevel] = useState<PlannerSleepinessLevel | null>(null);
   const [error, setError] = useState("");
 
@@ -56,8 +54,8 @@ export default function SleepChangedModal({ profile, locale, busy, initialMode =
     setError("");
     try {
       if (mode === "checkin") {
-        if (sleepinessLevel === null) throw new Error(ru ? "Подтвердите распознанную степень сонливости от 0 до 4." : "Confirm the recognized sleepiness level from 0 to 4.");
-        await onCheckIn(startDate, sleepinessLevel, feedbackText.trim() || undefined);
+        if (sleepinessLevel === null) throw new Error(ru ? "Выберите степень сонливости от 0 до 4." : "Choose a sleepiness level from 0 to 4.");
+        await onCheckIn(startDate, sleepinessLevel);
         return;
       }
       if (mode === "later") {
@@ -130,8 +128,6 @@ export default function SleepChangedModal({ profile, locale, busy, initialMode =
 
       {mode === "checkin" && <>
         <label>{ru ? "Дата пробуждения" : "Wake date"}<input type="date" required value={startDate} onChange={(event) => setStartDate(event.target.value)} /></label>
-        <label>{ru ? "Опишите своими словами, как вы себя чувствуете" : "Describe how you feel in your own words"}<textarea value={feedbackText} onChange={(event) => setFeedbackText(event.target.value)} placeholder={ru ? "Немного клонит в сон, но работать могу" : "A little sleepy, but I can work"} /></label>
-        <button type="button" disabled={!feedbackText.trim()} onClick={() => void onParseFeedback(feedbackText).then((result) => { if (result.sleepinessLevel !== undefined) setSleepinessLevel(result.sleepinessLevel); else setError(ru ? "Не удалось уверенно определить степень. Выберите её вручную." : "The level was unclear. Choose it manually."); }).catch((cause) => setError(cause instanceof Error ? cause.message : (ru ? "Не удалось распознать фразу." : "Could not parse the phrase.")))}>{ru ? "Распознать самочувствие" : "Parse how I feel"}</button>
         <SleepinessScale value={sleepinessLevel} setValue={setSleepinessLevel} ru={ru} />
         <p className={styles.modalLead}>{ru ? "После семи сопоставимых ночей планировщик сможет предложить корректировку цели. Сам он её не применит." : "After seven comparable nights the planner may suggest a target adjustment, but never applies it automatically."}</p>
       </>}

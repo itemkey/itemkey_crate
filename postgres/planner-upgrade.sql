@@ -9,6 +9,7 @@ create table if not exists public.planner_profiles (
   reserve_ratio numeric(4,3) not null default 0.200 check (reserve_ratio between 0 and 0.600),
   default_buffer_minutes integer not null default 15 check (default_buffer_minutes between 0 and 120),
   availability jsonb not null default '{}'::jsonb,
+  availability_overrides jsonb not null default '{}'::jsonb,
   energy_windows jsonb not null default '[]'::jsonb,
   sleep_schedule jsonb not null default '{"mode":"fixed","weekdays":{"bedtime":"23:00","durationMinutes":480},"weekends":{"bedtime":"23:00","durationMinutes":480}}'::jsonb,
   planning_policy jsonb not null default '{"focus":"sleep","minimumNightMinutes":360,"maxNightDeficitMinutes":120,"maxRollingSevenDayDeficitMinutes":180,"recoveryHorizonNights":3,"deadlineChainGapMinutes":5}'::jsonb,
@@ -20,6 +21,7 @@ create table if not exists public.planner_profiles (
 );
 
 alter table public.planner_profiles
+  add column if not exists availability_overrides jsonb not null default '{}'::jsonb,
   add column if not exists sleep_schedule jsonb not null
     default '{"mode":"fixed","weekdays":{"bedtime":"23:00","durationMinutes":480},"weekends":{"bedtime":"23:00","durationMinutes":480}}'::jsonb,
   add column if not exists planning_policy jsonb not null
@@ -116,7 +118,8 @@ create table if not exists public.planner_blocks (
   status text not null default 'planned' check (status in ('planned', 'in_progress', 'done', 'skipped', 'cancelled')),
   source text not null default 'manual' check (source in ('manual', 'auto', 'migrated')),
   fixed boolean not null default false,
-  role text not null default 'work' check (role in ('work', 'uncertainty_reserve', 'calibration')),
+  role text not null default 'work' check (role in ('work', 'uncertainty_reserve', 'calibration', 'protected_free')),
+  end_estimate jsonb null,
   soft boolean not null default false,
   occurrence_key text null,
   actual_start_at timestamptz null, actual_end_at timestamptz null,
@@ -129,10 +132,11 @@ create table if not exists public.planner_blocks (
 
 alter table public.planner_blocks
   add column if not exists role text not null default 'work',
+  add column if not exists end_estimate jsonb null,
   add column if not exists soft boolean not null default false;
 alter table public.planner_blocks drop constraint if exists planner_blocks_role_check;
 alter table public.planner_blocks add constraint planner_blocks_role_check
-  check (role in ('work', 'uncertainty_reserve', 'calibration'));
+  check (role in ('work', 'uncertainty_reserve', 'calibration', 'protected_free'));
 
 alter table public.planner_blocks drop constraint if exists planner_blocks_item_fk;
 alter table public.planner_blocks add constraint planner_blocks_item_fk
