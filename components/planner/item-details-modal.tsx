@@ -34,6 +34,90 @@ function durationLabel(minutes: number, locale: Locale): string {
   return rest ? `${hours} ${locale === "ru" ? "ч" : "h"} ${rest} ${locale === "ru" ? "мин" : "min"}` : `${hours} ${locale === "ru" ? "ч" : "h"}`;
 }
 
+function priorityLabel(value: PlannerItem["priority"] | undefined, locale: Locale): string {
+  const ru = locale === "ru";
+  if (value === "low") return ru ? "Низкий" : "Low";
+  if (value === "normal") return ru ? "Обычный" : "Normal";
+  if (value === "high") return ru ? "Высокий" : "High";
+  if (value === "critical") return ru ? "Критический" : "Critical";
+  return "—";
+}
+
+function commitmentLabel(value: PlannerItem["commitmentLevel"] | undefined, locale: Locale): string {
+  const ru = locale === "ru";
+  if (value === "must_not_skip") return ru ? "Нельзя пропустить" : "Must not skip";
+  if (value === "required") return ru ? "Нужно сделать" : "Need to do";
+  if (value === "desired") return ru ? "Желательно" : "Desired";
+  if (value === "if_time") return ru ? "Если останется время" : "If time remains";
+  return "—";
+}
+
+function estimateModeLabel(value: "exact" | "approximate" | "range" | "unknown" | undefined, locale: Locale): string {
+  const ru = locale === "ru";
+  if (value === "exact") return ru ? "Точная" : "Exact";
+  if (value === "approximate") return ru ? "Примерная" : "Approximate";
+  if (value === "range") return ru ? "Диапазон" : "Range";
+  if (value === "unknown") return ru ? "Пока неизвестна" : "Not known yet";
+  return "—";
+}
+
+function dateModeLabel(value: PlannerItem["uncertaintyPolicy"]["date"]["mode"], locale: Locale): string {
+  const ru = locale === "ru";
+  if (value === "exact") return ru ? "Точная дата" : "Exact date";
+  if (value === "preferred") return ru ? "Предпочтительная дата" : "Preferred date";
+  if (value === "range") return ru ? "Диапазон дат" : "Date range";
+  return ru ? "Любая дата" : "Any date";
+}
+
+function timeModeLabel(value: PlannerItem["uncertaintyPolicy"]["time"]["mode"], locale: Locale): string {
+  const ru = locale === "ru";
+  if (value === "exact") return ru ? "Точное время" : "Exact time";
+  if (value === "preferred") return ru ? "Предпочтительное время" : "Preferred time";
+  if (value === "range") return ru ? "Диапазон времени" : "Time range";
+  return ru ? "Любое время" : "Any time";
+}
+
+function recurrenceLabel(recurrence: NonNullable<PlannerItem["recurrence"]>, locale: Locale): string {
+  const ru = locale === "ru";
+  if (recurrence.frequency === "once") return ru ? "Один раз" : "Once";
+  if (recurrence.frequency === "daily") return ru ? "Каждый день" : "Every day";
+  const weekdayNames = ru
+    ? ["", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    : ["", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  const days = recurrence.weekdays?.map((weekday) => weekdayNames[weekday]).filter(Boolean).join(", ");
+  const frequency = recurrence.frequency === "weekly"
+    ? (ru ? "Каждую неделю" : "Every week")
+    : (ru ? "По выбранным дням" : "On selected days");
+  return days ? `${frequency}: ${days}` : frequency;
+}
+
+function blockStatusLabel(status: PlannerBlock["status"], locale: Locale): string {
+  const ru = locale === "ru";
+  if (status === "in_progress") return ru ? "В процессе" : "In progress";
+  if (status === "done") return ru ? "Выполнено" : "Done";
+  if (status === "skipped") return ru ? "Пропущено" : "Missed";
+  if (status === "cancelled") return ru ? "Отменено" : "Cancelled";
+  return ru ? "Запланировано" : "Planned";
+}
+
+function planningReasonLabel(state: PlannerItemPlanningState, locale: Locale): string | undefined {
+  const ru = locale === "ru";
+  if (state.reasonCode === "reserve") return ru ? "часть окна защищена резервом" : "part of the window is protected reserve";
+  if (state.reasonCode === "transition") return ru ? "нужно оставить время на переход" : "transition time must be kept";
+  if (state.reasonCode === "sleep") return ru ? "дальше начинается сон" : "sleep starts next";
+  if (state.reasonCode === "day_bounds") return ru ? "достигнута граница дня" : "the day boundary was reached";
+  if (state.reasonCode === "fixed_event") return ru ? "мешает фиксированное событие" : "a fixed event occupies the time";
+  if (state.reasonCode === "window") return ru ? "нет достаточно большого свободного окна" : "there is no large enough free window";
+  return state.reason;
+}
+
+function calendarDateLabel(at: Date, profile: PlannerProfile, locale: Locale): string {
+  const date = formatDateInTimeZone(at, profile.timezone);
+  return new Intl.DateTimeFormat(locale === "ru" ? "ru-RU" : "en-US", {
+    day: "numeric", month: "short", year: "numeric", timeZone: "UTC",
+  }).format(new Date(`${date}T00:00:00Z`));
+}
+
 function dateTime(block: PlannerBlock, profile: PlannerProfile, locale: Locale): string {
   const date = formatDateInTimeZone(new Date(block.startAt), profile.timezone);
   return `${new Intl.DateTimeFormat(locale === "ru" ? "ru-RU" : "en-US", {
@@ -92,6 +176,7 @@ export default function ItemDetailsModal({
             : ru ? "Запланировано" : "Planned";
   const recurrence = effective?.recurrence;
   const duration = effective?.uncertaintyPolicy.duration;
+  const planningReason = planningState ? planningReasonLabel(planningState, locale) : undefined;
   const canConstruct = !["done", "skipped", "cancelled"].includes(block.status)
     && (block.status === "in_progress" || new Date(block.endAt) > now);
 
@@ -111,21 +196,21 @@ export default function ItemDetailsModal({
         <div><dt>{ru ? "Категория" : "Category"}</dt><dd>{effective?.area || "—"}</dd></div>
         <div><dt>{ru ? "Место" : "Place"}</dt><dd>{effective?.location || "—"}</dd></div>
         <div><dt>{ru ? "Заметка" : "Note"}</dt><dd>{effective?.notes || "—"}</dd></div>
-        <div><dt>{ru ? "Приоритет" : "Priority"}</dt><dd>{effective?.priority ?? "—"}</dd></div>
-        <div><dt>{ru ? "Обязательность" : "Commitment"}</dt><dd>{effective?.commitmentLevel ?? "—"}</dd></div>
+        <div><dt>{ru ? "Приоритет" : "Priority"}</dt><dd>{priorityLabel(effective?.priority, locale)}</dd></div>
+        <div><dt>{ru ? "Обязательность" : "Commitment"}</dt><dd>{commitmentLabel(effective?.commitmentLevel, locale)}</dd></div>
       </dl></section>
 
       {effective && <section className={styles.itemDetailsSection}><h3>{ru ? "Правила планирования" : "Planning rules"}</h3><dl>
-        <div><dt>{ru ? "Длительность" : "Duration"}</dt><dd>{duration ? `${durationLabel(duration.minMinutes, locale)} / ${durationLabel(duration.likelyMinutes, locale)} / ${durationLabel(duration.maxMinutes, locale)}` : "—"}</dd></div>
-        <div><dt>{ru ? "Точность" : "Certainty"}</dt><dd>{duration?.mode ?? "—"}</dd></div>
+        <div><dt>{ru ? "Длительность" : "Duration"}</dt><dd>{duration ? `${ru ? "минимум" : "minimum"} ${durationLabel(duration.minMinutes, locale)} · ${ru ? "обычно" : "usually"} ${durationLabel(duration.likelyMinutes, locale)} · ${ru ? "максимум" : "maximum"} ${durationLabel(duration.maxMinutes, locale)}` : "—"}</dd></div>
+        <div><dt>{ru ? "Точность" : "Certainty"}</dt><dd>{estimateModeLabel(duration?.mode, locale)}</dd></div>
         <div><dt>{ru ? "Разделение" : "Splitting"}</dt><dd>{effective.canSplit ? `${ru ? "Можно, минимум" : "Allowed, minimum"} ${durationLabel(effective.minChunkMinutes, locale)}` : (ru ? "Только целиком" : "Whole only")}</dd></div>
         <div><dt>{ru ? "Сокращение" : "Reduction"}</dt><dd>{effective.uncertaintyPolicy.reduction?.mode === "to_minimum" ? `${ru ? "До" : "To"} ${durationLabel(effective.uncertaintyPolicy.reduction.minimumMinutes, locale)}` : (ru ? "Запрещено" : "Forbidden")}</dd></div>
-        <div><dt>{ru ? "Дата и время" : "Date and time"}</dt><dd>{effective.uncertaintyPolicy.date.mode} · {effective.uncertaintyPolicy.time.mode}</dd></div>
+        <div><dt>{ru ? "Дата и время" : "Date and time"}</dt><dd>{dateModeLabel(effective.uncertaintyPolicy.date.mode, locale)} · {timeModeLabel(effective.uncertaintyPolicy.time.mode, locale)}</dd></div>
         <div><dt>{ru ? "Переходы" : "Buffers"}</dt><dd>{durationLabel(effective.bufferBeforeMinutes, locale)} / {durationLabel(effective.bufferAfterMinutes, locale)}</dd></div>
-        <div><dt>{ru ? "Дорога" : "Travel"}</dt><dd>{effective.uncertaintyPolicy.travel ? `${effective.uncertaintyPolicy.travel.mode} · ${durationLabel(effective.uncertaintyPolicy.travel.minMinutes, locale)} / ${durationLabel(effective.uncertaintyPolicy.travel.likelyMinutes, locale)} / ${durationLabel(effective.uncertaintyPolicy.travel.maxMinutes, locale)}` : (ru ? "Не указана" : "Not set")}</dd></div>
-        <div><dt>{ru ? "Повтор" : "Repeat"}</dt><dd>{recurrence ? `${recurrence.frequency}${recurrence.weekdays?.length ? ` · ${recurrence.weekdays.join(", ")}` : ""}` : (ru ? "Нет" : "None")}</dd></div>
-        <div><dt>{ru ? "Срок" : "Deadline"}</dt><dd>{effective.deadlineAt ? `${formatDateInTimeZone(new Date(effective.deadlineAt), profile.timezone)} ${formatTimeInTimeZone(new Date(effective.deadlineAt), profile.timezone)}` : (ru ? "Нет" : "None")}</dd></div>
-      </dl>{effective.milestones.length > 0 && <ul>{effective.milestones.map((milestone) => <li key={milestone.id}>{milestone.title} · {formatDateInTimeZone(new Date(milestone.targetAt), profile.timezone)}</li>)}</ul>}</section>}
+        <div><dt>{ru ? "Дорога" : "Travel"}</dt><dd>{effective.uncertaintyPolicy.travel ? `${estimateModeLabel(effective.uncertaintyPolicy.travel.mode, locale)} · ${ru ? "минимум" : "minimum"} ${durationLabel(effective.uncertaintyPolicy.travel.minMinutes, locale)} · ${ru ? "обычно" : "usually"} ${durationLabel(effective.uncertaintyPolicy.travel.likelyMinutes, locale)} · ${ru ? "максимум" : "maximum"} ${durationLabel(effective.uncertaintyPolicy.travel.maxMinutes, locale)}` : (ru ? "Не указана" : "Not set")}</dd></div>
+        <div><dt>{ru ? "Повтор" : "Repeat"}</dt><dd>{recurrence ? recurrenceLabel(recurrence, locale) : (ru ? "Нет" : "None")}</dd></div>
+        <div><dt>{ru ? "Срок" : "Deadline"}</dt><dd>{effective.deadlineAt ? `${calendarDateLabel(new Date(effective.deadlineAt), profile, locale)}, ${formatTimeInTimeZone(new Date(effective.deadlineAt), profile.timezone)}` : (ru ? "Нет" : "None")}</dd></div>
+      </dl>{effective.milestones.length > 0 && <ul>{effective.milestones.map((milestone) => <li key={milestone.id}>{milestone.title} · {calendarDateLabel(new Date(milestone.targetAt), profile, locale)}</li>)}</ul>}</section>}
 
       <section className={styles.itemDetailsSection}><h3>{ru ? "План и статистика" : "Plan and statistics"}</h3><div className={styles.itemStatsGrid}>
         <article><span>{ru ? "Выполнено" : "Completed"}</span><strong>{completed.length}</strong></article>
@@ -134,10 +219,10 @@ export default function ItemDetailsModal({
         <article><span>{ru ? "Среднее / медиана" : "Average / median"}</span><strong>{actualDurations.length ? `${durationLabel(average, locale)} / ${durationLabel(median, locale)}` : "—"}</strong></article>
         <article><span>{ru ? "Завершение" : "Completion"}</span><strong>{decidedCount ? `${completionRate}%` : "—"}</strong></article>
         <article><span>{ru ? "Средняя ошибка оценки" : "Average estimate error"}</span><strong>{plannedVsActual.length ? durationLabel(averageError, locale) : "—"}</strong></article>
-      </div>{planningState && <p className={styles.itemPlanningState}>{ru ? "Запрошено" : "Requested"}: {durationLabel(planningState.requestedMinutes, locale)} · {ru ? "запланировано" : "planned"}: {durationLabel(planningState.plannedMinutes, locale)} · {ru ? "без места" : "unplaced"}: {durationLabel(planningState.remainingMinutes, locale)}{planningState.reason ? ` — ${planningState.reason}` : ""}</p>}{calibration && <p className={styles.itemPlanningState}>{ru ? "Пробная сессия" : "Trial session"}: {durationLabel(calibration.completedMinutes, locale)} / {durationLabel(calibration.targetMinutes, locale)} {ru ? "выполнено" : "completed"}; {durationLabel(calibration.plannedMinutes, locale)} {ru ? "уже стоит в плане" : "already planned"}; {durationLabel(calibration.remainingMinutes, locale)} {ru ? "ещё без места" : "still unplaced"}.</p>}</section>
+      </div>{planningState && <p className={styles.itemPlanningState}>{ru ? "Запрошено" : "Requested"}: {durationLabel(planningState.requestedMinutes, locale)} · {ru ? "запланировано" : "planned"}: {durationLabel(planningState.plannedMinutes, locale)} · {ru ? "без места" : "unplaced"}: {durationLabel(planningState.remainingMinutes, locale)}{planningReason ? ` — ${planningReason}` : ""}</p>}{calibration && <p className={styles.itemPlanningState}>{ru ? "Пробная сессия" : "Trial session"}: {durationLabel(calibration.completedMinutes, locale)} / {durationLabel(calibration.targetMinutes, locale)} {ru ? "выполнено" : "completed"}; {durationLabel(calibration.plannedMinutes, locale)} {ru ? "уже стоит в плане" : "already planned"}; {durationLabel(calibration.remainingMinutes, locale)} {ru ? "ещё без места" : "still unplaced"}.</p>}</section>
 
-      <section className={styles.itemDetailsColumns}><div><h3>{ru ? "Последние выполнения" : "Recent occurrences"}</h3>{recent.length ? recent.map((candidate) => <p key={candidate.id}>{formatDateInTimeZone(new Date(candidate.startAt), profile.timezone)} · {formatTimeInTimeZone(new Date(candidate.startAt), profile.timezone)} · {candidate.status}</p>) : <p>—</p>}</div><div><h3>{ru ? "Ближайшие выполнения" : "Upcoming occurrences"}</h3>{upcoming.length ? upcoming.map((candidate) => <p key={candidate.id}>{formatDateInTimeZone(new Date(candidate.startAt), profile.timezone)} · {formatTimeInTimeZone(new Date(candidate.startAt), profile.timezone)}–{formatTimeInTimeZone(new Date(candidate.endAt), profile.timezone)}</p>) : <p>—</p>}</div></section>
+      <section className={styles.itemDetailsColumns}><div><h3>{ru ? "Последние выполнения" : "Recent occurrences"}</h3>{recent.length ? recent.map((candidate) => <p key={candidate.id}>{calendarDateLabel(new Date(candidate.startAt), profile, locale)} · {formatTimeInTimeZone(new Date(candidate.startAt), profile.timezone)} · {blockStatusLabel(candidate.status, locale)}</p>) : <p>—</p>}</div><div><h3>{ru ? "Ближайшие выполнения" : "Upcoming occurrences"}</h3>{upcoming.length ? upcoming.map((candidate) => <p key={candidate.id}>{calendarDateLabel(new Date(candidate.startAt), profile, locale)} · {formatTimeInTimeZone(new Date(candidate.startAt), profile.timezone)}–{formatTimeInTimeZone(new Date(candidate.endAt), profile.timezone)}</p>) : <p>—</p>}</div></section>
     </div>
-    <div className={styles.modalActions}>{effective && !canConstruct && <span className={styles.immutableNotice}>{ru ? "История этого выполнения неизменна" : "This occurrence history is immutable"}</span>}<button type="button" onClick={onClose}>{ru ? "Закрыть" : "Close"}</button>{effective && canConstruct && <button type="button" className={styles.primaryButton} onClick={onConstruct}>{ru ? "Конструктор дела" : "Item constructor"}</button>}</div>
+    <div className={`${styles.modalActions} ${styles.itemDetailsActions}`}>{effective && !canConstruct && <span className={styles.immutableNotice}>{ru ? "История этого выполнения неизменна" : "This occurrence history is immutable"}</span>}<button type="button" onClick={onClose}>{ru ? "Закрыть" : "Close"}</button>{effective && canConstruct && <button type="button" className={styles.primaryButton} onClick={onConstruct}>{ru ? "Конструктор дела" : "Item constructor"}</button>}</div>
   </section></div>;
 }

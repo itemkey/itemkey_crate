@@ -221,6 +221,7 @@
 .itemPlanningState { margin:.5rem 0 0;border-left:4px solid #596f3d;background:#d8dfcf;padding:.45rem;font-size:.68rem;line-height:1.45; }
 .itemDetailsColumns { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.5rem; }
 .itemDetailsColumns p { margin:.2rem 0;font-size:.66rem; }
+.itemDetailsActions { position:sticky;bottom:0;z-index:3;flex-wrap:wrap;margin:0 .7rem .7rem;border:1px solid #777;background:#cecece;padding:.55rem;box-sizing:border-box; }
 .form,.proposal { display:grid;gap:.65rem;padding:.7rem; }
 .modalLead { margin:0;color:var(--muted);font-size:.72rem;line-height:1.5; }
 .formGrid { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.5rem; }

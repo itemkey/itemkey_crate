@@ -14,6 +14,7 @@ const plannerWorkspace = source("components/planner/planner-workspace.tsx");
 const autoplannerModal = source("components/planner/autoplanner-modal.tsx");
 const constructorModal = source("components/planner/plan-constructor-modal.tsx");
 const itemDetailsModal = source("components/planner/item-details-modal.tsx");
+const plannerStyles = source("components/planner/planner-workspace.module.css");
 const mutationRoutes = [
   "app/api/planner/settings/route.ts",
   "app/api/planner/items/route.ts",
@@ -194,4 +195,17 @@ test("calendar blocks are read-only buttons opening exact occurrence details", (
   assert.match(itemDetailsModal, /event\.key === "Escape"/);
   assert.doesNotMatch(itemDetailsModal, />×<|aria-label=\{.*Закрыть/);
   assert.doesNotMatch(constructorModal, />×<|constructorClose/);
+});
+
+test("item details show localized planning labels and keep actions in a framed footer", () => {
+  assert.match(itemDetailsModal, /must_not_skip[\s\S]*Нельзя пропустить/);
+  assert.match(itemDetailsModal, /critical[\s\S]*Критический/);
+  assert.match(itemDetailsModal, /Любая дата/);
+  assert.match(itemDetailsModal, /Любое время/);
+  assert.match(itemDetailsModal, /Каждый день/);
+  assert.match(itemDetailsModal, /styles\.itemDetailsActions/);
+  assert.doesNotMatch(itemDetailsModal, /<dd>\{effective\?\.priority \?\? "—"\}<\/dd>/);
+  assert.doesNotMatch(itemDetailsModal, /<dd>\{effective\?\.commitmentLevel \?\? "—"\}<\/dd>/);
+  assert.doesNotMatch(itemDetailsModal, /\{recurrence\.frequency\}/);
+  assert.match(plannerStyles, /\.itemDetailsActions \{[^}]*border:[^;}]+;[^}]*padding:/);
 });
