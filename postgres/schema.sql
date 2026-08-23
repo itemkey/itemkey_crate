@@ -504,6 +504,7 @@ create table public.planner_blocks (
   end_estimate jsonb null,
   soft boolean not null default false,
   occurrence_key text null,
+  occurrence_override jsonb not null default '{}'::jsonb,
   actual_start_at timestamptz null,
   actual_end_at timestamptz null,
   created_at timestamptz not null default now(),

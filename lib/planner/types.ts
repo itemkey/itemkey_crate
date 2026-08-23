@@ -380,6 +380,26 @@ export type PlannerItem = {
   updatedAt?: string;
 };
 
+export type PlannerOccurrenceOverride = Partial<Pick<PlannerItem,
+  | "title"
+  | "notes"
+  | "location"
+  | "priority"
+  | "commitmentLevel"
+  | "uncertaintyPolicy"
+  | "canSplit"
+  | "minChunkMinutes"
+  | "bufferBeforeMinutes"
+  | "bufferAfterMinutes"
+>>;
+
+export type PlannerTentativeReason = {
+  reserveBlockId: string;
+  reserveItemId?: string;
+  reserveTitle: string;
+  latestAt: string;
+};
+
 export type PlannerBlock = {
   id: string;
   itemId?: string;
@@ -396,7 +416,11 @@ export type PlannerBlock = {
   soft?: boolean;
   /** A lower-priority block currently using another item's soft reserve. */
   tentative?: boolean;
+  /** Exact higher-priority reserve which can displace this block. Computed for bootstrap responses. */
+  tentativeReason?: PlannerTentativeReason;
   occurrenceKey?: string;
+  /** Rules changed only for this occurrence; the recurring item remains unchanged. */
+  occurrenceOverride?: PlannerOccurrenceOverride;
   actualStartAt?: string;
   actualEndAt?: string;
   createdAt?: string;
@@ -421,6 +445,12 @@ export type PlannerBlockEndEstimate = {
 
 export type PlannerOperationScope = "occurrence" | "future" | "item";
 
+export type PlannerOperationTarget = {
+  itemId: string;
+  blockId?: string;
+  occurrenceKey?: string;
+};
+
 export type PlannerPlacement =
   | { mode: "date"; date: string }
   | { mode: "exact"; date: string; start: string }
@@ -429,14 +459,16 @@ export type PlannerPlacement =
 
 export type PlannerConstructorOperation =
   | { kind: "add_item"; draft: PlannerDraft }
-  | { kind: "edit_item"; draft: PlannerDraft; scope?: PlannerOperationScope; blockId?: string }
+  | { kind: "schedule_item"; target: PlannerOperationTarget; scope?: Exclude<PlannerOperationScope, "item"> }
+  | { kind: "edit_item"; draft: PlannerDraft; scope?: PlannerOperationScope; blockId?: string; target?: PlannerOperationTarget }
   | { kind: "bulk_update_items"; drafts: PlannerDraft[]; archiveItemIds?: string[] }
-  | { kind: "move_item"; blockId: string; scope: PlannerOperationScope; placement: PlannerPlacement }
-  | { kind: "cancel_item"; blockId?: string; itemId?: string; scope: PlannerOperationScope }
+  | { kind: "move_item"; blockId: string; scope: PlannerOperationScope; placement: PlannerPlacement; target?: PlannerOperationTarget }
+  | { kind: "cancel_item"; blockId?: string; itemId?: string; scope: PlannerOperationScope; target?: PlannerOperationTarget }
   | {
       kind: "replace_item";
       blockId: string;
       scope: PlannerOperationScope;
+      target?: PlannerOperationTarget;
       replacement: PlannerDraft;
       duration:
         | { mode: "same" }
@@ -444,8 +476,8 @@ export type PlannerConstructorOperation =
         | { mode: "until_next" }
         | { mode: "until"; date: string; time: string };
     }
-  | { kind: "change_block_time"; blockId: string; scope?: PlannerOperationScope; startAt: string; endAt: string }
-  | { kind: "change_item_duration"; itemId: string; blockId?: string; scope?: PlannerOperationScope; duration: PlannerDurationEstimate; reduction?: PlannerUncertaintyPolicy["reduction"] }
+  | { kind: "change_block_time"; blockId: string; scope?: PlannerOperationScope; startAt: string; endAt: string; target?: PlannerOperationTarget }
+  | { kind: "change_item_duration"; itemId: string; blockId?: string; scope?: PlannerOperationScope; duration: PlannerDurationEstimate; reduction?: PlannerUncertaintyPolicy["reduction"]; target?: PlannerOperationTarget }
   | { kind: "protect_interval"; date: string; start: string; end: string; title?: string }
   | { kind: "occupy_interval"; draft: PlannerDraft }
   | { kind: "set_sleep_boundary"; boundary: "bedtime" | "wake"; date: string; time: string }
@@ -524,6 +556,12 @@ export type PlannerProposalChange =
     }
   | {
       id: string;
+      kind: "update_block";
+      block: PlannerBlock;
+      reason: string;
+    }
+  | {
+      id: string;
       kind: "move_block";
       blockId: string;
       title: string;
@@ -564,8 +602,32 @@ export type PlannerConflict = {
 export type PlannerUnplaced = {
   itemId: string;
   title: string;
+  requestedMinutes?: number;
+  placedMinutes?: number;
   remainingMinutes: number;
   reason: string;
+  reasonCode?: "reserve" | "transition" | "sleep" | "day_bounds" | "fixed_event" | "window";
+  blocking?: boolean;
+};
+
+export type PlannerCalibrationProgress = {
+  itemId: string;
+  targetMinutes: number;
+  completedMinutes: number;
+  plannedMinutes: number;
+  remainingMinutes: number;
+  complete: boolean;
+};
+
+export type PlannerItemPlanningState = {
+  itemId: string;
+  requestedMinutes: number;
+  plannedMinutes: number;
+  completedMinutes: number;
+  remainingMinutes: number;
+  state: "planned" | "partial" | "queued" | "complete";
+  reason?: string;
+  reasonCode?: PlannerUnplaced["reasonCode"];
 };
 
 export type PlannerDeadlineRisk = "on_track" | "tight" | "at_risk" | "impossible";
@@ -672,6 +734,8 @@ export type PlannerBootstrap = {
   sleepEvents: PlannerSleepEvent[];
   sleepBlocks: PlannerSleepBlock[];
   deferredRemainders: PlannerDeferredRemainder[];
+  calibrationProgress: PlannerCalibrationProgress[];
+  planningStates: PlannerItemPlanningState[];
   latestChangeSetId?: string;
   durationSuggestions?: Array<{
     itemId: string;

@@ -7,8 +7,10 @@ import {
   annotateTentativeBlocks,
   buildPlannerProposal,
   normalizePlannerItem,
+  plannerCalibrationProgress,
   plannerCompletionSuggestion,
   plannerCompletionRangeSuggestion,
+  plannerItemPlanningStates,
   resolvePlannerTargetFinish,
   suggestPlannerMilestones,
 } from "./engine.ts";
@@ -156,8 +158,50 @@ test("splitting never produces a part below minimum", () => {
       ? [(new Date(change.block.endAt).getTime() - new Date(change.block.startAt).getTime()) / 60_000]
       : []
   );
-  assert.ok(durations.length >= 2);
+  assert.ok(durations.length >= 1);
   assert.ok(durations.every((duration) => duration >= 45));
+  assert.equal(durations.reduce((sum, duration) => sum + duration, 0), 150);
+});
+
+test("a three-hour trial uses the largest safe 150 + 30 minute split", () => {
+  const limitedProfile = {
+    ...profile,
+    reserveRatio: 0,
+    defaultBufferMinutes: 15,
+    energyWindows: [],
+    availability: Object.fromEntries(Array.from({ length: 7 }, (_, index) => [
+      String(index + 1),
+      index === 2 ? [{ start: "08:00", end: "12:00" }] : index === 3 ? [{ start: "08:00", end: "09:00" }] : [],
+    ])),
+  };
+  const base = item({ id: "three-hour-trial", estimateMinutes: 180, canSplit: true, minChunkMinutes: 25 });
+  const trial = normalizePlannerItem({
+    ...base,
+    uncertaintyPolicy: {
+      ...base.uncertaintyPolicy,
+      duration: { mode: "unknown", minMinutes: 180, likelyMinutes: 180, maxMinutes: 180, calibrationMinutes: 180, source: "user" },
+    },
+  });
+  const fixed: PlannerBlock = {
+    id: "fixed-after-window",
+    title: "Фиксированное событие",
+    startAt: zonedPlannerDateTimeToUtc("2026-08-19", "11:00", limitedProfile.timezone),
+    endAt: zonedPlannerDateTimeToUtc("2026-08-19", "12:00", limitedProfile.timezone),
+    status: "planned",
+    source: "manual",
+    fixed: true,
+  };
+  const proposal = buildPlannerProposal({
+    profile: limitedProfile,
+    items: [trial],
+    blocks: [fixed],
+    now: new Date("2026-08-19T04:00:00.000Z"),
+  });
+  const durations = proposal.changes.flatMap((change) => change.kind === "add_block" && change.block.itemId === trial.id && !change.block.soft
+    ? [isoDurationMinutes(change.block.startAt, change.block.endAt)]
+    : []).sort((left, right) => right - left);
+  assert.deepEqual(durations, [150, 30]);
+  assert.equal(proposal.unplaced.some((entry) => entry.itemId === trial.id), false);
 });
 
 test("actual duration suggestion starts after three completed samples", () => {
@@ -534,7 +578,9 @@ test("spare-time work keeps its minimum but only uses extra capacity up to its m
   });
   assert.equal(minutesFor(tight, hobby.id), 30);
   assert.equal(minutesFor(tight, ordinary.id), 90);
-  assert.ok(!tight.unplaced.some((entry) => entry.itemId === hobby.id));
+  const tightRemainder = tight.unplaced.find((entry) => entry.itemId === hobby.id);
+  assert.equal(tightRemainder?.remainingMinutes, 30);
+  assert.equal(tightRemainder?.blocking, false);
 
   const roomier = buildPlannerProposal({
     profile: availability("12:30"),
@@ -1453,6 +1499,78 @@ test("constructor changes duration and explicit reduction rules together", () =>
   assert.deepEqual(changed.item.uncertaintyPolicy.reduction, { mode: "to_minimum", minimumMinutes: 45 });
 });
 
+test("an occurrence override updates the exact selected block and rejects mismatched context", () => {
+  const recurring = item({ id: "series-item", kind: "routine", title: "Серия", recurrence: { frequency: "daily" } });
+  const selected: PlannerBlock = {
+    id: "series-2026-08-23",
+    itemId: recurring.id,
+    title: recurring.title,
+    startAt: "2026-08-23T15:45:00.000Z",
+    endAt: "2026-08-23T16:45:00.000Z",
+    status: "planned",
+    source: "auto",
+    fixed: false,
+    occurrenceKey: `${recurring.id}:2026-08-23`,
+  };
+  const similar: PlannerBlock = {
+    ...selected,
+    id: "series-2026-08-25",
+    startAt: "2026-08-25T15:45:00.000Z",
+    endAt: "2026-08-25T16:45:00.000Z",
+    occurrenceKey: `${recurring.id}:2026-08-25`,
+  };
+  const target = { itemId: recurring.id, blockId: selected.id, occurrenceKey: selected.occurrenceKey };
+  const proposal = buildPlannerProposal({
+    profile,
+    items: [recurring],
+    blocks: [selected, similar],
+    now: new Date("2026-08-22T04:00:00.000Z"),
+    operation: {
+      kind: "edit_item",
+      blockId: selected.id,
+      scope: "occurrence",
+      target,
+      draft: { ...recurring, title: "Только 23 августа", notes: "Разовая заметка", priority: "critical" },
+    },
+  });
+  const update = proposal.changes.find((change) => change.kind === "update_block" && change.block.id === selected.id);
+  assert.ok(update?.kind === "update_block");
+  assert.equal(update.block.occurrenceOverride?.title, "Только 23 августа");
+  const applied = applyProposalChanges([recurring], [selected, similar], proposal);
+  assert.equal(applied.blocks.find((block) => block.id === selected.id)?.title, "Только 23 августа");
+  assert.equal(applied.blocks.find((block) => block.id === similar.id)?.title, "Серия");
+  assert.equal(applied.items.find((candidate) => candidate.id === recurring.id)?.title, "Серия");
+
+  assert.throws(() => buildPlannerProposal({
+    profile,
+    items: [recurring],
+    blocks: [selected, similar],
+    now: new Date("2026-08-22T04:00:00.000Z"),
+    operation: {
+      kind: "move_item",
+      blockId: selected.id,
+      scope: "occurrence",
+      placement: { mode: "date", date: "2026-08-24" },
+      target: { itemId: recurring.id, blockId: similar.id, occurrenceKey: similar.occurrenceKey },
+    },
+  }), /не совпадает|устарело/i);
+});
+
+test("future scope starts at the exact selected recurring occurrence", () => {
+  const recurring = item({ id: "future-scope", kind: "routine", recurrence: { frequency: "daily" } });
+  const first: PlannerBlock = { id: "future-first", itemId: recurring.id, title: recurring.title, startAt: "2026-08-23T10:00:00.000Z", endAt: "2026-08-23T11:00:00.000Z", status: "planned", source: "auto", fixed: false, occurrenceKey: `${recurring.id}:2026-08-23` };
+  const selected: PlannerBlock = { ...first, id: "future-selected", startAt: "2026-08-25T10:00:00.000Z", endAt: "2026-08-25T11:00:00.000Z", occurrenceKey: `${recurring.id}:2026-08-25` };
+  const proposal = buildPlannerProposal({
+    profile,
+    items: [recurring],
+    blocks: [first, selected],
+    now: new Date("2026-08-22T04:00:00.000Z"),
+    operation: { kind: "cancel_item", blockId: selected.id, itemId: recurring.id, scope: "future", target: { itemId: recurring.id, blockId: selected.id, occurrenceKey: selected.occurrenceKey } },
+  });
+  assert.equal(proposal.changes.some((change) => change.kind === "update_block_status" && change.blockId === first.id), false);
+  assert.equal(proposal.changes.some((change) => change.kind === "update_block_status" && change.blockId === selected.id && change.status === "cancelled"), true);
+});
+
 test("constructor edits an item through a typed operation", () => {
   const source = item({ id: "edit-typed" });
   const proposal = buildPlannerProposal({
@@ -1596,9 +1714,12 @@ test("range duration plans the likely volume and adds a non-blocking reserve to 
   });
   const proposal = buildPlannerProposal({ profile: { ...profile, reserveRatio: 0 }, items: [creative], blocks: [], now: new Date("2026-08-19T04:00:00.000Z") });
   const added = proposal.changes.flatMap((change) => change.kind === "add_block" ? [change.block] : []);
-  assert.equal(added.filter((block) => !block.soft).reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0), 180);
-  assert.equal(added.filter((block) => block.soft).reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0), 120);
-  assert.ok(added.filter((block) => block.soft).every((block) => block.role === "uncertainty_reserve"));
+  const work = added.filter((block) => !block.soft);
+  const reserves = added.filter((block) => block.soft);
+  assert.equal(work.reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0), 180);
+  assert.equal(reserves.reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0), 120);
+  assert.ok(reserves.every((block) => block.role === "uncertainty_reserve"));
+  assert.equal(reserves[0]?.startAt, [...work].sort((left, right) => right.endAt.localeCompare(left.endAt))[0]?.endAt);
 });
 
 test("a two-to-four-times weekly routine places minimum, likely and optional occurrences once each", () => {
@@ -1644,6 +1765,104 @@ test("unknown recurring duration creates one calibration session and never repea
   assert.ok(!second.changes.some((change) => change.kind === "add_block" && change.block.itemId === unknown.id));
 });
 
+test("calibration progress counts actual completed minutes, ignores missed past blocks and schedules the remainder", () => {
+  const base = item({ id: "cumulative-calibration", estimateMinutes: 180, canSplit: true, minChunkMinutes: 25 });
+  const unknown = normalizePlannerItem({
+    ...base,
+    uncertaintyPolicy: {
+      ...base.uncertaintyPolicy,
+      duration: { mode: "unknown", minMinutes: 180, likelyMinutes: 180, maxMinutes: 180, calibrationMinutes: 180, source: "user" },
+    },
+  });
+  const done: PlannerBlock = {
+    id: "calibration-done",
+    itemId: unknown.id,
+    title: unknown.title,
+    startAt: "2026-08-18T08:00:00.000Z",
+    endAt: "2026-08-18T09:00:00.000Z",
+    actualStartAt: "2026-08-18T08:05:00.000Z",
+    actualEndAt: "2026-08-18T08:50:00.000Z",
+    status: "done",
+    source: "auto",
+    fixed: false,
+    role: "calibration",
+  };
+  const missedPast: PlannerBlock = { ...done, id: "calibration-missed", status: "planned", startAt: "2026-08-19T08:00:00.000Z", endAt: "2026-08-19T09:00:00.000Z", actualStartAt: undefined, actualEndAt: undefined };
+  const skipped: PlannerBlock = { ...done, id: "calibration-skipped", status: "skipped", startAt: "2026-08-20T08:00:00.000Z", endAt: "2026-08-20T08:40:00.000Z", actualStartAt: undefined, actualEndAt: undefined };
+  const future: PlannerBlock = { ...done, id: "calibration-future", status: "planned", startAt: "2026-08-24T08:00:00.000Z", endAt: "2026-08-24T08:30:00.000Z", actualStartAt: undefined, actualEndAt: undefined };
+  const now = new Date("2026-08-23T04:00:00.000Z");
+  const progress = plannerCalibrationProgress([unknown], [done, missedPast, skipped, future], now)[0];
+  assert.deepEqual(progress, { itemId: unknown.id, targetMinutes: 180, completedMinutes: 45, plannedMinutes: 30, remainingMinutes: 105, complete: false });
+  const planning = plannerItemPlanningStates([unknown], [done, missedPast, skipped, future], now)[0];
+  assert.equal(planning.requestedMinutes, 180);
+  assert.equal(planning.remainingMinutes, 105);
+
+  const proposal = buildPlannerProposal({ profile, items: [unknown], blocks: [done, missedPast, skipped, future], now });
+  const added = proposal.changes.flatMap((change) => change.kind === "add_block" && change.block.itemId === unknown.id && !change.block.soft
+    ? [change.block]
+    : []);
+  assert.equal(added.reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0), 105);
+  assert.equal(new Set(added.map((block) => block.id)).size, added.length);
+});
+
+test("an unknown duration is re-estimated only after the full trial was actually completed", () => {
+  const base = item({ id: "estimate-after-trial", estimateMinutes: 180 });
+  const unknown = normalizePlannerItem({
+    ...base,
+    uncertaintyPolicy: {
+      ...base.uncertaintyPolicy,
+      duration: { mode: "unknown", minMinutes: 180, likelyMinutes: 180, maxMinutes: 180, calibrationMinutes: 180, source: "user" },
+    },
+  });
+  const completed = [30, 30, 30, 90].map((minutes, index): PlannerBlock => ({
+    id: `trial-sample-${index}`,
+    itemId: unknown.id,
+    title: unknown.title,
+    startAt: `2026-08-${String(10 + index).padStart(2, "0")}T08:00:00.000Z`,
+    endAt: `2026-08-${String(10 + index).padStart(2, "0")}T09:30:00.000Z`,
+    actualStartAt: `2026-08-${String(10 + index).padStart(2, "0")}T08:00:00.000Z`,
+    actualEndAt: addIsoMinutes(`2026-08-${String(10 + index).padStart(2, "0")}T08:00:00.000Z`, minutes),
+    status: "done",
+    source: "auto",
+    fixed: false,
+    role: "calibration",
+  }));
+  assert.equal(plannerCompletionSuggestion(unknown, completed.slice(0, 3)), null);
+  assert.equal(plannerCompletionRangeSuggestion(unknown, completed.slice(0, 3)), null);
+  assert.equal(plannerCalibrationProgress([unknown], completed)[0].complete, true);
+  assert.equal(plannerCompletionSuggestion(unknown, completed), 30);
+});
+
+test("schedule_item plans only the selected item even when its automatic flag is off", () => {
+  const selected = item({ id: "schedule-selected", autoPlan: false, estimateMinutes: 60 });
+  const other = item({ id: "schedule-other", estimateMinutes: 60 });
+  const proposal = buildPlannerProposal({
+    profile,
+    items: [selected, other],
+    blocks: [],
+    now: new Date("2026-08-19T04:00:00.000Z"),
+    operation: { kind: "schedule_item", target: { itemId: selected.id } },
+  });
+  assert.equal(proposal.changes.some((change) => change.kind === "add_block" && change.block.itemId === selected.id), true);
+  assert.equal(proposal.changes.some((change) => change.kind === "add_block" && change.block.itemId === other.id), false);
+});
+
+test("schedule_item occurrence scope does not fill a similar later occurrence", () => {
+  const recurring = item({ id: "schedule-series", kind: "routine", estimateMinutes: 60, canSplit: true, minChunkMinutes: 15, recurrence: { frequency: "daily", durationMode: "per_occurrence" } });
+  const first: PlannerBlock = { id: "schedule-series-first", itemId: recurring.id, title: recurring.title, startAt: "2026-08-20T08:00:00.000Z", endAt: "2026-08-20T08:30:00.000Z", status: "planned", source: "auto", fixed: false, occurrenceKey: `${recurring.id}:2026-08-20` };
+  const later: PlannerBlock = { ...first, id: "schedule-series-later", startAt: "2026-08-21T08:00:00.000Z", endAt: "2026-08-21T08:30:00.000Z", occurrenceKey: `${recurring.id}:2026-08-21` };
+  const proposal = buildPlannerProposal({
+    profile,
+    items: [recurring],
+    blocks: [first, later],
+    now: new Date("2026-08-19T04:00:00.000Z"),
+    operation: { kind: "schedule_item", scope: "occurrence", target: { itemId: recurring.id, blockId: first.id, occurrenceKey: first.occurrenceKey } },
+  });
+  const added = proposal.changes.flatMap((change) => change.kind === "add_block" && change.block.itemId === recurring.id ? [change.block] : []);
+  assert.ok(added.length > 0);
+  assert.ok(added.every((block) => block.occurrenceKey?.startsWith(first.occurrenceKey!)));
+});
+
 test("lower-priority work inside a higher-priority soft reserve is marked tentative", () => {
   const important = item({ id: "important", commitmentLevel: "must_not_skip", planningRank: 0 });
   const optional = item({ id: "optional", commitmentLevel: "if_time", planningRank: 0 });
@@ -1654,7 +1873,14 @@ test("lower-priority work inside a higher-priority soft reserve is marked tentat
     id: "optional-block", itemId: optional.id, title: optional.title, startAt: "2026-08-19T11:00:00.000Z", endAt: "2026-08-19T12:00:00.000Z",
     status: "planned", source: "auto", fixed: false, role: "work", soft: false,
   }]);
-  assert.equal(annotated.find((block) => block.id === "optional-block")?.tentative, true);
+  const tentative = annotated.find((block) => block.id === "optional-block");
+  assert.equal(tentative?.tentative, true);
+  assert.deepEqual(tentative?.tentativeReason, {
+    reserveBlockId: "reserve",
+    reserveItemId: important.id,
+    reserveTitle: important.title,
+    latestAt: "2026-08-19T12:00:00.000Z",
+  });
 });
 
 test("hard deadline analysis reports separate likely and maximum risks", () => {

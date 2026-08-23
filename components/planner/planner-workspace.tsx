@@ -1,10 +1,9 @@
 "use client";
 
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import {
-  type DragEvent,
   type FormEvent,
-  type KeyboardEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -14,10 +13,9 @@ import {
 
 import LocaleSwitcher from "@/components/locale-switcher";
 import { useI18n } from "@/components/i18n-provider";
-import AutoplannerModal from "@/components/planner/autoplanner-modal";
 import DurationInput from "@/components/planner/duration-input";
-import PlanConstructorModal, { type ConstructorAction } from "@/components/planner/plan-constructor-modal";
-import SleepChangedModal, { type SleepMode } from "@/components/planner/sleep-changed-modal";
+import type { ConstructorAction } from "@/components/planner/plan-constructor-modal";
+import type { SleepMode } from "@/components/planner/sleep-changed-modal";
 import type { Locale } from "@/lib/i18n";
 import type { PlannerTravelEstimateResult } from "@/lib/planner/commitments";
 import { availabilityFromSleepSchedule, buildPlannerSleepBlocks, createPlannerSleepEvent, fixedScheduleView } from "@/lib/planner/sleep";
@@ -39,6 +37,7 @@ import {
   type PlannerItem,
   type PlannerItemKind,
   type PlannerMissedOccurrencePolicy,
+  type PlannerOperationTarget,
   type PlannerPriority,
   type PlannerProfile,
   type PlannerProposal,
@@ -62,8 +61,13 @@ import {
 } from "@/lib/planner/time";
 import styles from "./planner-workspace.module.css";
 
+const AutoplannerModal = dynamic(() => import("@/components/planner/autoplanner-modal"));
+const ItemDetailsModal = dynamic(() => import("@/components/planner/item-details-modal"));
+const PlanConstructorModal = dynamic(() => import("@/components/planner/plan-constructor-modal"));
+const SleepChangedModal = dynamic(() => import("@/components/planner/sleep-changed-modal"));
+
 type PlannerView = "day" | "week" | "month" | "agenda";
-type Modal = "constructor" | "item" | "proposal" | "settings" | "stats" | "import" | "assistant" | "sleep" | "missed" | "remainder" | "extension" | null;
+type Modal = "constructor" | "details" | "item" | "proposal" | "settings" | "stats" | "import" | "assistant" | "sleep" | "missed" | "remainder" | "extension" | null;
 type CalendarBlock = PlannerBlock | PlannerSleepBlock;
 
 function isSleepBlock(block: CalendarBlock): block is PlannerSleepBlock {
@@ -72,6 +76,7 @@ function isSleepBlock(block: CalendarBlock): block is PlannerSleepBlock {
 
 function actionForOperation(kind: PlannerConstructorOperation["kind"]): ConstructorAction {
   return kind === "add_item" ? "add"
+    : kind === "schedule_item" ? "schedule"
     : kind === "edit_item" ? "edit"
       : kind === "bulk_update_items" ? "priorities"
         : kind === "move_item" ? "move"
@@ -563,6 +568,8 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
   const [quickTrigger, setQuickTrigger] = useState<PlannerProposal["trigger"]>("quick_add");
   const [constructorAction, setConstructorAction] = useState<ConstructorAction | undefined>();
   const [constructorBlockId, setConstructorBlockId] = useState<string | undefined>();
+  const [constructorLocalTarget, setConstructorLocalTarget] = useState<PlannerOperationTarget | undefined>();
+  const [detailsBlockId, setDetailsBlockId] = useState<string | undefined>();
   const [itemForm, setItemForm] = useState(() => defaultItemForm(selectedDate));
   const [proposal, setProposal] = useState<PlannerProposal | null>(null);
   const [missedBlock, setMissedBlock] = useState<PlannerBlock | null>(null);
@@ -698,7 +705,9 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
   const activeBlocks = useMemo(() => blocks.filter((block) => !block.soft && !["cancelled", "skipped"].includes(block.status)), [blocks]);
   const actionableBlocks = useMemo(() => activeBlocks.filter((block) => block.status === "planned" || block.status === "in_progress"), [activeBlocks]);
   const futureItemIds = useMemo(() => new Set(actionableBlocks.filter((block) => new Date(block.endAt) > now).map((block) => block.itemId)), [actionableBlocks, now]);
-  const inbox = useMemo(() => items.filter((item) => item.status === "active" && item.kind !== "fixed_event" && !futureItemIds.has(item.id)), [futureItemIds, items]);
+  const planningStateByItem = useMemo(() => new Map((data?.planningStates ?? []).map((state) => [state.itemId, state])), [data?.planningStates]);
+  const inbox = useMemo(() => items.filter((item) => item.status === "active" && item.kind !== "fixed_event"
+    && (!futureItemIds.has(item.id) || (planningStateByItem.get(item.id)?.remainingMinutes ?? 0) > 0)), [futureItemIds, items, planningStateByItem]);
   const currentBlock = useMemo(() => actionableBlocks.find((block) => block.status === "in_progress")
     ?? actionableBlocks.find((block) => new Date(block.startAt) <= now && new Date(block.endAt) > now)
     ?? null, [actionableBlocks, now]);
@@ -710,6 +719,16 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
     return Math.max(0, (now.getTime() - start) / duration);
   }, [currentBlock, now]);
   const nextBlock = useMemo(() => actionableBlocks.filter((block) => block.status === "planned" && new Date(block.startAt) > now).sort((a, b) => a.startAt.localeCompare(b.startAt))[0] ?? null, [actionableBlocks, now]);
+  const detailsBlock = detailsBlockId ? blocks.find((block) => block.id === detailsBlockId) : undefined;
+  const detailsItem = detailsBlock?.itemId ? items.find((item) => item.id === detailsBlock.itemId) : undefined;
+  const rawFreeMinutes = nextBlock ? Math.max(0, Math.floor((new Date(nextBlock.startAt).getTime() - now.getTime()) / 60_000)) : 0;
+  const transitionMinutes = nextBlock ? Math.min(rawFreeMinutes, profile.defaultBufferMinutes) : 0;
+  const afterTransitionMinutes = Math.max(0, rawFreeMinutes - transitionMinutes);
+  const protectedReserveMinutes = Math.round(afterTransitionMinutes * profile.reserveRatio);
+  const safeFreeMinutes = Math.max(0, afterTransitionMinutes - protectedReserveMinutes);
+  const fittingInboxItem = inbox.find((item) => item.canSplit
+    ? item.minChunkMinutes <= safeFreeMinutes
+    : item.uncertaintyPolicy.duration.likelyMinutes <= safeFreeMinutes);
   const todayHealth = useMemo(() => {
     const date = todayIn(profile.timezone);
     const planned = activeBlocks.filter((block) => localDate(block, profile.timezone) === date).reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0);
@@ -798,13 +817,19 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
     }
     let succeeded = false;
     await run(async () => {
-      await api(`/api/planner/blocks/${encodeURIComponent(block.id)}/action`, { method: "POST", body: JSON.stringify({ action, minutes, expectedRevision: profile.revision }) });
+      const result = await api<{ block: PlannerBlock; revision: number }>(`/api/planner/blocks/${encodeURIComponent(block.id)}/action`, { method: "POST", body: JSON.stringify({ action, minutes, expectedRevision: profile.revision }) });
       await load(true);
       succeeded = true;
       if (action === "done") {
         if (new Date(block.endAt).getTime() > Date.now()) setReplanSuggested(true);
         const completedItem = block.itemId ? items.find((item) => item.id === block.itemId) : undefined;
-        if (completedItem?.uncertaintyPolicy.duration.mode === "unknown") setCalibrationItemId(completedItem.id);
+        if (completedItem?.uncertaintyPolicy.duration.mode === "unknown") {
+          const target = completedItem.uncertaintyPolicy.duration.calibrationMinutes ?? completedItem.estimateMinutes;
+          const completedMinutes = blocks.filter((candidate) => candidate.itemId === completedItem.id && candidate.role === "calibration" && candidate.status === "done" && candidate.id !== block.id)
+            .reduce((sum, candidate) => sum + isoDurationMinutes(candidate.actualStartAt ?? candidate.startAt, candidate.actualEndAt ?? candidate.endAt), 0)
+            + isoDurationMinutes(result.block.actualStartAt ?? result.block.startAt, result.block.actualEndAt ?? result.block.endAt);
+          if (completedMinutes >= target) setCalibrationItemId(completedItem.id);
+        }
       }
     });
     return succeeded;
@@ -817,13 +842,6 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
       return;
     }
     await run(() => createProposal({ trigger: "plans_changed", blockExtension: { blockId: block.id, minutes } }));
-  }
-
-  async function moveBlock(block: PlannerBlock, startAt: string, endAt: string) {
-    await run(() => createProposal({
-      operation: { kind: "change_block_time", blockId: block.id, startAt, endAt },
-      trigger: "constructor",
-    }));
   }
 
   async function undo() {
@@ -923,10 +941,20 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
     }, locale === "ru" ? "Оценка сна сохранена." : "Sleep rating saved.");
   }
 
-  function openConstructor(action?: ConstructorAction, blockId?: string) {
+  function openConstructor(action?: ConstructorAction, blockId?: string, localTarget?: PlannerOperationTarget) {
     setConstructorAction(action);
     setConstructorBlockId(blockId);
+    setConstructorLocalTarget(localTarget);
     setModal("constructor");
+  }
+
+  function openBlockDetails(block: PlannerBlock) {
+    setDetailsBlockId(block.id);
+    setModal("details");
+  }
+
+  function openItemConstructor(item: PlannerItem, action?: ConstructorAction) {
+    openConstructor(action, undefined, { itemId: item.id });
   }
 
   function openItem(draft?: PlannerDraft) {
@@ -1014,8 +1042,8 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
             {inbox.length === 0 && activeDeferredRemainders.length === 0 ? <p className={styles.emptyState}>{copy.noInbox}</p> : inbox.map((item) => (
               <article key={item.id} className={styles.inboxItem}>
                 <span className={`${styles.priorityDot} ${styles[item.priority]}`} />
-                <div><strong>{item.title}</strong><small>{kindLabel[locale][item.kind]} · {plannerItemDurationLabel(item, locale)}</small>{item.unplacedReason && <small className={styles.unplacedReason}>{locale === "ru" ? item.unplacedReason : "No safe slot matches availability, buffers and reserve."}</small>}</div>
-                <button onClick={() => void run(() => createProposal({ trigger: "autoplan" }))} aria-label={`Plan ${item.title}`}>→</button>
+                <div><strong>{item.title}</strong><small>{kindLabel[locale][item.kind]} · {plannerItemDurationLabel(item, locale)}</small>{planningStateByItem.get(item.id) && <small>{locale === "ru" ? "Запрошено" : "Requested"}: {formatDuration(planningStateByItem.get(item.id)!.requestedMinutes, locale)} · {locale === "ru" ? "стоит" : "planned"}: {formatDuration(planningStateByItem.get(item.id)!.plannedMinutes, locale)} · {locale === "ru" ? "осталось" : "remaining"}: {formatDuration(planningStateByItem.get(item.id)!.remainingMinutes, locale)}</small>}{item.unplacedReason && <small className={styles.unplacedReason}>{locale === "ru" ? item.unplacedReason : "No safe slot matches availability, buffers and reserve."}</small>}</div>
+                <button onClick={() => openItemConstructor(item, "schedule")} aria-label={locale === "ru" ? `Найти время для ${item.title}` : `Find time for ${item.title}`}>→</button>
               </article>
             ))}
           </div>
@@ -1037,12 +1065,18 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
               ))}
             </div>
           </div>
+          <div className={styles.calendarLegend} aria-label={locale === "ru" ? "Обозначения календаря" : "Calendar legend"}>
+            <span><i className={styles.legendFlexible} />{locale === "ru" ? "Гибкое дело" : "Flexible item"}</span>
+            <span><i className={styles.legendFixed} />{locale === "ru" ? "Фиксированное" : "Fixed"}</span>
+            <span><i className={styles.legendReserve} />{locale === "ru" ? "Запас времени" : "Time reserve"}</span>
+            <span><i className={styles.legendTentative} />{locale === "ru" ? "Может сдвинуться" : "May move"}</span>
+          </div>
 
           {(view === "day" || view === "week") && (
             <TimeGrid
               dates={visibleDates} blocks={blocks} sleepBlocks={sleepBlocks} profile={profile} locale={locale}
               selectedDate={selectedDate} setSelectedDate={setSelectedDate}
-              onMove={moveBlock} onConstruct={(block) => openConstructor("time", block.id)} busy={busy}
+              onSelect={openBlockDetails}
             />
           )}
           {view === "month" && (
@@ -1050,7 +1084,7 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
               onSelect={(date) => { setSelectedDate(date); setView("day"); }} />
           )}
           {view === "agenda" && (
-            <Agenda blocks={blocks} sleepBlocks={sleepBlocks} dates={visibleDates} profile={profile} locale={locale} onAction={blockAction} onConstruct={(block) => openConstructor("cancel", block.id)} />
+            <Agenda blocks={blocks} sleepBlocks={sleepBlocks} dates={visibleDates} profile={profile} locale={locale} onSelect={openBlockDetails} />
           )}
         </section>
 
@@ -1075,7 +1109,7 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
                 <button onClick={() => openConstructor("cancel", currentBlock.id)}>{locale === "ru" ? "Отменить" : "Cancel"}</button>
               </div>
             </article>
-          ) : <div className={styles.freeCard}><strong>{copy.free}</strong><p>{nextBlock ? formatDuration(Math.max(0, Math.floor((new Date(nextBlock.startAt).getTime() - now.getTime()) / 60_000)), locale) : copy.empty}</p></div>}
+          ) : <div className={styles.freeCard}><strong>{copy.free}</strong><p>{nextBlock ? formatDuration(rawFreeMinutes, locale) : copy.empty}</p>{nextBlock && <><small>{locale === "ru" ? `После перехода доступно ${formatDuration(afterTransitionMinutes, locale)}; резерв защищает ${formatDuration(protectedReserveMinutes, locale)}; полезная ёмкость — ${formatDuration(safeFreeMinutes, locale)}.` : `${formatDuration(afterTransitionMinutes, locale)} remains after transition; ${formatDuration(protectedReserveMinutes, locale)} is protected reserve; usable capacity is ${formatDuration(safeFreeMinutes, locale)}.`}</small>{fittingInboxItem ? <small>{locale === "ru" ? `Окно может занять «${fittingInboxItem.title}».` : `“${fittingInboxItem.title}” can use this window.`}</small> : <small>{locale === "ru" ? "В очереди нет дела, которое безопасно поместится целиком или минимальной частью." : "No queued item safely fits as a whole or minimum chunk."}</small>}</>}</div>}
 
           <div className={styles.nextSection}>
             <h3>{copy.next}</h3>
@@ -1119,7 +1153,28 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
           await load(true);
         })}
       />}
+      {modal === "details" && detailsBlock && <ItemDetailsModal
+        key={detailsBlock.id}
+        block={detailsBlock}
+        item={detailsItem}
+        blocks={blocks}
+        profile={profile}
+        planningState={data.planningStates?.find((entry) => entry.itemId === detailsBlock.itemId)}
+        calibration={data.calibrationProgress?.find((entry) => entry.itemId === detailsBlock.itemId)}
+        now={now}
+        locale={locale}
+        onClose={() => setModal(null)}
+        onConstruct={() => openConstructor(undefined, detailsBlock.soft
+          ? blocks.find((candidate) => candidate.itemId === detailsBlock.itemId && !candidate.soft && candidate.status === "planned" && new Date(candidate.endAt) > now)?.id
+          : detailsBlock.id, {
+          itemId: detailsBlock.itemId!,
+          blockId: detailsBlock.soft ? undefined : detailsBlock.id,
+          occurrenceKey: detailsBlock.soft ? undefined : detailsBlock.occurrenceKey,
+        })}
+      />}
+      {modal === "details" && detailsBlockId && !detailsBlock && <div className={styles.modalBackdrop} role="presentation"><section className={`${styles.modal} ${styles.itemDetailsModal}`} role="dialog" aria-modal="true" aria-label={locale === "ru" ? "Устаревшее выполнение" : "Stale occurrence"}><header><div><h2>{locale === "ru" ? "Выполнение изменилось" : "Occurrence changed"}</h2><small>{locale === "ru" ? "Нужны свежие данные" : "Fresh data required"}</small></div></header><div className={styles.itemDetailsBody}><p className={styles.inlineError}>{locale === "ru" ? "Выбранный блок исчез или был изменён в другой версии плана. Ближайшее дело не подставлено — закройте карточку и выберите выполнение снова." : "The selected block disappeared or changed in another plan revision. No nearest item was substituted; close this card and select the occurrence again."}</p></div><div className={styles.modalActions}><button type="button" onClick={() => { setModal(null); setDetailsBlockId(undefined); }}>{locale === "ru" ? "Закрыть" : "Close"}</button></div></section></div>}
       {modal === "constructor" && <PlanConstructorModal
+        key={`${constructorLocalTarget?.itemId ?? "plan"}:${constructorBlockId ?? "none"}:${constructorAction ?? "catalog"}`}
         profile={profile}
         items={items}
         blocks={blocks}
@@ -1130,6 +1185,7 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
         busy={busy}
         initialAction={constructorAction}
         initialBlockId={constructorBlockId}
+        localTarget={constructorLocalTarget}
         onClose={() => setModal(null)}
         onReview={(operation) => run(() => createProposal({ operation, trigger: "constructor" }))}
       />}
@@ -1225,11 +1281,10 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
   );
 }
 
-function TimeGrid({ dates, blocks, sleepBlocks, profile, locale, selectedDate, setSelectedDate, onMove, onConstruct, busy }: {
+function TimeGrid({ dates, blocks, sleepBlocks, profile, locale, selectedDate, setSelectedDate, onSelect }: {
   dates: string[]; blocks: PlannerBlock[]; sleepBlocks: PlannerSleepBlock[]; profile: PlannerProfile; locale: Locale;
   selectedDate: string; setSelectedDate: (date: string) => void;
-  onMove: (block: PlannerBlock, startAt: string, endAt: string) => Promise<void>; busy: boolean;
-  onConstruct: (block: PlannerBlock) => void;
+  onSelect: (block: PlannerBlock) => void;
 }) {
   const calendarBlocks: CalendarBlock[] = [...blocks, ...splitSleepBlocksByDate(sleepBlocks, dates, profile.timezone)];
   const relevantWindows = dates.flatMap((date) => profile.availabilityOverrides[date] ?? profile.availability[String(plannerWeekday(date))] ?? []);
@@ -1250,28 +1305,6 @@ function TimeGrid({ dates, blocks, sleepBlocks, profile, locale, selectedDate, s
   const dayEnd = Math.min(1440, Math.ceil(((ends.length ? Math.max(...ends) : 22 * 60) + 60) / 60) * 60);
   const height = Math.max(720, dayEnd - dayStart);
   const hours = Array.from({ length: Math.floor((dayEnd - dayStart) / 60) + 1 }, (_, index) => dayStart / 60 + index);
-  const [dragId, setDragId] = useState<string | null>(null);
-
-  async function drop(event: DragEvent<HTMLDivElement>, date: string) {
-    event.preventDefault();
-    const block = blocks.find((candidate) => candidate.id === dragId);
-    setDragId(null);
-    if (!block) return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    const ratio = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
-    const minute = Math.min(dayEnd - 15, Math.round((dayStart + ratio * (dayEnd - dayStart)) / 15) * 15);
-    const startAt = zonedPlannerDateTimeToUtc(date, `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`, profile.timezone);
-    await onMove(block, startAt, addIsoMinutes(startAt, isoDurationMinutes(block.startAt, block.endAt)));
-  }
-
-  function keyboard(event: KeyboardEvent<HTMLElement>, block: PlannerBlock) {
-    if (!event.altKey) return;
-    const delta = event.key === "ArrowUp" ? -15 : event.key === "ArrowDown" ? 15 : 0;
-    if (!delta) return;
-    event.preventDefault();
-    void onMove(block, addIsoMinutes(block.startAt, delta), addIsoMinutes(block.endAt, delta));
-  }
-
   return (
     <div className={styles.timeGridShell}>
       <div className={styles.dayHeaders} style={{ gridTemplateColumns: `4.2rem repeat(${dates.length}, minmax(8rem, 1fr))` }}>
@@ -1280,7 +1313,7 @@ function TimeGrid({ dates, blocks, sleepBlocks, profile, locale, selectedDate, s
       <div className={styles.timeGrid} style={{ gridTemplateColumns: `4.2rem repeat(${dates.length}, minmax(8rem, 1fr))`, minWidth: `${4.2 + dates.length * 8}rem` }}>
         <div className={styles.timeAxis} style={{ height }}>{hours.map((hour) => <span key={hour} style={{ top: `${((hour * 60 - dayStart) / (dayEnd - dayStart)) * 100}%` }}>{String(hour).padStart(2, "0")}:00</span>)}</div>
         {dates.map((date) => (
-          <div key={date} className={styles.dayColumn} style={{ height }} onDragOver={(event) => event.preventDefault()} onDrop={(event) => void drop(event, date)}>
+          <div key={date} className={styles.dayColumn} style={{ height }}>
             {hours.map((hour) => <i key={hour} style={{ top: `${((hour * 60 - dayStart) / (dayEnd - dayStart)) * 100}%` }} />)}
             {calendarBlocks.filter((block) => localDate(block, profile.timezone) === date && (isSleepBlock(block) || !["cancelled", "skipped"].includes(block.status))).map((block) => {
               const sleep = isSleepBlock(block);
@@ -1288,18 +1321,11 @@ function TimeGrid({ dates, blocks, sleepBlocks, profile, locale, selectedDate, s
               const duration = isoDurationMinutes(block.startAt, block.endAt);
               const top = ((start - dayStart) / (dayEnd - dayStart)) * 100;
               const size = Math.max(2.3, (duration / (dayEnd - dayStart)) * 100);
-              return (
-                <article key={block.id} draggable={!sleep && !block.soft && !busy && block.status === "planned"} onDragStart={() => { if (!sleep && !block.soft) setDragId(block.id); }} onKeyDown={(event) => { if (!sleep && !block.soft) keyboard(event, block); }} tabIndex={0}
-                  className={`${styles.calendarBlock} ${sleep ? styles.sleepBlock : styles[block.fixed ? "fixedBlock" : "flexibleBlock"]} ${sleep && block.tentative ? styles.sleepTentative : ""} ${sleep && block.recoveryNight ? styles.sleepRecovery : ""} ${!sleep && block.soft ? styles.softReserveBlock : ""} ${!sleep && block.tentative ? styles.tentativeWorkBlock : ""} ${!sleep && block.status !== "planned" ? styles[block.status] ?? "" : ""}`} style={{ top: `${top}%`, height: `${size}%` }}>
-                  <strong>{sleep ? "■" : block.soft ? "≈" : block.fixed ? "◆" : "↝"} {formatTimeInTimeZone(new Date(block.startAt), profile.timezone)} · {sleep ? block.tentative ? (locale === "ru" ? "СОН · ПРЕДВАРИТЕЛЬНО" : "SLEEP · TENTATIVE") : block.recoveryNight ? (locale === "ru" ? "СОН · ВОССТАНОВЛЕНИЕ" : "SLEEP · RECOVERY") : (locale === "ru" ? "СОН · ЗАЩИЩЕНО" : "SLEEP · PROTECTED") : block.soft ? `${locale === "ru" ? "МЯГКИЙ РЕЗЕРВ" : "SOFT RESERVE"} · ${block.title}` : block.tentative ? `${locale === "ru" ? "ПРЕДВАРИТЕЛЬНО" : "TENTATIVE"} · ${block.title}` : block.title}</strong>
-                  <small>{formatDuration(duration, locale)}{sleep ? ` · ${locale === "ru" ? "не перемещается" : "locked"}` : block.soft ? ` · ${locale === "ru" ? "не блокирует другие дела" : "does not block other work"}` : ""}</small>
-                  {!sleep && !block.soft && block.status === "planned" && <div className={styles.resizeActions}>
-                    <button onClick={() => void onMove(block, block.startAt, addIsoMinutes(block.endAt, -15))} aria-label={locale === "ru" ? "Уменьшить на 15 минут" : "Shorten 15 minutes"}>−</button>
-                    <button onClick={() => void onMove(block, block.startAt, addIsoMinutes(block.endAt, 15))} aria-label={locale === "ru" ? "Увеличить на 15 минут" : "Extend 15 minutes"}>＋</button>
-                    <button onClick={() => onConstruct(block)} aria-label={locale === "ru" ? "Открыть конструктор для блока" : "Open constructor for block"}>⋯</button>
-                  </div>}
-                </article>
-              );
+              const className = `${styles.calendarBlock} ${sleep ? styles.sleepBlock : styles[block.fixed ? "fixedBlock" : "flexibleBlock"]} ${sleep && block.tentative ? styles.sleepTentative : ""} ${sleep && block.recoveryNight ? styles.sleepRecovery : ""} ${!sleep && block.soft ? styles.softReserveBlock : ""} ${!sleep && block.tentative ? styles.tentativeWorkBlock : ""} ${!sleep && block.status !== "planned" ? styles[block.status] ?? "" : ""}`;
+              const content = <><strong>{sleep ? (block.recoveryNight ? (locale === "ru" ? "Сон · восстановление" : "Sleep · recovery") : (locale === "ru" ? "Сон" : "Sleep")) : block.title}</strong><small>{sleep ? "■" : block.soft ? "≈" : block.fixed ? "◆" : "↝"} {formatTimeInTimeZone(new Date(block.startAt), profile.timezone)} · {formatDuration(duration, locale)}</small>{!sleep && block.soft ? <small>{locale === "ru" ? "Запас до" : "Reserve until"} {formatTimeInTimeZone(new Date(block.endAt), profile.timezone)}</small> : !sleep && block.tentative ? <small>{locale === "ru" ? "Может сдвинуться" : "May move"}</small> : sleep ? <small>{locale === "ru" ? "Защищено" : "Protected"}</small> : null}</>;
+              return sleep
+                ? <article key={block.id} className={className} style={{ top: `${top}%`, height: `${size}%` }}>{content}</article>
+                : <button type="button" key={block.id} className={className} style={{ top: `${top}%`, height: `${size}%` }} onClick={() => onSelect(block)} aria-label={locale === "ru" ? `Открыть сведения: ${block.title}, ${formatTimeInTimeZone(new Date(block.startAt), profile.timezone)}` : `Open details: ${block.title}, ${formatTimeInTimeZone(new Date(block.startAt), profile.timezone)}`}>{content}</button>;
             })}
             {date === todayIn(profile.timezone) && <div className={styles.nowLine} style={{ top: `${((minutesInZone(new Date().toISOString(), profile.timezone) - dayStart) / (dayEnd - dayStart)) * 100}%` }} />}
           </div>
@@ -1322,17 +1348,18 @@ function MonthGrid({ dates, blocks, sleepBlocks, profile, locale, selectedDate, 
   })}</div>;
 }
 
-function Agenda({ blocks, sleepBlocks, dates, profile, locale, onAction, onConstruct }: {
+function Agenda({ blocks, sleepBlocks, dates, profile, locale, onSelect }: {
   blocks: PlannerBlock[]; sleepBlocks: PlannerSleepBlock[]; dates: string[]; profile: PlannerProfile; locale: Locale;
-  onAction: (block: PlannerBlock, action: string, minutes?: number) => Promise<unknown>;
-  onConstruct: (block: PlannerBlock) => void;
+  onSelect: (block: PlannerBlock) => void;
 }) {
   const selected: CalendarBlock[] = [...blocks.filter((block) => dates.includes(localDate(block, profile.timezone)) && block.status !== "cancelled"), ...splitSleepBlocksByDate(sleepBlocks, dates, profile.timezone)].sort((a, b) => a.startAt.localeCompare(b.startAt));
-  return <div className={styles.agenda}>{selected.map((block) => <article key={block.id}>
+  return <div className={styles.agenda}>{selected.map((block) => isSleepBlock(block) ? <article key={block.id}>
     <time>{formatDay(localDate(block, profile.timezone), locale)} · {formatTimeInTimeZone(new Date(block.startAt), profile.timezone)}</time>
-    <div><strong>{isSleepBlock(block) ? (locale === "ru" ? "Сон · защищено" : "Sleep · protected") : block.soft ? `${locale === "ru" ? "Мягкий резерв" : "Soft reserve"} · ${block.title}` : block.tentative ? `${locale === "ru" ? "Предварительно" : "Tentative"} · ${block.title}` : block.title}</strong><small>{formatDuration(isoDurationMinutes(block.startAt, block.endAt), locale)}{isSleepBlock(block) ? "" : block.soft ? ` · ${locale === "ru" ? "не блокирует" : "non-blocking"}` : ` · ${blockStatusLabel[locale][block.status]}`}</small></div>
-    {!isSleepBlock(block) && !block.soft && block.status === "planned" && <div><button onClick={() => void onAction(block, "start")}>▶</button><button onClick={() => void onAction(block, "done")}>✓</button><button onClick={() => onConstruct(block)}>⋯</button></div>}
-  </article>)}</div>;
+    <div><strong>{locale === "ru" ? "Сон · защищено" : "Sleep · protected"}</strong><small>{formatDuration(isoDurationMinutes(block.startAt, block.endAt), locale)}</small></div>
+  </article> : <button type="button" key={block.id} className={styles.agendaItemButton} onClick={() => onSelect(block)}>
+    <time>{formatDay(localDate(block, profile.timezone), locale)} · {formatTimeInTimeZone(new Date(block.startAt), profile.timezone)}</time>
+    <div><strong>{block.soft ? `${block.title} · ${locale === "ru" ? "запас" : "reserve"}` : block.title}</strong><small>{formatDuration(isoDurationMinutes(block.startAt, block.endAt), locale)}{block.tentative ? ` · ${locale === "ru" ? "может сдвинуться" : "may move"}` : block.soft ? ` · ${locale === "ru" ? "не блокирует" : "non-blocking"}` : ` · ${blockStatusLabel[locale][block.status]}`}</small></div>
+  </button>)}</div>;
 }
 
 function BlockSummary({ block, profile, locale }: { block: PlannerBlock; profile: PlannerProfile; locale: Locale }) {
@@ -1536,6 +1563,7 @@ function proposalChangeReason(change: PlannerProposal["changes"][number], locale
   if (change.kind === "update_item") return change.item.unplacedReason
     ? "The reason was saved with the item in the inbox."
     : "A safe slot was found and the previous inbox reason was cleared.";
+  if (change.kind === "update_block") return "Only the selected occurrence was updated; the series rule stays unchanged.";
   if (change.kind === "move_block") return "Flexible work was moved around the new fixed commitment.";
   if (change.kind === "remove_block") return "No safe replacement slot was found, so the item returns to the inbox.";
   if ("block" in change) return change.block.fixed
@@ -1549,7 +1577,7 @@ function proposalChangeTitle(change: PlannerProposal["changes"][number], locale:
   if (change.kind === "update_profile") return locale === "ru" ? "Настройки плана" : "Planner settings";
   if (change.kind === "update_block_status") return change.title;
   if (change.kind === "upsert_sleep_event") return locale === "ru" ? `Сон перед ${change.event.wakeDate}` : `Sleep before ${change.event.wakeDate}`;
-  if (change.kind === "add_block") return change.block.title;
+  if (change.kind === "add_block" || change.kind === "update_block") return change.block.title;
   if (change.kind === "move_block" || change.kind === "remove_block") return change.title;
   return "item" in change ? change.item.title : (locale === "ru" ? "Изменение плана" : "Plan change");
 }
@@ -1596,7 +1624,7 @@ function ProposalModal({ proposal, profile, locale, busy, onClose, onApply, onEd
   const activationDate = formatDateInTimeZone(activation, profile.timezone);
   const compactEnd = addPlannerDays(activationDate, 1);
   const changeDate = (change: PlannerProposal["changes"][number]): string | undefined => {
-    const at = change.kind === "add_block" ? change.block.startAt
+    const at = change.kind === "add_block" || change.kind === "update_block" ? change.block.startAt
       : change.kind === "move_block" ? change.toStartAt
         : change.kind === "upsert_sleep_event" ? change.event.actualStartAt ?? change.event.plannedStartAt
           : undefined;
@@ -1675,9 +1703,9 @@ function ProposalModal({ proposal, profile, locale, busy, onClose, onApply, onEd
       <button type="button" className={styles.technicalToggle} onClick={() => setShowTechnical((current) => !current)}>{showTechnical ? (locale === "ru" ? "Скрыть технические подробности" : "Hide technical details") : (locale === "ru" ? `Технические подробности (${proposal.changes.length})` : `Technical details (${proposal.changes.length})`)}</button>
       {showTechnical && <section><h3>{compact ? (locale === "ru" ? "Изменения сегодня и завтра" : "Changes today and tomorrow") : (locale === "ru" ? "Все внутренние изменения" : "All internal changes")}</h3><div className={styles.changeList}>{groupedChanges.map(({ change, count }) => <article key={change.id}>
         <span>{change.kind === "add_block" ? "+" : change.kind === "move_block" ? "→" : change.kind === "remove_block" ? "−" : change.kind === "upsert_sleep_event" || change.kind === "update_block_status" ? "■" : "•"}</span>
-        <div><strong>{proposalChangeTitle(change, locale)}{count > 1 ? ` ×${count}` : ""}</strong><p>{proposalChangeReason(change, locale)}</p>{change.kind === "add_block" && <small>{formatDay(localDate(change.block, profile.timezone), locale)} · {formatTimeInTimeZone(new Date(change.block.startAt), profile.timezone)}–{formatTimeInTimeZone(new Date(change.block.endAt), profile.timezone)}</small>}{change.kind === "move_block" && <small>{formatTimeInTimeZone(new Date(change.fromStartAt), profile.timezone)} → {formatDay(formatDateInTimeZone(new Date(change.toStartAt), profile.timezone), locale)} {formatTimeInTimeZone(new Date(change.toStartAt), profile.timezone)}</small>}{change.kind === "upsert_sleep_event" && <small>{change.event.plannedStartAt && change.event.plannedEndAt ? `${locale === "ru" ? "запланировано" : "planned"} · ${formatTimeInTimeZone(new Date(change.event.plannedStartAt), profile.timezone)}–${formatTimeInTimeZone(new Date(change.event.plannedEndAt), profile.timezone)} · ${formatDuration(change.event.plannedDurationMinutes ?? isoDurationMinutes(change.event.plannedStartAt, change.event.plannedEndAt), locale)}` : change.event.actualStartAt && (change.event.actualEndAt ?? change.event.projectedEndAt) ? `${change.event.state === "tentative" ? (locale === "ru" ? "предварительно · " : "tentative · ") : ""}${formatTimeInTimeZone(new Date(change.event.actualStartAt), profile.timezone)}–${formatTimeInTimeZone(new Date(change.event.actualEndAt ?? change.event.projectedEndAt!), profile.timezone)}` : (locale === "ru" ? "Время неизвестно: расписание пока не перестраивается" : "Time unknown: schedule is not rebuilt yet")}</small>}</div>
+        <div><strong>{proposalChangeTitle(change, locale)}{count > 1 ? ` ×${count}` : ""}</strong><p>{proposalChangeReason(change, locale)}</p>{(change.kind === "add_block" || change.kind === "update_block") && <small>{formatDay(localDate(change.block, profile.timezone), locale)} · {formatTimeInTimeZone(new Date(change.block.startAt), profile.timezone)}–{formatTimeInTimeZone(new Date(change.block.endAt), profile.timezone)}</small>}{change.kind === "move_block" && <small>{formatTimeInTimeZone(new Date(change.fromStartAt), profile.timezone)} → {formatDay(formatDateInTimeZone(new Date(change.toStartAt), profile.timezone), locale)} {formatTimeInTimeZone(new Date(change.toStartAt), profile.timezone)}</small>}{change.kind === "upsert_sleep_event" && <small>{change.event.plannedStartAt && change.event.plannedEndAt ? `${locale === "ru" ? "запланировано" : "planned"} · ${formatTimeInTimeZone(new Date(change.event.plannedStartAt), profile.timezone)}–${formatTimeInTimeZone(new Date(change.event.plannedEndAt), profile.timezone)} · ${formatDuration(change.event.plannedDurationMinutes ?? isoDurationMinutes(change.event.plannedStartAt, change.event.plannedEndAt), locale)}` : change.event.actualStartAt && (change.event.actualEndAt ?? change.event.projectedEndAt) ? `${change.event.state === "tentative" ? (locale === "ru" ? "предварительно · " : "tentative · ") : ""}${formatTimeInTimeZone(new Date(change.event.actualStartAt), profile.timezone)}–${formatTimeInTimeZone(new Date(change.event.actualEndAt ?? change.event.projectedEndAt!), profile.timezone)}` : (locale === "ru" ? "Время неизвестно: расписание пока не перестраивается" : "Time unknown: schedule is not rebuilt yet")}</small>}</div>
       </article>)}</div>{compact && (hiddenChanges > 0 || showAllChanges) && <button type="button" onClick={() => setShowAllChanges((current) => !current)}>{showAllChanges ? (locale === "ru" ? "Скрыть дальние изменения" : "Hide later changes") : (locale === "ru" ? `Показать ещё ${hiddenChanges}` : `Show ${hiddenChanges} later changes`)}</button>}</section>}
-      {proposal.unplaced.length > 0 && <section className={styles.unplaced}><h3>{locale === "ru" ? "Останется в очереди" : "Will stay in inbox"}</h3>{proposal.unplaced.map((item, index) => <article key={`${item.itemId}-${item.remainingMinutes}-${index}`}><strong>{item.title} · {formatDuration(item.remainingMinutes, locale)}</strong><p>{locale === "ru" ? item.reason : "No free slot satisfies availability, buffers and the protected reserve. The duration was not shortened."}</p></article>)}</section>}
+      {proposal.unplaced.length > 0 && <section className={styles.unplaced}><h3>{locale === "ru" ? "Останется в очереди" : "Will stay in inbox"}</h3>{proposal.unplaced.map((item, index) => <article key={`${item.itemId}-${item.remainingMinutes}-${index}`}><strong>{item.title} · {locale === "ru" ? "запрошено" : "requested"} {formatDuration(item.requestedMinutes ?? item.remainingMinutes, locale)} · {locale === "ru" ? "размещено" : "placed"} {formatDuration(item.placedMinutes ?? 0, locale)} · {locale === "ru" ? "осталось" : "remaining"} {formatDuration(item.remainingMinutes, locale)}</strong><p>{locale === "ru" ? item.reason : "No free slot satisfies availability, buffers and the protected reserve. The duration was not shortened."}</p></article>)}</section>}
       {proposal.recoveryAdvice && <section className={styles.recoveryPanel}><h3>{locale === "ru" ? "Восстановление" : "Recovery"}</h3><p>{locale === "ru" ? `Недосып относительно цели: ${formatDuration(proposal.recoveryAdvice.deficitMinutes, locale)}. Дополнительное время распределяется максимум на ${proposal.recoveryAdvice.recoveryNights} ночи.` : `Sleep below target: ${formatDuration(proposal.recoveryAdvice.deficitMinutes, locale)}. Extra sleep opportunity is spread across up to ${proposal.recoveryAdvice.recoveryNights} nights.`}</p>{proposal.recoveryAdvice.nap ? <article><strong>{locale === "ru" ? "Можно добавить короткий сон" : "A short nap is available"}</strong><small>{formatDay(formatDateInTimeZone(new Date(proposal.recoveryAdvice.nap.startAt), profile.timezone), locale)} · {formatTimeInTimeZone(new Date(proposal.recoveryAdvice.nap.startAt), profile.timezone)}–{formatTimeInTimeZone(new Date(proposal.recoveryAdvice.nap.endAt), profile.timezone)}</small><p>{locale === "ru" ? proposal.recoveryAdvice.nap.reason : "The slot ends before 15:00 and stays at least six hours away from night sleep."}</p><button type="button" onClick={() => void onAddRecoveryNap(proposal.recoveryAdvice!.nap!)}>{locale === "ru" ? "Добавить в этот план" : "Add to this plan"}</button></article> : <p>{locale === "ru" ? "Безопасного окна для короткого дневного сна сейчас нет — оно не будет добавлено автоматически." : "There is no suitable short-nap window, so none will be added automatically."}</p>}</section>}
       <div className={styles.modalActions}><button onClick={onClose}>{focusedAction ? (locale === "ru" ? "Оставить как есть" : "Keep as is") : (locale === "ru" ? "Не применять" : "Cancel")}</button><button className={styles.primaryButton} disabled={busy || proposal.conflicts.length > 0 || Boolean(proposal.decisionGroups?.some((group) => group.blocking))} onClick={() => void onApply()}>{transferImpact ? (locale === "ru" ? "Подтвердить перенос" : "Confirm transfer") : extensionInput ? (locale === "ru" ? "Подтвердить продление" : "Confirm extension") : (locale === "ru" ? "Применить изменения" : "Apply changes")}</button></div>
     </div>

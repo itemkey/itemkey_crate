@@ -25,6 +25,12 @@ function scope(value: unknown): value is "occurrence" | "future" | "item" {
   return value === "occurrence" || value === "future" || value === "item";
 }
 
+function target(value: unknown): boolean {
+  return record(value) && text(value.itemId)
+    && (value.blockId === undefined || text(value.blockId))
+    && (value.occurrenceKey === undefined || text(value.occurrenceKey));
+}
+
 function placement(value: unknown): boolean {
   if (!record(value)) return false;
   if (value.mode === "date") return typeof value.date === "string" && DATE.test(value.date);
@@ -35,7 +41,9 @@ function placement(value: unknown): boolean {
 
 function constructorOperation(value: unknown): PlannerConstructorOperation | undefined {
   if (!record(value) || typeof value.kind !== "string") return undefined;
+  if (value.target !== undefined && !target(value.target)) return undefined;
   if ((value.kind === "add_item" || value.kind === "occupy_interval") && draft(value.draft)) return value as PlannerConstructorOperation;
+  if (value.kind === "schedule_item" && target(value.target)) return value as PlannerConstructorOperation;
   if (value.kind === "edit_item" && draft(value.draft) && text(value.draft.id)) return value as PlannerConstructorOperation;
   if (value.kind === "bulk_update_items" && Array.isArray(value.drafts) && value.drafts.length <= 100 && value.drafts.every(draft)) return value as PlannerConstructorOperation;
   if (value.kind === "move_item" && text(value.blockId) && scope(value.scope) && placement(value.placement)) return value as PlannerConstructorOperation;

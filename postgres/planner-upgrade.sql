@@ -122,6 +122,7 @@ create table if not exists public.planner_blocks (
   end_estimate jsonb null,
   soft boolean not null default false,
   occurrence_key text null,
+  occurrence_override jsonb not null default '{}'::jsonb,
   actual_start_at timestamptz null, actual_end_at timestamptz null,
   created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
   primary key (app_user_id, id),
@@ -133,7 +134,8 @@ create table if not exists public.planner_blocks (
 alter table public.planner_blocks
   add column if not exists role text not null default 'work',
   add column if not exists end_estimate jsonb null,
-  add column if not exists soft boolean not null default false;
+  add column if not exists soft boolean not null default false,
+  add column if not exists occurrence_override jsonb not null default '{}'::jsonb;
 alter table public.planner_blocks drop constraint if exists planner_blocks_role_check;
 alter table public.planner_blocks add constraint planner_blocks_role_check
   check (role in ('work', 'uncertainty_reserve', 'calibration', 'protected_free'));

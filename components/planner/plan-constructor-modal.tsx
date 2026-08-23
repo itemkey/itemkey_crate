@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import type { Locale } from "@/lib/i18n";
 import {
@@ -10,6 +10,7 @@ import {
   type PlannerDraft,
   type PlannerEstimateMode,
   type PlannerItem,
+  type PlannerOperationTarget,
   type PlannerPriority,
   type PlannerProfile,
   type PlannerUncertaintyPolicy,
@@ -26,7 +27,7 @@ import {
 import styles from "./planner-workspace.module.css";
 
 export type ConstructorAction =
-  | "add" | "edit" | "priorities" | "move" | "cancel" | "replace" | "time" | "duration"
+  | "add" | "schedule" | "edit" | "priorities" | "move" | "cancel" | "archive" | "replace" | "time" | "duration"
   | "protect" | "occupy" | "sleep" | "day_bounds" | "rebuild";
 
 type Props = {
@@ -40,6 +41,7 @@ type Props = {
   busy: boolean;
   initialAction?: ConstructorAction;
   initialBlockId?: string;
+  localTarget?: PlannerOperationTarget;
   onClose: () => void;
   onReview: (operation: PlannerConstructorOperation) => Promise<void>;
 };
@@ -99,15 +101,16 @@ function durationPolicy(mode: PlannerEstimateMode, likely: number, minimum: numb
 
 export default function PlanConstructorModal({
   profile, items, blocks, currentBlock, selectedDate, now, locale, busy,
-  initialAction, initialBlockId, onClose, onReview,
+  initialAction, initialBlockId, localTarget, onClose, onReview,
 }: Props) {
   const ru = locale === "ru";
   const activeItems = useMemo(() => items.filter((item) => item.status === "active"), [items]);
   const futureBlocks = useMemo(() => blocks.filter((block) => !["done", "cancelled", "skipped"].includes(block.status) && new Date(block.endAt) > now), [blocks, now]);
+  const initialBlock = initialBlockId ? blocks.find((block) => block.id === initialBlockId) : undefined;
   const [action, setAction] = useState<ConstructorAction | null>(initialAction ?? null);
   const [targetBlockId, setTargetBlockId] = useState(initialBlockId ?? currentBlock?.id ?? futureBlocks[0]?.id ?? "");
-  const targetBlock = futureBlocks.find((block) => block.id === targetBlockId);
-  const [targetItemId, setTargetItemId] = useState(targetBlock?.itemId ?? activeItems[0]?.id ?? "");
+  const targetBlock = blocks.find((block) => block.id === targetBlockId);
+  const [targetItemId, setTargetItemId] = useState(localTarget?.itemId ?? initialBlock?.itemId ?? targetBlock?.itemId ?? activeItems[0]?.id ?? "");
   const targetItem = activeItems.find((item) => item.id === targetItemId);
   const targetItemBlocks = useMemo(() => futureBlocks.filter((block) => block.itemId === targetItemId), [futureBlocks, targetItemId]);
   const editingInitialItem = initialAction === "edit" || initialAction === "duration" ? targetItem : undefined;
@@ -144,6 +147,18 @@ export default function PlanConstructorModal({
   const [rebuildDecisions, setRebuildDecisions] = useState<Record<string, "required" | "desired" | "if_time" | "cancel">>({});
   const [rebuildBedtime, setRebuildBedtime] = useState(false);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", escape);
+    return () => window.removeEventListener("keydown", escape);
+  }, [onClose]);
+
+  const operationTarget = (): PlannerOperationTarget | undefined => targetItem ? {
+    itemId: targetItem.id,
+    blockId: targetBlock?.id,
+    occurrenceKey: targetBlock?.occurrenceKey,
+  } : undefined;
 
   function populateItem(nextItem: PlannerItem) {
     setTitle(nextItem.title);
@@ -248,10 +263,14 @@ export default function PlanConstructorModal({
     if (!action) throw new Error(ru ? "Выберите действие." : "Choose an action.");
     if ((action === "add" || action === "occupy" || action === "replace") && !title.trim()) throw new Error(ru ? "Укажите название дела." : "Enter an item title.");
     if (action === "add") return { kind: "add_item", draft: kind === "fixed_event" ? fixedDraft() : flexibleDraft() };
+    if (action === "schedule") {
+      if (!targetItem) throw new Error(ru ? "Выбранное дело больше не найдено." : "The selected item no longer exists.");
+      return { kind: "schedule_item", target: operationTarget()!, scope: targetItem.recurrence ? targetBlock ? scope === "item" ? "future" : scope : "future" : undefined };
+    }
     if (action === "occupy") return { kind: "occupy_interval", draft: fixedDraft() };
     if (action === "edit") {
       if (!targetItem) throw new Error(ru ? "Выберите дело." : "Choose an item.");
-      return { kind: "edit_item", draft: targetItem.kind === "fixed_event" ? { ...targetItem, title: title.trim(), location: location.trim() || undefined, notes: notes.trim() || undefined, priority, commitmentLevel: commitment } : flexibleDraft(targetItem), scope: targetItem.recurrence ? scope : "item", blockId: targetItem.recurrence ? targetBlockId : undefined };
+      return { kind: "edit_item", draft: targetItem.kind === "fixed_event" ? { ...targetItem, title: title.trim(), location: location.trim() || undefined, notes: notes.trim() || undefined, priority, commitmentLevel: commitment } : flexibleDraft(targetItem), scope: targetItem.recurrence ? targetBlock ? scope : "future" : "item", blockId: targetItem.recurrence && targetBlock ? targetBlockId : undefined, target: operationTarget() };
     }
     if (action === "priorities") return {
       kind: "bulk_update_items",
@@ -273,7 +292,7 @@ export default function PlanConstructorModal({
     if (action === "duration") {
       if (!targetItem) throw new Error(ru ? "Выберите дело." : "Choose an item.");
       const policy = durationPolicy(durationMode, Number(duration), Number(minimumDuration), Number(maximumDuration), canReduce);
-      return { kind: "change_item_duration", itemId: targetItem.id, duration: policy.duration, reduction: policy.reduction, scope: targetItem.recurrence ? scope : "item", blockId: targetItem.recurrence ? targetBlockId : undefined };
+      return { kind: "change_item_duration", itemId: targetItem.id, duration: policy.duration, reduction: policy.reduction, scope: targetItem.recurrence ? targetBlock ? scope : "future" : "item", blockId: targetItem.recurrence && targetBlock ? targetBlockId : undefined, target: operationTarget() };
     }
     if (action === "protect") return { kind: "protect_interval", date, start, end };
     if (action === "day_bounds") return { kind: "set_day_bounds", date, start, end };
@@ -284,27 +303,32 @@ export default function PlanConstructorModal({
       decisions: Object.entries(rebuildDecisions).map(([itemId, disposition]) => ({ itemId, disposition })),
       bedtime: rebuildBedtime ? { date, time: end } : undefined,
     };
+    if (action === "archive") {
+      if (!targetItem) throw new Error(ru ? "Выбранное дело больше не найдено." : "The selected item no longer exists.");
+      return { kind: "cancel_item", itemId: targetItem.id, scope: "item", target: operationTarget() };
+    }
     if (!targetBlock) throw new Error(ru ? "Выберите выполнение в календаре." : "Choose a calendar occurrence.");
-    if (action === "cancel") return { kind: "cancel_item", blockId: targetBlock.id, itemId: targetBlock.itemId, scope };
+    if (action === "cancel") return { kind: "cancel_item", blockId: targetBlock.id, itemId: targetBlock.itemId, scope, target: operationTarget() };
     if (action === "time") return {
       kind: "change_block_time",
       blockId: targetBlock.id,
       scope,
       startAt: zonedPlannerDateTimeToUtc(date, start, profile.timezone),
       endAt: endOnDate(date, start, end, profile.timezone),
+      target: operationTarget(),
     };
     if (action === "move") {
       const placement = placementMode === "exact" ? { mode: "exact" as const, date, start }
         : placementMode === "date" ? { mode: "date" as const, date }
           : placementMode === "first_free" ? { mode: "first_free" as const, date: firstFreeInHorizon ? undefined : date }
             : { mode: placementMode, anchorBlockId, gapMinutes: profile.defaultBufferMinutes } as const;
-      return { kind: "move_item", blockId: targetBlock.id, scope, placement };
+      return { kind: "move_item", blockId: targetBlock.id, scope, placement, target: operationTarget() };
     }
     const replaceDuration = replaceDurationMode === "same" ? { mode: "same" as const }
       : replaceDurationMode === "minutes" ? { mode: "minutes" as const, minutes: Math.max(5, Number(duration) || 60) }
         : replaceDurationMode === "until_next" ? { mode: "until_next" as const }
           : { mode: "until" as const, date, time: end };
-    return { kind: "replace_item", blockId: targetBlock.id, scope, replacement: flexibleDraft(), duration: replaceDuration };
+    return { kind: "replace_item", blockId: targetBlock.id, scope, replacement: flexibleDraft(), duration: replaceDuration, target: operationTarget() };
   }
 
   async function submit() {
@@ -318,17 +342,33 @@ export default function PlanConstructorModal({
 
   const needsBlock = action === "move" || action === "cancel" || action === "replace" || action === "time";
   const needsItem = action === "edit" || action === "duration";
+  const needsScheduleScope = action === "schedule" && Boolean(targetBlock);
   const showCommonItem = action === "add" || action === "edit";
 
-  return <div className={styles.modalBackdrop} role="presentation"><section className={`${styles.modal} ${styles.constructorModal}`} role="dialog" aria-modal="true" aria-label={ru ? "Конструктор плана" : "Plan constructor"}>
-    <header><div><h2>{ru ? "Конструктор плана" : "Plan constructor"}</h2><small>{action ? (ru ? "2 из 3 · параметры" : "2 of 3 · parameters") : (ru ? "1 из 3 · действие" : "1 of 3 · action")}</small></div><button type="button" onClick={onClose} aria-label={ru ? "Закрыть" : "Close"}>×</button></header>
-    {!action ? <div className={styles.constructorCatalog}>{actionGroups.map((group) => <section key={group.titleEn}><h3>{ru ? group.titleRu : group.titleEn}</h3><div className={styles.constructorActions}>{group.actions.map((entry) => <button type="button" key={entry.id} onClick={() => chooseAction(entry.id)}><strong>{ru ? entry.ru : entry.en}</strong><small>{ru ? entry.hintRu : entry.hintEn}</small></button>)}</div></section>)}</div> : <div className={styles.form}>
+  const localActions: Array<{ id: ConstructorAction; ru: string; en: string; hintRu: string; hintEn: string }> = [
+    { id: "schedule", ru: "Найти время", en: "Find time", hintRu: "Поставить остаток выбранного дела", hintEn: "Schedule the selected item's remainder" },
+    { id: "edit", ru: "Изменить дело", en: "Edit item", hintRu: "Название, правила и обязательность", hintEn: "Title, rules and commitment" },
+    { id: "move", ru: "Перенести", en: "Move", hintRu: "Дата, точное время или относительно другого дела", hintEn: "Date, exact time or relative placement" },
+    { id: "replace", ru: "Заменить", en: "Replace", hintRu: "Сохранить историю выбранного выполнения", hintEn: "Preserve the selected occurrence history" },
+    { id: "time", ru: "Изменить время", en: "Change time", hintRu: "Начало или окончание", hintEn: "Start or end" },
+    { id: "duration", ru: "Изменить длительность", en: "Change duration", hintRu: "Оценка и разрешённый минимум", hintEn: "Estimate and allowed minimum" },
+    { id: "cancel", ru: "Отменить выполнение", en: "Cancel occurrence", hintRu: "Одно или выбранное и будущие", hintEn: "One or selected and future" },
+    { id: "archive", ru: "Архивировать дело", en: "Archive item", hintRu: "Отменить будущие, сохранив историю", hintEn: "Cancel future work and keep history" },
+  ];
+  const visibleLocalActions = targetBlock ? localActions : localActions.filter((entry) => ["schedule", "edit", "duration", "archive"].includes(entry.id));
+
+  return <div className={styles.modalBackdrop} role="presentation"><section className={`${styles.modal} ${styles.constructorModal}`} role="dialog" aria-modal="true" aria-label={localTarget ? (ru ? "Конструктор дела" : "Item constructor") : (ru ? "Конструктор плана" : "Plan constructor")}>
+    <header><div><h2>{localTarget ? (ru ? "Конструктор дела" : "Item constructor") : (ru ? "Конструктор плана" : "Plan constructor")}</h2><small>{action ? (ru ? "2 из 3 · параметры" : "2 of 3 · parameters") : (ru ? "1 из 3 · действие" : "1 of 3 · action")}</small></div></header>
+    {!action ? <div className={styles.constructorCatalog}>{localTarget ? <section><h3>{targetItem?.title}</h3><div className={styles.constructorActions}>{visibleLocalActions.map((entry) => <button type="button" key={entry.id} onClick={() => chooseAction(entry.id)}><strong>{ru ? entry.ru : entry.en}</strong><small>{ru ? entry.hintRu : entry.hintEn}</small></button>)}</div></section> : actionGroups.map((group) => <section key={group.titleEn}><h3>{ru ? group.titleRu : group.titleEn}</h3><div className={styles.constructorActions}>{group.actions.map((entry) => <button type="button" key={entry.id} onClick={() => chooseAction(entry.id)}><strong>{ru ? entry.ru : entry.en}</strong><small>{ru ? entry.hintRu : entry.hintEn}</small></button>)}</div></section>)}</div> : <div className={styles.form}>
       <button type="button" className={styles.constructorBack} onClick={() => { setAction(null); setError(""); }}>← {ru ? "Все действия" : "All actions"}</button>
       {error && <p className={styles.inlineError} role="alert">{error}</p>}
-      {needsBlock && <label>{ru ? "Выполнение" : "Occurrence"}<select value={targetBlockId} onChange={(event) => selectBlock(event.target.value)}>{futureBlocks.map((block) => <option value={block.id} key={block.id}>{block.id === currentBlock?.id ? (ru ? "Текущее — " : "Current — ") : ""}{block.title} · {formatDateInTimeZone(new Date(block.startAt), profile.timezone)} {formatTimeInTimeZone(new Date(block.startAt), profile.timezone)}</option>)}</select></label>}
-      {needsItem && <label>{ru ? "Дело" : "Item"}<select value={targetItemId} onChange={(event) => selectItem(event.target.value)}>{activeItems.map((item) => <option value={item.id} key={item.id}>{item.title}</option>)}</select></label>}
-      {needsItem && targetItem?.recurrence && <label>{ru ? "Выполнение" : "Occurrence"}<select value={targetBlockId} onChange={(event) => selectBlock(event.target.value)}>{targetItemBlocks.map((block) => <option value={block.id} key={block.id}>{formatDateInTimeZone(new Date(block.startAt), profile.timezone)} · {formatTimeInTimeZone(new Date(block.startAt), profile.timezone)}</option>)}</select></label>}
-      {((needsBlock || needsItem) && targetItem?.recurrence) && <fieldset><legend>{ru ? "Область изменения" : "Change scope"}</legend><div className={styles.segmented}>{(["occurrence", "future", "item"] as const).map((value) => <button type="button" key={value} className={scope === value ? styles.segmentedActive : ""} onClick={() => setScope(value)}>{value === "occurrence" ? (ru ? "Только это" : "This occurrence") : value === "future" ? (ru ? "Будущие" : "Future") : (ru ? "Всё дело" : "Whole item")}</button>)}</div></fieldset>}
+      {initialBlockId && !targetBlock && <p className={styles.inlineError} role="alert">{ru ? "Выбранное выполнение изменилось или устарело. Закройте окно и обновите план." : "The selected occurrence changed or became stale. Close this window and refresh the plan."}</p>}
+      {needsBlock && <label>{ru ? "Выполнение" : "Occurrence"}<select value={targetBlockId} onChange={(event) => selectBlock(event.target.value)} disabled={Boolean(localTarget)}>{[...futureBlocks, ...(targetBlock && !futureBlocks.some((block) => block.id === targetBlock.id) ? [targetBlock] : [])].map((block) => <option value={block.id} key={block.id}>{block.id === currentBlock?.id ? (ru ? "Текущее — " : "Current — ") : ""}{block.title} · {formatDateInTimeZone(new Date(block.startAt), profile.timezone)} {formatTimeInTimeZone(new Date(block.startAt), profile.timezone)}</option>)}</select></label>}
+      {needsItem && !localTarget && <label>{ru ? "Дело" : "Item"}<select value={targetItemId} onChange={(event) => selectItem(event.target.value)}>{activeItems.map((item) => <option value={item.id} key={item.id}>{item.title}</option>)}</select></label>}
+      {needsItem && targetItem?.recurrence && (!localTarget || targetBlock) && <label>{ru ? "Выполнение" : "Occurrence"}<select value={targetBlockId} onChange={(event) => selectBlock(event.target.value)} disabled={Boolean(localTarget)}>{targetItemBlocks.map((block) => <option value={block.id} key={block.id}>{formatDateInTimeZone(new Date(block.startAt), profile.timezone)} · {formatTimeInTimeZone(new Date(block.startAt), profile.timezone)}</option>)}</select></label>}
+      {((needsBlock || needsItem || needsScheduleScope) && targetItem?.recurrence && (!localTarget || targetBlock)) && <fieldset><legend>{ru ? "Область изменения" : "Change scope"}</legend><div className={styles.segmented}>{(["occurrence", "future"] as const).map((value) => <button type="button" key={value} className={scope === value ? styles.segmentedActive : ""} onClick={() => setScope(value)}>{value === "occurrence" ? (ru ? "Только это выполнение" : "This occurrence only") : (ru ? "Это и все будущие" : "This and all future")}</button>)}</div></fieldset>}
+      {action === "schedule" && <p className={styles.fieldHelp}>{ru ? "Автоплан попробует поставить только остаток выбранного дела, не меняя остальные правила." : "Autoplan will schedule only this item's remainder without changing other rules."}</p>}
+      {action === "archive" && <p className={styles.warningBanner}>{ru ? "Будущие выполнения будут отменены, а выполненная и прошлая история останется." : "Future occurrences will be cancelled while completed and past history remains."}</p>}
       {(action === "add" || action === "occupy" || action === "replace") && <label>{ru ? "Название" : "Title"}<input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} maxLength={160} /></label>}
       {(action === "add" || action === "edit" || action === "occupy" || action === "replace") && <div className={styles.formGrid}><label>{ru ? "Адрес или место (не интерпретируется)" : "Address or place (not interpreted)"}<input value={location} onChange={(event) => setLocation(event.target.value)} maxLength={240} /></label><label>{ru ? "Заметка (не интерпретируется)" : "Note (not interpreted)"}<input value={notes} onChange={(event) => setNotes(event.target.value)} maxLength={2000} /></label></div>}
       {showCommonItem && <>

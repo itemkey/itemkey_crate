@@ -5,7 +5,7 @@ import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 
 import { getPostgresPool } from "@/lib/db/postgres";
 import { assertValidPasswordCandidate, verifyPassword } from "@/lib/auth/password";
-import { annotateTentativeBlocks, applyProposalChanges, buildPlannerProposal, normalizePlannerItem, normalizePlannerProfile, plannerCompletionRangeSuggestion, plannerCompletionSuggestion } from "@/lib/planner/engine";
+import { annotateTentativeBlocks, applyProposalChanges, buildPlannerProposal, normalizePlannerItem, normalizePlannerProfile, plannerCalibrationProgress, plannerCompletionRangeSuggestion, plannerCompletionSuggestion, plannerItemPlanningStates } from "@/lib/planner/engine";
 import { buildPlannerSleepBlocks, normalizePlannerSleepEvent, plannerSleepDurationSuggestion, plannerSleepHealthNotice, sleepWindowForWakeDate } from "@/lib/planner/sleep";
 import {
   createDefaultPlannerProfile,
@@ -114,6 +114,7 @@ type BlockRow = {
   end_estimate: PlannerBlock["endEstimate"] | null;
   soft: boolean;
   occurrence_key: string | null;
+  occurrence_override: PlannerBlock["occurrenceOverride"] | null;
   actual_start_at: Date | string | null;
   actual_end_at: Date | string | null;
   created_at: Date | string;
@@ -148,7 +149,7 @@ const ITEM_COLUMNS = `id,kind,title,notes,area,location,priority,energy,estimate
   earliest_at,deadline_at,deadline_type,target_finish_at,target_finish_mode,estimate_confidence,
   deadline_policy,milestones,allowed_windows,preferred_windows,avoided_windows,can_split,min_chunk_minutes,
   buffer_before_minutes,buffer_after_minutes,recurrence,auto_plan,status,unplaced_reason,created_at,updated_at`;
-const BLOCK_COLUMNS = `id,item_id,title,start_at,end_at,status,source,fixed,role,end_estimate,soft,occurrence_key,
+const BLOCK_COLUMNS = `id,item_id,title,start_at,end_at,status,source,fixed,role,end_estimate,soft,occurrence_key,occurrence_override,
   actual_start_at,actual_end_at,created_at,updated_at`;
 
 let plannerSchemaPromise: Promise<void> | null = null;
@@ -172,7 +173,8 @@ async function ensurePlannerSchema(executor: SqlExecutor): Promise<void> {
       alter table if exists public.planner_blocks
         add column if not exists role text not null default 'work',
         add column if not exists end_estimate jsonb null,
-        add column if not exists soft boolean not null default false
+        add column if not exists soft boolean not null default false,
+        add column if not exists occurrence_override jsonb not null default '{}'::jsonb
     `);
     await executor.query(`
       alter table if exists public.planner_blocks drop constraint if exists planner_blocks_role_check;
@@ -330,6 +332,7 @@ function blockFromRow(row: BlockRow): PlannerBlock {
     endEstimate: row.end_estimate ?? undefined,
     soft: row.soft,
     occurrenceKey: row.occurrence_key ?? undefined,
+    occurrenceOverride: row.occurrence_override && Object.keys(row.occurrence_override).length ? row.occurrence_override : undefined,
     actualStartAt: toIso(row.actual_start_at),
     actualEndAt: toIso(row.actual_end_at),
     createdAt: toIso(row.created_at),
@@ -554,19 +557,19 @@ async function insertItem(executor: SqlExecutor, userId: string, value: PlannerI
 async function insertBlock(executor: SqlExecutor, userId: string, block: PlannerBlock): Promise<void> {
   await executor.query(
     `insert into public.planner_blocks (
-       app_user_id,id,item_id,title,start_at,end_at,status,source,fixed,role,end_estimate,soft,occurrence_key,
+       app_user_id,id,item_id,title,start_at,end_at,status,source,fixed,role,end_estimate,soft,occurrence_key,occurrence_override,
        actual_start_at,actual_end_at
      ) values ($1::uuid,$2::text,$3::text,$4::text,$5::timestamptz,$6::timestamptz,
-       $7::text,$8::text,$9::boolean,$10::text,$11::jsonb,$12::boolean,$13::text,$14::timestamptz,$15::timestamptz)
+       $7::text,$8::text,$9::boolean,$10::text,$11::jsonb,$12::boolean,$13::text,$14::jsonb,$15::timestamptz,$16::timestamptz)
      on conflict (app_user_id,id) do update set
        item_id=excluded.item_id,title=excluded.title,start_at=excluded.start_at,end_at=excluded.end_at,
        status=excluded.status,source=excluded.source,fixed=excluded.fixed,role=excluded.role,end_estimate=excluded.end_estimate,soft=excluded.soft,
-       occurrence_key=excluded.occurrence_key,actual_start_at=excluded.actual_start_at,
+       occurrence_key=excluded.occurrence_key,occurrence_override=excluded.occurrence_override,actual_start_at=excluded.actual_start_at,
        actual_end_at=excluded.actual_end_at`,
     [
       userId, block.id, block.itemId ?? null, block.title, block.startAt, block.endAt,
       block.status, block.source, block.fixed, block.role ?? "work", block.endEstimate ? JSON.stringify(block.endEstimate) : null, Boolean(block.soft), block.occurrenceKey ?? null,
-      block.actualStartAt ?? null, block.actualEndAt ?? null,
+      JSON.stringify(block.occurrenceOverride ?? {}), block.actualStartAt ?? null, block.actualEndAt ?? null,
     ]
   );
 }
@@ -661,7 +664,9 @@ function createPlannerStore(): PlannerStore {
       const sleepBlocks = buildPlannerSleepBlocks(profile, sleepEvents, today, new Date(Date.now() + 35 * 86_400_000).toISOString().slice(0, 10));
       const sleepDurationSuggestion = plannerSleepDurationSuggestion(profile.sleepSchedule, sleepEvents, today);
       const sleepHealthNotice = plannerSleepHealthNotice(profile, sleepEvents, today);
-      return { profile, items, blocks: annotatedBlocks, sleepEvents, sleepBlocks, deferredRemainders, latestChangeSetId: latest.rows[0]?.id, durationSuggestions, sleepDurationSuggestion, sleepHealthNotice };
+      const calibrationProgress = plannerCalibrationProgress(items, annotatedBlocks);
+      const planningStates = plannerItemPlanningStates(items, annotatedBlocks);
+      return { profile, items, blocks: annotatedBlocks, sleepEvents, sleepBlocks, deferredRemainders, calibrationProgress, planningStates, latestChangeSetId: latest.rows[0]?.id, durationSuggestions, sleepDurationSuggestion, sleepHealthNotice };
     },
     async updateSettings(userId, patch, expectedRevision) {
       return withTransaction(pool, async (client) => {

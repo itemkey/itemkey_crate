@@ -13,6 +13,7 @@ const proposalsRoute = source("app/api/planner/proposals/route.ts");
 const plannerWorkspace = source("components/planner/planner-workspace.tsx");
 const autoplannerModal = source("components/planner/autoplanner-modal.tsx");
 const constructorModal = source("components/planner/plan-constructor-modal.tsx");
+const itemDetailsModal = source("components/planner/item-details-modal.tsx");
 const mutationRoutes = [
   "app/api/planner/settings/route.ts",
   "app/api/planner/items/route.ts",
@@ -95,10 +96,12 @@ test("calendar and duration changes enter the constructor proposal flow", () => 
   assert.match(proposalsRoute, /extensionMinutes >= 5/);
   assert.match(proposalsRoute, /extensionMinutes <= 1440/);
   assert.doesNotMatch(proposalsRoute, /Number\(body\.blockExtension\.minutes\) === 15/);
-  assert.match(plannerWorkspace, /kind: "change_block_time"/);
-  assert.match(plannerWorkspace, /kind: "change_item_duration"/);
+  assert.match(constructorModal, /kind: "change_block_time"/);
+  assert.match(constructorModal, /kind: "change_item_duration"/);
   assert.match(plannerWorkspace, /openConstructor\("replace", currentBlock\.id\)/);
   assert.match(constructorModal, /kind: "replace_item"/);
+  assert.match(constructorModal, /kind: "schedule_item"/);
+  assert.match(constructorModal, /target: operationTarget\(\)/);
   assert.doesNotMatch(plannerWorkspace, /\/api\/planner\/blocks\/\$\{block\.id\}[\s\S]*method:\s*"PATCH"/);
 });
 
@@ -135,6 +138,7 @@ test("planner upgrade is idempotent and fresh installs include protected sleep",
   assert.match(plannerUpgrade, /add column if not exists end_estimate/);
   assert.match(plannerUpgrade, /protected_free/);
   assert.match(plannerUpgrade, /add column if not exists soft/);
+  assert.match(plannerUpgrade, /add column if not exists occurrence_override/);
   assert.match(plannerUpgrade, /add column if not exists planned_duration_minutes/);
   assert.match(plannerUpgrade, /add column if not exists sleepiness_level/);
   assert.match(plannerUpgrade, /create table if not exists public\.planner_deferred_remainders/);
@@ -155,6 +159,7 @@ test("planner upgrade is idempotent and fresh installs include protected sleep",
   assert.match(freshSchema, /end_estimate jsonb null/);
   assert.match(freshSchema, /protected_free/);
   assert.match(freshSchema, /sleepiness_level integer null/);
+  assert.match(freshSchema, /occurrence_override jsonb not null default '\{\}'/);
   assert.match(freshSchema, /create table public\.planner_deferred_remainders/);
   assert.match(freshSchema, /pending_minutes integer not null/);
   assert.match(freshSchema, /activation_transition/);
@@ -171,9 +176,22 @@ test("planner store repairs additive schema changes before serving requests", ()
   assert.match(store, /add column if not exists role/);
   assert.match(store, /add column if not exists availability_overrides/);
   assert.match(store, /add column if not exists end_estimate/);
+  assert.match(store, /add column if not exists occurrence_override/);
   assert.match(store, /create table if not exists public\.planner_deferred_remainders/);
   assert.match(store, /delete from public\.planner_deferred_remainders where app_user_id=\$1::uuid/);
   assert.match(store, /deferredRemainders: beforeDeferredRemainders/);
   assert.match(store, /change\.inverse_snapshot\.deferredRemainders/);
   assert.match(store, /await ensurePlannerSchema\(getPostgresPool\(\)\)/);
+});
+
+test("calendar blocks are read-only buttons opening exact occurrence details", () => {
+  const timeGrid = plannerWorkspace.slice(plannerWorkspace.indexOf("function TimeGrid"), plannerWorkspace.indexOf("function MonthGrid"));
+  assert.match(timeGrid, /<button type="button" key=\{block\.id\}/);
+  assert.match(timeGrid, /onClick=\{\(\) => onSelect\(block\)\}/);
+  assert.doesNotMatch(timeGrid, /draggable|onDrag|onDrop|onKeyDown|⋯|resizeActions/);
+  assert.match(itemDetailsModal, /onConstruct/);
+  assert.match(itemDetailsModal, /Конструктор дела/);
+  assert.match(itemDetailsModal, /event\.key === "Escape"/);
+  assert.doesNotMatch(itemDetailsModal, />×<|aria-label=\{.*Закрыть/);
+  assert.doesNotMatch(constructorModal, />×<|constructorClose/);
 });
