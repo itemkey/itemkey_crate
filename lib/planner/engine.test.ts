@@ -11,6 +11,7 @@ import {
   plannerCompletionSuggestion,
   plannerCompletionRangeSuggestion,
   plannerItemPlanningStates,
+  reconcilePlannerArchiverEntries,
   resolvePlannerTargetFinish,
   suggestPlannerMilestones,
 } from "./engine.ts";
@@ -28,7 +29,7 @@ import {
   sleepRuleForWakeDate,
   normalizeSleepSchedule,
 } from "./sleep.ts";
-import { createDefaultPlannerProfile, type PlannerBlock, type PlannerItem } from "./types.ts";
+import { createDefaultPlannerProfile, type PlannerArchiverEntry, type PlannerBlock, type PlannerItem } from "./types.ts";
 import { addIsoMinutes, formatDateInTimeZone, formatTimeInTimeZone, isoDurationMinutes, plannerTimeToMinutes, zonedPlannerDateTimeToUtc } from "./time.ts";
 
 const profile = {
@@ -2078,7 +2079,7 @@ test("queued remainder is not silently recreated by a later full autoplan", () =
   assert.ok(!proposal.changes.some((change) => change.kind === "add_block" && change.block.itemId === project.id));
 });
 
-test("expired remainder leaves active planning and is counted once in deadline volume", () => {
+test("a durable archived remainder never turns into completed deadline volume by expiring", () => {
   const deadline = item({
     id: "expired-project",
     title: "Истёкший проект",
@@ -2104,7 +2105,7 @@ test("expired remainder leaves active planning and is counted once in deadline v
     new Date("2026-08-21T10:00:00.000Z"),
     [expired]
   )[0];
-  assert.equal(analysis.remainingMinutes, 0);
+  assert.equal(analysis.remainingMinutes, 60);
   const proposal = buildPlannerProposal({
     profile,
     items: [deadline],
@@ -2115,7 +2116,7 @@ test("expired remainder leaves active planning and is counted once in deadline v
   assert.ok(!proposal.changes.some((change) => change.kind === "add_block" && change.block.itemId === deadline.id));
 });
 
-test("a queued hard-deadline remainder expires at the earlier deadline", () => {
+test("an archived hard-deadline remainder has no automatic expiry", () => {
   const deadlineAt = "2026-08-23T18:00:00.000Z";
   const project = item({
     id: "deadline-transfer",
@@ -2148,7 +2149,348 @@ test("a queued hard-deadline remainder expires at the earlier deadline", () => {
     },
   });
   assert.equal(proposal.impact?.scheduledMinutes, 0);
-  assert.equal(proposal.impact?.queueExpiresAt, deadlineAt);
+  assert.equal(proposal.impact?.queueExpiresAt, "9999-12-31T23:59:59.999Z");
+});
+
+test("a missed archiver entry can be corrected to an actual completion", () => {
+  const task = item({ id: "late-complete", title: "Монтаж" });
+  const block: PlannerBlock = {
+    id: "late-complete-block", itemId: task.id, title: task.title,
+    startAt: "2026-08-20T08:00:00.000Z", endAt: "2026-08-20T09:00:00.000Z",
+    status: "skipped", source: "auto", fixed: false,
+  };
+  const entry: PlannerArchiverEntry = {
+    id: `missed:${block.id}`, category: "missed", origin: "unacknowledged",
+    itemId: task.id, sourceBlockId: block.id, title: task.title,
+    reason: "Не было отметки", totalMinutes: 60, pendingMinutes: 60, scheduledMinutes: 0,
+    occurredAt: block.endAt, createdAt: "2026-08-20T09:15:00.000Z",
+  };
+  const proposal = buildPlannerProposal({
+    profile, items: [task], blocks: [block], archiverEntries: [entry],
+    now: new Date("2026-08-21T10:00:00.000Z"),
+    operation: {
+      kind: "resolve_archiver_entry", entryId: entry.id, scope: "occurrence",
+      resolution: { kind: "late_complete", actualMinutes: 45 },
+    },
+  });
+  const status = proposal.changes.find((change) => change.kind === "update_block_status");
+  const archive = proposal.changes.find((change) => change.kind === "upsert_archiver_entry");
+  assert.ok(status?.kind === "update_block_status");
+  assert.equal(status.status, "done");
+  assert.equal(isoDurationMinutes(status.actualStartAt!, status.actualEndAt!), 45);
+  assert.ok(archive?.kind === "upsert_archiver_entry");
+  assert.equal(archive.entry.resolution, "late_completed");
+  assert.equal(applyProposalChanges([task], [block], proposal).blocks[0].status, "done");
+});
+
+test("archiver reconciliation fires at fifteen minutes, is idempotent and does not duplicate missed work as no-slot", () => {
+  const task = item({ id: "reconcile-missed", title: "Неотмеченный монтаж", estimateMinutes: 60 });
+  const block: PlannerBlock = {
+    id: "reconcile-missed-block", itemId: task.id, title: task.title,
+    startAt: "2026-08-21T08:00:00.000Z", endAt: "2026-08-21T09:00:00.000Z",
+    status: "planned", source: "auto", fixed: false, role: "work",
+  };
+  const beforeThreshold = reconcilePlannerArchiverEntries(
+    [task], [block], [], new Date("2026-08-21T09:14:59.999Z")
+  );
+  assert.equal(beforeThreshold.entries.length, 0);
+
+  const atThreshold = reconcilePlannerArchiverEntries(
+    [task], [block], [], new Date("2026-08-21T09:15:00.000Z")
+  );
+  assert.deepEqual(atThreshold.missedBlockIds, [block.id]);
+  assert.equal(atThreshold.entries.length, 1);
+  assert.equal(atThreshold.entries[0].category, "missed");
+
+  const repeated = reconcilePlannerArchiverEntries(
+    [task], [{ ...block, status: "skipped" }], atThreshold.entries, new Date("2026-08-21T09:20:00.000Z")
+  );
+  assert.deepEqual(repeated, { entries: [], missedBlockIds: [] });
+});
+
+test("archiver reconciliation backfills only real user work and active unplaced volume", () => {
+  const unplaced = item({ id: "reconcile-unplaced", title: "Новое дело без окна", estimateMinutes: 45 });
+  const planned = item({ id: "reconcile-planned", title: "Уже размещено", estimateMinutes: 45 });
+  const technical: PlannerBlock = {
+    id: "reconcile-technical", title: "Защищённый интервал",
+    startAt: "2026-08-21T07:00:00.000Z", endAt: "2026-08-21T08:00:00.000Z",
+    status: "planned", source: "auto", fixed: true, role: "protected_free",
+  };
+  const soft: PlannerBlock = {
+    id: "reconcile-soft", itemId: unplaced.id, title: "Мягкий резерв",
+    startAt: "2026-08-21T07:00:00.000Z", endAt: "2026-08-21T08:00:00.000Z",
+    status: "planned", source: "auto", fixed: false, role: "uncertainty_reserve", soft: true,
+  };
+  const future: PlannerBlock = {
+    id: "reconcile-future", itemId: planned.id, title: planned.title,
+    startAt: "2026-08-22T07:00:00.000Z", endAt: "2026-08-22T07:45:00.000Z",
+    status: "planned", source: "auto", fixed: false, role: "work",
+  };
+  const result = reconcilePlannerArchiverEntries(
+    [unplaced, planned], [technical, soft, future], [], new Date("2026-08-21T12:00:00.000Z")
+  );
+  assert.equal(result.missedBlockIds.length, 0);
+  assert.equal(result.entries.length, 1);
+  assert.equal(result.entries[0].itemId, unplaced.id);
+  assert.equal(result.entries[0].category, "no_slot");
+  assert.equal(result.entries[0].pendingMinutes, 45);
+});
+
+test("an unplaced item is persisted as a durable no-slot archiver case", () => {
+  const task = item({ id: "archived-no-slot", title: "Новый монтаж", estimateMinutes: 120 });
+  const noAvailability = Object.fromEntries(Array.from({ length: 7 }, (_, index) => [String(index + 1), []]));
+  const proposal = buildPlannerProposal({
+    profile: { ...profile, availability: noAvailability }, items: [], blocks: [],
+    now: new Date("2026-08-20T08:00:00.000Z"), draft: task, trigger: "quick_add",
+  });
+  const entry = proposal.changes.find((change) => change.kind === "upsert_archiver_entry");
+  assert.ok(entry?.kind === "upsert_archiver_entry");
+  assert.equal(entry.entry.category, "no_slot");
+  assert.equal(entry.entry.pendingMinutes, 120);
+  assert.equal(entry.entry.resolvedAt, undefined);
+});
+
+test("a later autoplan preserves already returned archiver volume without double counting it", () => {
+  const task = item({ id: "archiver-cumulative", title: "Большой монтаж", estimateMinutes: 90, canSplit: true, minChunkMinutes: 30 });
+  const planned: PlannerBlock = {
+    id: "archiver-cumulative-planned", itemId: task.id, title: task.title,
+    startAt: "2026-08-22T07:00:00.000Z", endAt: "2026-08-22T07:30:00.000Z",
+    status: "planned", source: "auto", fixed: false, role: "work",
+  };
+  const entry: PlannerArchiverEntry = {
+    id: "unplaced:archiver-cumulative", category: "no_slot", origin: "unplaced",
+    itemId: task.id, title: task.title, reason: "Часть объёма уже возвращена.",
+    totalMinutes: 90, pendingMinutes: 60, scheduledMinutes: 30,
+    occurredAt: "2026-08-21T10:00:00.000Z", createdAt: "2026-08-21T10:00:00.000Z",
+    returnedAt: "2026-08-21T11:00:00.000Z",
+  };
+  const noAvailability = Object.fromEntries(Array.from({ length: 7 }, (_, index) => [String(index + 1), []]));
+  const proposal = buildPlannerProposal({
+    profile: { ...profile, availability: noAvailability }, items: [task], blocks: [planned], archiverEntries: [entry],
+    now: new Date("2026-08-21T12:00:00.000Z"), trigger: "plans_changed",
+  });
+  const updated = proposal.changes.find((change) => change.kind === "upsert_archiver_entry"
+    && change.entry.id === entry.id);
+  assert.ok(updated?.kind === "upsert_archiver_entry");
+  assert.equal(updated.entry.totalMinutes, 90);
+  assert.equal(updated.entry.scheduledMinutes, 30);
+  assert.equal(updated.entry.pendingMinutes, 60);
+  assert.equal(updated.entry.returnedAt, entry.returnedAt);
+});
+
+test("an archiver entry can return to a safe slot later today", () => {
+  const task = item({ id: "archiver-today", title: "Монтаж сегодня", estimateMinutes: 30, minChunkMinutes: 30 });
+  const entry: PlannerArchiverEntry = {
+    id: "unplaced:archiver-today", category: "no_slot", origin: "unplaced",
+    itemId: task.id, title: task.title, reason: "Утром не нашлось окна.",
+    totalMinutes: 30, pendingMinutes: 30, scheduledMinutes: 0,
+    occurredAt: "2026-08-21T08:00:00.000Z", createdAt: "2026-08-21T08:00:00.000Z",
+  };
+  const proposal = buildPlannerProposal({
+    profile: { ...profile, reserveRatio: 0 }, items: [task], blocks: [], archiverEntries: [entry],
+    now: new Date("2026-08-21T10:00:00.000Z"),
+    operation: {
+      kind: "resolve_archiver_entry", entryId: entry.id, scope: "occurrence",
+      resolution: {
+        kind: "schedule", amount: { mode: "percent", percent: 100 },
+        placement: { mode: "exact", date: "2026-08-21", start: "16:00" }, strategy: "safe",
+      },
+    },
+  });
+  const returned = proposal.changes.find((change) => change.kind === "add_block");
+  assert.ok(returned?.kind === "add_block");
+  assert.equal(returned.block.startAt, "2026-08-21T13:00:00.000Z");
+  assert.equal(proposal.impact?.scheduledMinutes, 30);
+});
+
+test("re-estimating an archiver case keeps its original reason separate from the outcome", () => {
+  const task = item({ id: "reestimate-archiver", title: "Черновой монтаж", estimateMinutes: 90 });
+  const entry: PlannerArchiverEntry = {
+    id: "unplaced:reestimate-archiver", category: "no_slot", origin: "unplaced",
+    itemId: task.id, title: task.title, reason: "Не нашлось окна до дедлайна.",
+    totalMinutes: 90, pendingMinutes: 90, scheduledMinutes: 0,
+    occurredAt: "2026-08-20T09:00:00.000Z", createdAt: "2026-08-20T09:00:00.000Z",
+  };
+  const proposal = buildPlannerProposal({
+    profile, items: [task], blocks: [], archiverEntries: [entry],
+    now: new Date("2026-08-21T10:00:00.000Z"),
+    operation: {
+      kind: "resolve_archiver_entry", entryId: entry.id, scope: "occurrence",
+      resolution: { kind: "reestimate", remainingMinutes: 45 },
+    },
+  });
+  const updated = proposal.changes.find((change) => change.kind === "upsert_archiver_entry");
+  assert.ok(updated?.kind === "upsert_archiver_entry");
+  assert.equal(updated.entry.reason, entry.reason);
+  assert.equal(updated.entry.pendingMinutes, 45);
+  assert.match(updated.entry.outcomeNote ?? "", /45/);
+  const updatedItem = proposal.changes.find((change) => change.kind === "update_item");
+  assert.ok(updatedItem?.kind === "update_item");
+  assert.equal(updatedItem.item.estimateMinutes, 45);
+});
+
+test("safe archiver placement never displaces another item and priority placement requires its fate", () => {
+  const task = item({
+    id: "archiver-priority", title: "Важный монтаж", estimateMinutes: 120,
+    minChunkMinutes: 120, commitmentLevel: "required", planningRank: 0,
+  });
+  const hobby = item({
+    id: "archiver-hobby", title: "Хобби", estimateMinutes: 60,
+    minChunkMinutes: 30, commitmentLevel: "desired", planningRank: 10,
+  });
+  const hobbyBlock: PlannerBlock = {
+    id: "archiver-hobby-block", itemId: hobby.id, title: hobby.title,
+    startAt: "2026-08-22T07:00:00.000Z", endAt: "2026-08-22T08:00:00.000Z",
+    status: "planned", source: "auto", fixed: false,
+  };
+  const entry: PlannerArchiverEntry = {
+    id: "unplaced:archiver-priority", category: "no_slot", origin: "unplaced",
+    itemId: task.id, title: task.title, reason: "Не нашлось безопасного окна.",
+    totalMinutes: 120, pendingMinutes: 120, scheduledMinutes: 0,
+    occurredAt: "2026-08-21T10:00:00.000Z", createdAt: "2026-08-21T10:00:00.000Z",
+  };
+  const availability = Object.fromEntries(Array.from({ length: 7 }, (_, index) => [
+    String(index + 1), index === 5 ? [{ start: "09:00", end: "12:30" }] : [],
+  ]));
+  const base = {
+    profile: { ...profile, availability, reserveRatio: 0 },
+    items: [task, hobby], blocks: [hobbyBlock], archiverEntries: [entry],
+    now: new Date("2026-08-21T12:00:00.000Z"),
+  };
+  const operation = {
+    kind: "resolve_archiver_entry" as const, entryId: entry.id, scope: "occurrence" as const,
+    resolution: {
+      kind: "schedule" as const, amount: { mode: "percent" as const, percent: 100 as const },
+      placement: { mode: "date" as const, date: "2026-08-22" }, strategy: "priority" as const,
+    },
+  };
+  const safe = buildPlannerProposal({
+    ...base,
+    operation: { ...operation, resolution: { ...operation.resolution, strategy: "safe" } },
+  });
+  assert.ok(!safe.changes.some((change) => change.kind === "move_block" && change.blockId === hobbyBlock.id));
+
+  const priority = buildPlannerProposal({ ...base, operation });
+  const group = priority.decisionGroups?.find((candidate) => candidate.id === `archiver-conflict:${hobbyBlock.id}`);
+  assert.ok(group?.blocking);
+  assert.ok(group.options.some((option) => option.id === `archive:${hobbyBlock.id}`));
+
+  const archived = buildPlannerProposal({
+    ...base, operation,
+    decisions: [{ groupId: group!.id, optionId: `archive:${hobbyBlock.id}` }],
+  });
+  assert.ok(!archived.decisionGroups?.some((candidate) => candidate.blocking));
+  assert.ok(archived.changes.some((change) => change.kind === "update_block_status"
+    && change.blockId === hobbyBlock.id && change.status === "cancelled"));
+  assert.ok(archived.changes.some((change) => change.kind === "upsert_archiver_entry"
+    && change.entry.id === `displaced:${hobbyBlock.id}`));
+
+  const kept = buildPlannerProposal({
+    ...base, operation,
+    decisions: [{ groupId: group!.id, optionId: `keep:${hobbyBlock.id}` }],
+  });
+  assert.ok(!kept.changes.some((change) => change.kind === "move_block" && change.blockId === hobbyBlock.id));
+});
+
+test("explicit replacement of a protected future item stays blocked until its separate fate is confirmed", () => {
+  const archivedTask = item({
+    id: "archiver-replace", title: "Срочный монтаж", estimateMinutes: 60,
+    minChunkMinutes: 60, commitmentLevel: "required",
+  });
+  const protectedTask = item({
+    id: "protected-replacement", kind: "fixed_event", title: "Обязательная встреча",
+    estimateMinutes: 60, commitmentLevel: "must_not_skip", deadlineType: "hard",
+    deadlineAt: "2026-08-22T08:00:00.000Z",
+  });
+  const protectedBlock: PlannerBlock = {
+    id: "protected-replacement-block", itemId: protectedTask.id, title: protectedTask.title,
+    startAt: "2026-08-22T07:00:00.000Z", endAt: "2026-08-22T08:00:00.000Z",
+    status: "planned", source: "manual", fixed: true, role: "work",
+  };
+  const entry: PlannerArchiverEntry = {
+    id: "unplaced:archiver-replace", category: "no_slot", origin: "unplaced",
+    itemId: archivedTask.id, title: archivedTask.title, reason: "Не нашлось окна.",
+    totalMinutes: 60, pendingMinutes: 60, scheduledMinutes: 0,
+    occurredAt: "2026-08-21T10:00:00.000Z", createdAt: "2026-08-21T10:00:00.000Z",
+  };
+  const operation = {
+    kind: "resolve_archiver_entry" as const, entryId: entry.id, scope: "occurrence" as const,
+    resolution: {
+      kind: "schedule" as const, amount: { mode: "percent" as const, percent: 100 as const },
+      placement: { mode: "replace" as const, targetBlockId: protectedBlock.id }, strategy: "priority" as const,
+    },
+  };
+  const base = {
+    profile: { ...profile, reserveRatio: 0 }, items: [archivedTask, protectedTask],
+    blocks: [protectedBlock], archiverEntries: [entry], now: new Date("2026-08-21T12:00:00.000Z"), operation,
+  };
+
+  const preview = buildPlannerProposal(base);
+  const group = preview.decisionGroups?.find((candidate) => candidate.id === `archiver-conflict:${protectedBlock.id}`);
+  assert.ok(group?.blocking);
+  assert.ok(preview.changes.some((change) => change.kind === "add_block"
+    && change.block.startAt === protectedBlock.startAt));
+  assert.ok(preview.changes.some((change) => change.kind === "update_block_status"
+    && change.blockId === protectedBlock.id && change.status === "cancelled"));
+
+  const archived = buildPlannerProposal({
+    ...base, decisions: [{ groupId: group!.id, optionId: `archive:${protectedBlock.id}` }],
+  });
+  assert.ok(!archived.decisionGroups?.some((candidate) => candidate.blocking));
+  assert.ok(archived.changes.some((change) => change.kind === "upsert_archiver_entry"
+    && change.entry.id === `displaced:${protectedBlock.id}`));
+
+  const cancelled = buildPlannerProposal({
+    ...base, decisions: [{ groupId: group!.id, optionId: `cancel:${protectedBlock.id}` }],
+  });
+  assert.ok(!cancelled.decisionGroups?.some((candidate) => candidate.blocking));
+  assert.ok(!cancelled.changes.some((change) => change.kind === "upsert_archiver_entry"
+    && change.entry.id === `displaced:${protectedBlock.id}`));
+
+  const kept = buildPlannerProposal({
+    ...base, decisions: [{ groupId: group!.id, optionId: `keep:${protectedBlock.id}` }],
+  });
+  assert.ok(!kept.decisionGroups?.some((candidate) => candidate.blocking));
+  assert.ok(!kept.changes.some((change) => change.kind === "update_block_status"
+    && change.blockId === protectedBlock.id));
+  assert.equal(kept.impact?.scheduledMinutes, 0);
+});
+
+test("explicit replacement rejects started and technical blocks", () => {
+  const archivedTask = item({ id: "archiver-invalid-replace", title: "Монтаж", estimateMinutes: 30 });
+  const targetTask = item({ id: "started-replacement", title: "Уже начато", estimateMinutes: 30 });
+  const entry: PlannerArchiverEntry = {
+    id: "unplaced:invalid-replace", category: "no_slot", origin: "unplaced",
+    itemId: archivedTask.id, title: archivedTask.title, reason: "Не нашлось окна.",
+    totalMinutes: 30, pendingMinutes: 30, scheduledMinutes: 0,
+    occurredAt: "2026-08-21T10:00:00.000Z", createdAt: "2026-08-21T10:00:00.000Z",
+  };
+  const operation = (targetBlockId: string) => ({
+    kind: "resolve_archiver_entry" as const, entryId: entry.id, scope: "occurrence" as const,
+    resolution: {
+      kind: "schedule" as const, amount: { mode: "percent" as const, percent: 100 as const },
+      placement: { mode: "replace" as const, targetBlockId }, strategy: "priority" as const,
+    },
+  });
+  const started: PlannerBlock = {
+    id: "started-replacement-block", itemId: targetTask.id, title: targetTask.title,
+    startAt: "2026-08-21T11:30:00.000Z", endAt: "2026-08-21T12:30:00.000Z",
+    actualStartAt: "2026-08-21T11:30:00.000Z", status: "in_progress", source: "manual", fixed: false, role: "work",
+  };
+  assert.throws(() => buildPlannerProposal({
+    profile, items: [archivedTask, targetTask], blocks: [started], archiverEntries: [entry],
+    now: new Date("2026-08-21T12:00:00.000Z"), operation: operation(started.id),
+  }), /будущее дело/);
+
+  const technical: PlannerBlock = {
+    id: "technical-replacement-block", title: "Сон",
+    startAt: "2026-08-22T00:00:00.000Z", endAt: "2026-08-22T07:00:00.000Z",
+    status: "planned", source: "auto", fixed: true, role: "protected_free",
+  };
+  assert.throws(() => buildPlannerProposal({
+    profile, items: [archivedTask], blocks: [technical], archiverEntries: [entry],
+    now: new Date("2026-08-21T12:00:00.000Z"), operation: operation(technical.id),
+  }), /служебные интервалы/);
 });
 
 test("a sixty-minute live extension previews and moves later flexible work atomically", () => {

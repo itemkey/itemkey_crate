@@ -1,5 +1,6 @@
 import {
   createDefaultPlannerProfile,
+  type PlannerArchiverEntry,
   type PlannerBlock,
   type PlannerCalibrationProgress,
   type PlannerConflict,
@@ -16,6 +17,7 @@ import {
   type PlannerProposalImpact,
   type PlannerProposalInput,
   type PlannerProposalChange,
+  type PlannerRemainderDistribution,
   type PlannerSleepEvent,
   type PlannerTimeWindow,
   type PlannerUncertaintyPolicy,
@@ -57,6 +59,7 @@ type PlannerEngineInput = PlannerProposalInput & {
   blocks: PlannerBlock[];
   sleepEvents?: PlannerSleepEvent[];
   deferredRemainders?: PlannerDeferredRemainder[];
+  archiverEntries?: PlannerArchiverEntry[];
   now?: Date;
   /** A transient profile used to compare sleep choices without changing saved preferences. */
   calculationProfile?: PlannerProfile;
@@ -65,6 +68,8 @@ type PlannerEngineInput = PlannerProposalInput & {
   /** Restricts an explicit schedule_item operation to the selected item. */
   targetItemIds?: string[];
   targetOccurrenceKey?: string;
+  /** Internal guard used by the Archiver's safe placement strategy. */
+  remainderDisplacementPolicy?: "allow" | "forbid";
   targetFromDate?: string;
 };
 
@@ -559,20 +564,15 @@ export function analyzePlannerDeadlines(
   blocks: PlannerBlock[],
   profile: PlannerProfile,
   now = new Date(),
-  deferredRemainders: PlannerDeferredRemainder[] = []
+  _deferredRemainders: PlannerDeferredRemainder[] = []
 ): PlannerDeadlineAnalysis[] {
+  void _deferredRemainders; // Kept for old callers; archived volume is intentionally never counted as completed work.
   return items.flatMap((item): PlannerDeadlineAnalysis[] => {
     if (item.status !== "active" || item.deadlineType === "none" || !item.deadlineAt) return [];
     const completedMinutes = blocks
       .filter((block) => block.itemId === item.id && block.status === "done" && !block.soft)
       .reduce((sum, block) => sum + accountedBlockMinutes(block), 0);
-    const expiredDeferredMinutes = deferredRemainders
-      .filter((remainder) => remainder.itemId === item.id
-        && !remainder.resolvedAt
-        && remainder.pendingMinutes > 0
-        && new Date(remainder.expiresAt).getTime() <= now.getTime())
-      .reduce((sum, remainder) => sum + remainder.pendingMinutes, 0);
-    const accountedMinutes = completedMinutes + expiredDeferredMinutes;
+    const accountedMinutes = completedMinutes;
     const remainingMinutes = Math.max(0, item.uncertaintyPolicy.duration.likelyMinutes - accountedMinutes);
     const maximumRemainingMinutes = Math.max(0, item.uncertaintyPolicy.duration.maxMinutes - accountedMinutes);
     const capacityBlocks = blocks.filter((block) => block.itemId !== item.id);
@@ -1562,6 +1562,33 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
           ? "Выполнение пропущено, а общий оставшийся объём уточнён перед пересборкой."
           : "Выполнение пропущено; оставшаяся работа возвращена в будущий план.",
     });
+    const missedMinutes = Math.max(1, isoDurationMinutes(missed.startAt, missed.endAt));
+    changes.push({
+      id: uniqueId("archiver-manual-missed", missed.id),
+      kind: "upsert_archiver_entry",
+      entry: {
+        id: `missed:${missed.id}`,
+        category: "missed",
+        origin: "unacknowledged",
+        itemId: missed.itemId,
+        sourceBlockId: missed.id,
+        occurrenceKey: missed.occurrenceKey,
+        title: missed.title,
+        reason: "Дело явно отмечено пропущенным; выбранный итог сохранён отдельно.",
+        totalMinutes: missedMinutes,
+        pendingMinutes: 0,
+        scheduledMinutes: input.missedOccurrence.disposition === "cancel_occurrence" ? 0 : missedMinutes,
+        occurredAt: missed.endAt,
+        createdAt: now.toISOString(),
+        resolvedAt: now.toISOString(),
+        resolution: input.missedOccurrence.disposition === "cancel_occurrence" ? "cancelled_occurrence" : "scheduled",
+        returnedAt: input.missedOccurrence.disposition === "cancel_occurrence" ? undefined : now.toISOString(),
+        outcomeNote: input.missedOccurrence.disposition === "cancel_occurrence"
+          ? "Пользователь отменил только это выполнение."
+          : "Пропущенный объём возвращён в будущий план.",
+      },
+      reason: "Пропуск и результат его разбора сохранены в Архиваторе дел.",
+    });
     carryMissedBlockId = input.missedOccurrence.disposition === "cancel_occurrence" ? undefined : missed.id;
     const itemIndex = missed.itemId ? items.findIndex((item) => item.id === missed.itemId) : -1;
     if (itemIndex >= 0) {
@@ -2443,7 +2470,7 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
           kind: "remove_block",
           blockId: request.sourceBlock.id,
           title: request.sourceBlock.title,
-          reason: "Вытеснённый блок возвращён в очередь: безопасного нового времени пока нет.",
+          reason: "Вытеснённый блок отправлен в Архиватор дел: безопасного нового времени пока нет.",
         });
       }
       if (request.reportRemainder === false || request.tier === "reserve" || request.tier === "extra") continue;
@@ -2493,8 +2520,8 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
           kind: "update_item",
           item: { ...request.item, unplacedReason: reason },
           reason: request.mandatory
-            ? "Причина сохранена вместе с обязательным делом в очереди."
-            : "Необязательный остаток явно оставлен в очереди вместо молчаливого удаления.",
+            ? "Причина сохранена вместе с обязательным делом в Архиваторе дел."
+            : "Необязательный остаток явно оставлен в Архиваторе дел вместо молчаливого удаления.",
         });
       }
     }
@@ -2516,6 +2543,89 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
     });
   }
   unplaced.splice(0, unplaced.length, ...combinedUnplaced.values());
+
+  const savedArchiverEntries = input.archiverEntries ?? [];
+  const requestedItemIds = new Set(requests.map((request) => request.item.id));
+  const carriedMissedChange = carryMissedBlockId
+    ? changes.find((change): change is Extract<PlannerProposalChange, { kind: "upsert_archiver_entry" }> =>
+      change.kind === "upsert_archiver_entry" && change.entry.sourceBlockId === carryMissedBlockId)
+    : undefined;
+  const carriedUnplaced = carriedMissedChange?.entry.itemId
+    ? unplaced.find((entry) => entry.itemId === carriedMissedChange.entry.itemId)
+    : undefined;
+  if (carriedMissedChange && carriedUnplaced) {
+    const pendingMinutes = Math.min(carriedMissedChange.entry.totalMinutes, carriedUnplaced.remainingMinutes);
+    const scheduledMinutes = carriedMissedChange.entry.totalMinutes - pendingMinutes;
+    carriedMissedChange.entry = {
+      ...carriedMissedChange.entry,
+      pendingMinutes,
+      scheduledMinutes,
+      returnedAt: scheduledMinutes > 0 ? now.toISOString() : undefined,
+      resolvedAt: pendingMinutes === 0 ? now.toISOString() : undefined,
+      resolution: pendingMinutes === 0 ? "scheduled" : undefined,
+      outcomeNote: scheduledMinutes > 0
+        ? "Часть пропущенного объёма возвращена в план; остальное продолжает ждать решения."
+        : "Для пропущенного объёма пока не нашлось безопасного времени.",
+    };
+  }
+  for (const entry of unplaced) {
+    if (carriedMissedChange?.entry.itemId === entry.itemId) continue;
+    const existingEntry = savedArchiverEntries.find((candidate) => !candidate.resolvedAt
+      && candidate.category === "no_slot" && candidate.itemId === entry.itemId);
+    const occurredAt = existingEntry?.occurredAt ?? now.toISOString();
+    const scheduledMinutes = (existingEntry?.scheduledMinutes ?? 0) + (entry.placedMinutes ?? 0);
+    const totalMinutes = Math.max(
+      existingEntry?.totalMinutes ?? 0,
+      scheduledMinutes + entry.remainingMinutes,
+      entry.requestedMinutes ?? entry.remainingMinutes
+    );
+    const archiveEntry: PlannerArchiverEntry = {
+      id: existingEntry?.id ?? uniqueId("unplaced-case", entry.itemId, occurredAt),
+      category: "no_slot",
+      origin: existingEntry?.origin ?? "unplaced",
+      itemId: entry.itemId,
+      sourceBlockId: existingEntry?.sourceBlockId,
+      occurrenceKey: existingEntry?.occurrenceKey,
+      title: entry.title,
+      reason: existingEntry?.reason ?? entry.reason,
+      outcomeNote: existingEntry && existingEntry.reason !== entry.reason
+        ? `Повторная попытка размещения: ${entry.reason}`
+        : existingEntry?.outcomeNote,
+      totalMinutes,
+      pendingMinutes: entry.remainingMinutes,
+      scheduledMinutes,
+      occurredAt,
+      createdAt: existingEntry?.createdAt ?? now.toISOString(),
+      returnedAt: existingEntry?.returnedAt,
+    };
+    changes.push({
+      id: uniqueId("archiver-unplaced", archiveEntry.id, archiveEntry.pendingMinutes),
+      kind: "upsert_archiver_entry",
+      entry: archiveEntry,
+      reason: "Неразмещённый объём сохранён в Архиваторе дел до явного решения.",
+    });
+  }
+  for (const existingEntry of savedArchiverEntries.filter((candidate) => !candidate.resolvedAt
+    && candidate.category === "no_slot" && candidate.itemId && requestedItemIds.has(candidate.itemId)
+    && !unplaced.some((entry) => entry.itemId === candidate.itemId))) {
+    const newlyPlacedMinutes = visiblePlacedMinutes.get(existingEntry.itemId!) ?? 0;
+    const totalMinutes = Math.max(existingEntry.totalMinutes, existingEntry.scheduledMinutes + newlyPlacedMinutes);
+    changes.push({
+      id: uniqueId("archiver-resolved", existingEntry.id),
+      kind: "upsert_archiver_entry",
+      entry: {
+        ...existingEntry,
+        totalMinutes,
+        pendingMinutes: 0,
+        scheduledMinutes: totalMinutes,
+        returnedAt: existingEntry.returnedAt ?? now.toISOString(),
+        resolvedAt: now.toISOString(),
+        resolution: "scheduled",
+        outcomeNote: "Весь объём получил безопасное время в подтверждённом плане.",
+      },
+      reason: "Запись Архиватора дел закрыта после полного размещения.",
+    });
+  }
 
   const unplacedItemIds = new Set(unplaced.map((entry) => entry.itemId));
   for (const item of items.filter((candidate) => candidate.unplacedReason)) {
@@ -2581,7 +2691,7 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
       options.push({
         id: `queue:${entry.itemId}`,
         kind: "queue",
-        title: "Явно оставить в очереди",
+        title: "Явно оставить в Архиваторе дел",
         description: "Дело не потеряется, но не будет считаться размещённым в этом плане.",
       });
     }
@@ -2599,7 +2709,7 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
       id: groupId,
       title: `${entry.title} не помещается`,
       message: `${entry.remainingMinutes} мин осталось без места. ${entry.reason}`,
-      blocking: Boolean(entry.blocking),
+      blocking: Boolean(entry.blocking && !selectedOptionId),
       options,
       selectedOptionId,
     };
@@ -3135,14 +3245,17 @@ function transferItemRank(item: PlannerItem | undefined): number {
 function transferDates(
   profile: PlannerProfile,
   distribution: NonNullable<PlannerProposalInput["remainderTransfer"]>["distribution"],
-  now: Date
+  now: Date,
+  includeToday = false
 ): { startDate: string; endDate: string; allowedDates?: string[]; targetDate?: string } {
   const today = formatDateInTimeZone(now, profile.timezone);
-  const startDate = addPlannerDays(today, 1);
+  const startDate = includeToday ? today : addPlannerDays(today, 1);
   const horizonEnd = addPlannerDays(today, horizonDays(profile.horizon) - 1);
   if (distribution.mode === "date") {
     if (distribution.date < startDate || distribution.date > horizonEnd) {
-      throw new Error("Выберите будущую дату внутри горизонта планирования.");
+      throw new Error(includeToday
+        ? "Выберите сегодня или будущую дату внутри горизонта планирования."
+        : "Выберите будущую дату внутри горизонта планирования.");
     }
     return { startDate: distribution.date, endDate: distribution.date, targetDate: distribution.date };
   }
@@ -3272,10 +3385,7 @@ function buildRemainderTransferProposal(input: PlannerEngineInput): PlannerPropo
     ? deferred.find((candidate) => candidate.id === transfer.deferredRemainderId)
     : undefined;
   if (transfer.deferredRemainderId && (!existing || existing.resolvedAt || existing.pendingMinutes <= 0)) {
-    throw new Error("Этот остаток уже перенесён или больше не находится в очереди.");
-  }
-  if (existing && new Date(existing.expiresAt).getTime() <= now.getTime()) {
-    throw new Error("Срок этого остатка в очереди уже истёк.");
+    throw new Error("Этот остаток уже перенесён или больше не находится в Архиваторе дел.");
   }
   const sourceBlock = input.blocks.find((block) => block.id === (existing?.sourceBlockId ?? transfer.blockId));
   if (!sourceBlock) throw new Error("Исходный блок для переноса не найден.");
@@ -3296,7 +3406,7 @@ function buildRemainderTransferProposal(input: PlannerEngineInput): PlannerPropo
   const requestedMinutes = transfer.amount.mode === "percent" && transfer.amount.percent === 100
     ? sourceRemainingMinutes
     : clamp(Math.round(rawRequested / STEP_MINUTES) * STEP_MINUTES, 5, sourceRemainingMinutes);
-  const range = transferDates(profile, transfer.distribution, now);
+  const range = transferDates(profile, transfer.distribution, now, input.operation?.kind === "resolve_archiver_entry");
   const occurrenceKey = existing?.id ?? uniqueId("remainder", sourceBlock.id, now.toISOString());
   const transferItem = normalizePlannerItem({
     ...item,
@@ -3340,7 +3450,8 @@ function buildRemainderTransferProposal(input: PlannerEngineInput): PlannerPropo
     items: itemById, occurrenceKey,
   });
 
-  const moveCandidates = baseOccupied.filter((block) => {
+  const mayDisplace = input.remainderDisplacementPolicy !== "forbid";
+  const moveCandidates = mayDisplace ? baseOccupied.filter((block) => {
     if (block.fixed || block.soft || block.itemId === item.id || block.status !== "planned") return false;
     const candidateItem = block.itemId ? itemById.get(block.itemId) : undefined;
     const date = blockLocalDate(block, profile.timezone);
@@ -3351,7 +3462,7 @@ function buildRemainderTransferProposal(input: PlannerEngineInput): PlannerPropo
       && candidateItem!.commitmentLevel !== "must_not_skip"
       && transferItemRank(candidateItem) > transferItemRank(item);
   }).sort((left, right) => transferItemRank(itemById.get(right.itemId!)) - transferItemRank(itemById.get(left.itemId!))
-    || right.startAt.localeCompare(left.startAt));
+    || right.startAt.localeCompare(left.startAt)) : [];
   for (const candidate of moveCandidates) {
     const scheduledBefore = placements.reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0);
     if (scheduledBefore >= requestedMinutes) break;
@@ -3398,7 +3509,7 @@ function buildRemainderTransferProposal(input: PlannerEngineInput): PlannerPropo
     occupied = [...adjustedBaseBlocks(), ...sleepBlocks];
   }
 
-  const optionalCandidates = baseOccupied.filter((block) => {
+  const optionalCandidates = mayDisplace ? baseOccupied.filter((block) => {
     if (block.fixed || block.itemId === item.id || block.status !== "planned") return false;
     const candidateItem = block.itemId ? itemById.get(block.itemId) : undefined;
     if (!candidateItem || candidateItem.deadlineType === "hard" || candidateItem.commitmentLevel === "must_not_skip") return false;
@@ -3411,7 +3522,7 @@ function buildRemainderTransferProposal(input: PlannerEngineInput): PlannerPropo
       || candidateItem.recurrence?.schedulingMode === "spare_time";
     return optionalTier && transferItemRank(candidateItem) > transferItemRank(item);
   }).sort((left, right) => transferItemRank(itemById.get(right.itemId!)) - transferItemRank(itemById.get(left.itemId!))
-    || right.startAt.localeCompare(left.startAt));
+    || right.startAt.localeCompare(left.startAt)) : [];
 
   const removableCandidates = optionalCandidates.filter((block) => block.soft
     || block.occurrenceKey?.includes(":reserve")
@@ -3452,6 +3563,7 @@ function buildRemainderTransferProposal(input: PlannerEngineInput): PlannerPropo
   const sleepChanges: PlannerProposalImpact["sleepChanges"] = [];
   const shortenedSleep = new Map<string, typeof sleepPlan[number]>();
   const mayBorrowSleep = profile.planningPolicy.focus === "work"
+    && input.operation?.kind !== "resolve_archiver_entry"
     && (item.deadlineType === "hard" || item.commitmentLevel === "must_not_skip");
   if (mayBorrowSleep && placements.reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0) < requestedMinutes) {
     const candidates = sleepPlan.filter((block) => block.selectedDurationMinutes > profile.planningPolicy.minimumNightMinutes);
@@ -3486,10 +3598,7 @@ function buildRemainderTransferProposal(input: PlannerEngineInput): PlannerPropo
 
   const scheduledMinutes = placements.reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0);
   const pendingMinutes = Math.max(0, sourceRemainingMinutes - scheduledMinutes);
-  const sevenDaysAt = new Date(now.getTime() + 7 * 86_400_000).toISOString();
-  const expiresAt = item.deadlineType === "hard" && item.deadlineAt && item.deadlineAt < sevenDaysAt
-    ? item.deadlineAt
-    : existing?.expiresAt ?? sevenDaysAt;
+  const expiresAt = "9999-12-31T23:59:59.999Z";
   const remainder: PlannerDeferredRemainder = {
     id: existing?.id ?? occurrenceKey,
     itemId: item.id,
@@ -3605,7 +3714,7 @@ function buildRemainderTransferProposal(input: PlannerEngineInput): PlannerPropo
     kind: existing ? "update_deferred_remainder" : "add_deferred_remainder",
     remainder,
     reason: pendingMinutes > 0
-      ? "Неперенесённая часть сохранена в очереди на семь суток или до жёсткого дедлайна."
+      ? "Неперенесённая часть сохранена в Архиваторе дел без срока истечения."
       : "Весь выбранный остаток получил время.",
   });
 
@@ -3760,7 +3869,424 @@ function summarizeProposalChanges(proposal: PlannerProposal): NonNullable<Planne
   return summary;
 }
 
+function buildArchiverResolutionProposal(input: PlannerEngineInput): PlannerProposal {
+  const operation = input.operation;
+  if (!operation || operation.kind !== "resolve_archiver_entry") {
+    throw new Error("Не выбрана запись Архиватора дел.");
+  }
+  const now = input.now ?? new Date();
+  const profile = normalizePlannerProfile(input.profile);
+  const entry = (input.archiverEntries ?? []).find((candidate) => candidate.id === operation.entryId);
+  if (!entry || entry.resolvedAt) throw new Error("Эта запись уже разобрана или больше не существует.");
+  const item = entry.itemId ? input.items.find((candidate) => candidate.id === entry.itemId) : undefined;
+  const sourceBlock = entry.sourceBlockId
+    ? input.blocks.find((candidate) => candidate.id === entry.sourceBlockId)
+    : undefined;
+
+  if (operation.resolution.kind === "late_complete") {
+    if (entry.category !== "missed" || !sourceBlock) {
+      throw new Error("Отметить выполненным можно только пропущенное календарное дело.");
+    }
+    const actualMinutes = clamp(Math.round(operation.resolution.actualMinutes), 1, 600_000);
+    const actualEndAt = sourceBlock.endAt;
+    const actualStartAt = addIsoMinutes(actualEndAt, -actualMinutes);
+    const changes: PlannerProposalChange[] = [{
+      id: uniqueId("archiver-late-done", sourceBlock.id),
+      kind: "update_block_status",
+      blockId: sourceBlock.id,
+      title: sourceBlock.title,
+      status: "done",
+      actualStartAt,
+      actualEndAt,
+      reason: "Пропуск исправлен на фактическое выполнение с указанной длительностью.",
+    }, {
+      id: uniqueId("archiver-resolve", entry.id, "late-completed"),
+      kind: "upsert_archiver_entry",
+      entry: {
+        ...entry,
+        pendingMinutes: 0,
+        resolvedAt: now.toISOString(),
+        resolution: "late_completed",
+        outcomeNote: "Пользователь подтвердил, что дело было выполнено вовремя, но не отмечено.",
+      },
+      reason: "Запись исправлена на выполненную и больше не считается пропуском.",
+    }];
+    if (item && item.kind !== "routine" && (!item.recurrence || item.recurrence.frequency === "once")) {
+      changes.push({
+        id: uniqueId("archiver-complete-item", item.id), kind: "update_item",
+        item: { ...item, status: "completed", unplacedReason: undefined },
+        reason: "Одноразовое дело завершено после поздней отметки.",
+      });
+    }
+    return {
+      baseRevision: profile.revision, trigger: "constructor", operation, changes, conflicts: [], unplaced: [],
+      effectiveFocus: profile.planningPolicy.focus,
+      effectiveFromAt: profile.planningPolicy.effectiveFromAt ?? now.toISOString(),
+      horizonStart: formatDateInTimeZone(now, profile.timezone),
+      horizonEnd: addPlannerDays(formatDateInTimeZone(now, profile.timezone), horizonDays(profile.horizon) - 1),
+    };
+  }
+
+  if (operation.resolution.kind === "reestimate") {
+    const remainingMinutes = clamp(Math.round(operation.resolution.remainingMinutes), 5, 600_000);
+    const changes: PlannerProposalChange[] = [{
+      id: uniqueId("archiver-reestimate", entry.id, remainingMinutes),
+      kind: "upsert_archiver_entry",
+      entry: {
+        ...entry,
+        totalMinutes: Math.max(entry.scheduledMinutes + remainingMinutes, remainingMinutes),
+        pendingMinutes: remainingMinutes,
+        outcomeNote: `Оставшийся объём переоценён: ${remainingMinutes} мин.`,
+      },
+      reason: "Оставшийся объём уточнён без потери исходной причины попадания.",
+    }];
+    if (item) {
+      changes.push({
+        id: uniqueId("archiver-reestimate-item", item.id, remainingMinutes),
+        kind: "update_item",
+        item: normalizePlannerItem({
+          ...item,
+          estimateMinutes: entry.scheduledMinutes + remainingMinutes,
+          uncertaintyPolicy: {
+            ...item.uncertaintyPolicy,
+            duration: {
+              ...item.uncertaintyPolicy.duration,
+              mode: "exact",
+              minMinutes: entry.scheduledMinutes + remainingMinutes,
+              likelyMinutes: entry.scheduledMinutes + remainingMinutes,
+              maxMinutes: entry.scheduledMinutes + remainingMinutes,
+            },
+          },
+        }),
+        reason: "Оценка связанного дела синхронизирована с новым оставшимся объёмом.",
+      });
+    }
+    return {
+      baseRevision: profile.revision, trigger: "constructor", operation, changes, conflicts: [], unplaced: [],
+      effectiveFocus: profile.planningPolicy.focus,
+      effectiveFromAt: profile.planningPolicy.effectiveFromAt ?? now.toISOString(),
+      horizonStart: formatDateInTimeZone(now, profile.timezone),
+      horizonEnd: addPlannerDays(formatDateInTimeZone(now, profile.timezone), horizonDays(profile.horizon) - 1),
+    };
+  }
+
+  if (operation.resolution.kind === "cancel") {
+    const changes: PlannerProposalChange[] = [];
+    const boundary = sourceBlock?.startAt ?? entry.occurredAt;
+    for (const block of input.blocks) {
+      if (!entry.itemId || block.itemId !== entry.itemId || block.status !== "planned") continue;
+      const selected = operation.scope === "occurrence"
+        ? Boolean(sourceBlock && block.id === sourceBlock.id)
+        : operation.scope === "future" ? block.startAt >= boundary : new Date(block.startAt) > now;
+      if (!selected) continue;
+      changes.push({
+        id: uniqueId("archiver-cancel-block", block.id), kind: "update_block_status",
+        blockId: block.id, title: block.title, status: "cancelled",
+        reason: "Будущее выполнение отменено при разборе Архиватора дел.",
+      });
+    }
+    if (operation.scope === "item" && item) {
+      changes.push({
+        id: uniqueId("archiver-cancel-item", item.id), kind: "update_item",
+        item: { ...item, status: "archived", unplacedReason: undefined },
+        reason: "Всё дело отменено; выполненная и прошлая история сохранена.",
+      });
+    }
+    const resolution = operation.scope === "item" ? "cancelled_item"
+      : operation.scope === "future" ? "cancelled_future" : "cancelled_occurrence";
+    changes.push({
+      id: uniqueId("archiver-resolve", entry.id, resolution), kind: "upsert_archiver_entry",
+      entry: { ...entry, pendingMinutes: 0, resolvedAt: now.toISOString(), resolution,
+        outcomeNote: "Запись разобрана явной отменой; исходная причина сохранена для статистики." },
+      reason: "Отмена сохранена отдельно от причины попадания в Архиватор дел.",
+    });
+    return {
+      baseRevision: profile.revision, trigger: "constructor", operation, changes, conflicts: [], unplaced: [],
+      effectiveFocus: profile.planningPolicy.focus,
+      effectiveFromAt: profile.planningPolicy.effectiveFromAt ?? now.toISOString(),
+      horizonStart: formatDateInTimeZone(now, profile.timezone),
+      horizonEnd: addPlannerDays(formatDateInTimeZone(now, profile.timezone), horizonDays(profile.horizon) - 1),
+    };
+  }
+
+  if (!item) throw new Error("Связанное дело больше не найдено.");
+  const sourceRemainingMinutes = Math.max(1, entry.pendingMinutes);
+  const requestedMinutes = operation.resolution.amount.mode === "percent"
+    ? operation.resolution.amount.percent === 100 ? sourceRemainingMinutes
+      : clamp(Math.round(sourceRemainingMinutes * operation.resolution.amount.percent / 100 / STEP_MINUTES) * STEP_MINUTES, 5, sourceRemainingMinutes)
+    : clamp(Math.round(operation.resolution.amount.minutes), 5, sourceRemainingMinutes);
+  let distribution: PlannerRemainderDistribution = { mode: "asap" };
+  let schedulingItem = item;
+  const placement = operation.resolution.placement;
+  let replacementTarget: PlannerBlock | undefined;
+  let replacementTargetItem: PlannerItem | undefined;
+  if (placement.mode === "spread_week") distribution = { mode: "spread_week" };
+  else if (placement.mode === "date") distribution = { mode: "date", date: placement.date };
+  else if (placement.mode === "first_free") distribution = placement.date ? { mode: "date", date: placement.date } : { mode: "asap" };
+  else {
+    let exactAt: string;
+    if (placement.mode === "exact") exactAt = zonedPlannerDateTimeToUtc(placement.date, placement.start, profile.timezone);
+    else if (placement.mode === "replace") {
+      replacementTarget = input.blocks.find((block) => block.id === placement.targetBlockId);
+      if (!replacementTarget) throw new Error("Выбранное для замены дело больше не найдено.");
+      if (replacementTarget.id === sourceBlock?.id || replacementTarget.itemId === item.id) {
+        throw new Error("Нельзя заменить дело той же записью Архиватора.");
+      }
+      if (replacementTarget.status !== "planned" || new Date(replacementTarget.startAt) <= now) {
+        throw new Error("Заменять можно только будущее дело, которое ещё не началось.");
+      }
+      if (!replacementTarget.itemId || replacementTarget.soft || (replacementTarget.role && replacementTarget.role !== "work")) {
+        throw new Error("Сон, резервы и служебные интервалы нельзя заменять через Архиватор дел.");
+      }
+      replacementTargetItem = input.items.find((candidate) => candidate.id === replacementTarget!.itemId);
+      if (!replacementTargetItem) throw new Error("Связанное с выбранным блоком дело больше не найдено.");
+      exactAt = replacementTarget.startAt;
+    }
+    else {
+      const anchor = input.blocks.find((block) => block.id === placement.anchorBlockId);
+      if (!anchor) throw new Error("Опорное дело больше не найдено.");
+      const gap = placement.gapMinutes ?? profile.defaultBufferMinutes;
+      exactAt = placement.mode === "after" ? addIsoMinutes(anchor.endAt, gap) : addIsoMinutes(anchor.startAt, -gap - requestedMinutes);
+    }
+    const exactDate = formatDateInTimeZone(new Date(exactAt), profile.timezone);
+    const exactStart = formatTimeInTimeZone(new Date(exactAt), profile.timezone);
+    distribution = { mode: "date", date: exactDate };
+    schedulingItem = normalizePlannerItem({
+      ...item,
+      uncertaintyPolicy: {
+        ...item.uncertaintyPolicy,
+        date: { mode: "exact", exactDate },
+        time: { mode: "exact", exactStart },
+      },
+    });
+  }
+  const typedConflictDecisions = operation.resolution.conflictDecisions ?? [];
+  const priorityInsertion = operation.resolution.strategy === "priority" || placement.mode === "replace";
+  const keepExisting = typedConflictDecisions.some((decision) => decision.disposition === "keep")
+    || (input.decisions ?? []).some((decision) => decision.optionId.startsWith("keep:"));
+  if (placement.mode === "replace" && !keepExisting) {
+    schedulingItem = normalizePlannerItem({
+      ...schedulingItem, commitmentLevel: "must_not_skip", priority: "critical", planningRank: 0,
+    });
+  } else if (operation.resolution.strategy === "safe" || keepExisting) {
+    schedulingItem = normalizePlannerItem({
+      ...schedulingItem, commitmentLevel: "if_time", priority: "low", planningRank: 1_000_000,
+    });
+  }
+  const protectedReplacement = Boolean(replacementTarget && replacementTargetItem
+    && (replacementTarget.fixed || replacementTargetItem.deadlineType === "hard"
+      || replacementTargetItem.commitmentLevel === "must_not_skip"));
+  const replacementGroupId = replacementTarget ? `archiver-conflict:${replacementTarget.id}` : undefined;
+  const replacementSelection = replacementGroupId
+    ? typedConflictDecisions.find((decision) => decision.blockId === replacementTarget!.id)?.disposition
+      ?? (input.decisions ?? []).find((decision) => decision.groupId === replacementGroupId)?.optionId.split(":", 1)[0]
+    : undefined;
+  const removeProtectedReplacementForPreview = protectedReplacement
+    && replacementSelection !== "keep";
+  const transferBlocks = removeProtectedReplacementForPreview
+    ? input.blocks.map((block) => block.id === replacementTarget!.id ? { ...block, status: "cancelled" as const } : block)
+    : input.blocks;
+  const virtualSource: PlannerBlock = sourceBlock ?? {
+    id: `archiver-source:${entry.id}`, itemId: item.id, title: item.title,
+    startAt: entry.occurredAt, endAt: addIsoMinutes(entry.occurredAt, Math.max(1, entry.totalMinutes)),
+    status: "cancelled", source: "auto", fixed: false, role: "work", occurrenceKey: entry.occurrenceKey,
+  };
+  const deferred: PlannerDeferredRemainder = {
+    id: entry.id, itemId: item.id, sourceBlockId: virtualSource.id, occurrenceKey: entry.occurrenceKey,
+    title: item.title, totalMinutes: entry.totalMinutes, pendingMinutes: entry.pendingMinutes,
+    scheduledMinutes: entry.scheduledMinutes, createdAt: entry.createdAt,
+    expiresAt: "9999-12-31T23:59:59.999Z",
+  };
+  const proposal = buildRemainderTransferProposal({
+    ...input,
+    operation,
+    items: input.items.map((candidate) => candidate.id === schedulingItem.id ? schedulingItem : candidate),
+    blocks: sourceBlock ? transferBlocks : [...transferBlocks, virtualSource],
+    deferredRemainders: [...(input.deferredRemainders ?? []).filter((candidate) => candidate.id !== deferred.id), deferred],
+    remainderDisplacementPolicy: priorityInsertion && !keepExisting && !protectedReplacement ? "allow" : "forbid",
+    remainderTransfer: {
+      blockId: virtualSource.id,
+      deferredRemainderId: deferred.id,
+      amount: operation.resolution.amount,
+      distribution,
+    },
+  });
+  const scheduledMinutes = proposal.impact?.scheduledMinutes ?? 0;
+  const pendingMinutes = Math.max(0, entry.pendingMinutes - scheduledMinutes);
+  proposal.operation = operation;
+  proposal.remainderTransfer = undefined;
+  proposal.changes.push({
+    id: uniqueId("archiver-schedule", entry.id, pendingMinutes), kind: "upsert_archiver_entry",
+    entry: {
+      ...entry,
+      pendingMinutes,
+      scheduledMinutes: entry.scheduledMinutes + scheduledMinutes,
+      returnedAt: entry.returnedAt ?? (scheduledMinutes > 0 ? now.toISOString() : undefined),
+      resolvedAt: pendingMinutes === 0 ? now.toISOString() : undefined,
+      resolution: pendingMinutes === 0 ? "scheduled" : undefined,
+      outcomeNote: pendingMinutes === 0
+        ? "Весь объём возвращён в подтверждённый план."
+        : "Часть объёма возвращена в план; остаток продолжает ждать решения.",
+    },
+    reason: "Состояние Архиватора дел обновлено атомарно вместе с календарём.",
+  });
+  if (protectedReplacement && replacementTarget && replacementGroupId) {
+    const archiveId = `archive:${replacementTarget.id}`;
+    const cancelId = `cancel:${replacementTarget.id}`;
+    const keepId = `keep:${replacementTarget.id}`;
+    const selectedOptionId = replacementSelection
+      ? `${replacementSelection}:${replacementTarget.id}`
+      : undefined;
+    const accepted = selectedOptionId === archiveId || selectedOptionId === cancelId || selectedOptionId === keepId;
+    if (selectedOptionId === archiveId || selectedOptionId === cancelId || !selectedOptionId) {
+      proposal.changes.push({
+        id: uniqueId("archiver-protected-replacement", replacementTarget.id, selectedOptionId ?? "preview"),
+        kind: "update_block_status",
+        blockId: replacementTarget.id,
+        title: replacementTarget.title,
+        status: "cancelled",
+        reason: selectedOptionId === archiveId
+          ? "Пользователь отдельно подтвердил отправку выбранного обязательного дела в Архиватор дел."
+          : selectedOptionId === cancelId
+            ? "Пользователь отдельно подтвердил отмену выбранного обязательного дела."
+            : "Предварительное освобождение места требует отдельного подтверждения судьбы защищённого дела.",
+      });
+      if (selectedOptionId === archiveId) {
+        const minutes = Math.max(1, isoDurationMinutes(replacementTarget.startAt, replacementTarget.endAt));
+        proposal.changes.push({
+          id: uniqueId("archiver-protected-displaced", replacementTarget.id),
+          kind: "upsert_archiver_entry",
+          entry: {
+            id: `displaced:${replacementTarget.id}`,
+            category: "no_slot",
+            origin: "displaced",
+            itemId: replacementTarget.itemId,
+            sourceBlockId: replacementTarget.id,
+            occurrenceKey: replacementTarget.occurrenceKey,
+            title: replacementTarget.title,
+            reason: `Освобождено место для «${entry.title}»; защищённое дело ожидает нового решения.`,
+            totalMinutes: minutes,
+            pendingMinutes: minutes,
+            scheduledMinutes: 0,
+            occurredAt: now.toISOString(),
+            createdAt: now.toISOString(),
+          },
+          reason: "Вытеснённое защищённое дело сохранено в Архиваторе без срока истечения.",
+        });
+      }
+    }
+    proposal.decisionGroups = [{
+      id: replacementGroupId,
+      title: replacementTarget.title,
+      message: replacementTarget.fixed || replacementTargetItem?.deadlineType === "hard"
+        || replacementTargetItem?.commitmentLevel === "must_not_skip"
+        ? "Это фиксированное, дедлайновое или обязательное дело. Отдельно подтвердите, что с ним произойдёт."
+        : "Отдельно подтвердите судьбу заменяемого дела.",
+      blocking: !accepted,
+      selectedOptionId: accepted ? selectedOptionId : undefined,
+      options: [
+        { id: archiveId, kind: "queue", title: "Отправить в Архиватор", description: "Освободить выбранное время, но сохранить дело для дальнейшего разбора." },
+        { id: cancelId, kind: "cancel", title: "Отменить это выполнение", description: "Отменить только выбранный календарный блок с сохранением истории." },
+        { id: keepId, kind: "keep", title: "Оставить без изменений", description: "Не трогать защищённый блок; неразмещённый объём останется в Архиваторе." },
+      ],
+    }];
+    proposal.decisions = input.decisions;
+    const refreshed = summarizeProposalImpact(input, proposal);
+    if (proposal.impact) proposal.impact = { ...proposal.impact, moves: refreshed.moves, reductions: refreshed.reductions, sleepChanges: refreshed.sleepChanges };
+    return proposal;
+  }
+  if (priorityInsertion && !keepExisting) {
+    const selected = new Map((input.decisions ?? []).map((decision) => [decision.groupId, decision.optionId]));
+    for (const decision of typedConflictDecisions) {
+      selected.set(`archiver-conflict:${decision.blockId}`, `${decision.disposition}:${decision.blockId}`);
+    }
+    const affectedChanges = proposal.changes.filter((change): change is Extract<PlannerProposalChange, { kind: "move_block" | "remove_block" }> =>
+      (change.kind === "move_block" || change.kind === "remove_block")
+      && (change.reason.includes("Менее важный") || change.reason.includes("Необязательный")));
+    const groups: NonNullable<PlannerProposal["decisionGroups"]> = [];
+    for (const affected of affectedChanges) {
+      const block = input.blocks.find((candidate) => candidate.id === affected.blockId);
+      if (!block) continue;
+      const groupId = `archiver-conflict:${block.id}`;
+      const optionId = selected.get(groupId);
+      const proposedKind = affected.kind === "move_block" && affected.toStartAt !== affected.fromStartAt ? "move" : "shorten";
+      const acceptId = `${proposedKind}:${block.id}`;
+      const archiveId = `archive:${block.id}`;
+      const cancelId = `cancel:${block.id}`;
+      const keepId = `keep:${block.id}`;
+      if (optionId === archiveId || optionId === cancelId) {
+        const index = proposal.changes.indexOf(affected);
+        proposal.changes.splice(index, 1, {
+          id: uniqueId("archiver-displaced-cancel", block.id, optionId),
+          kind: "update_block_status",
+          blockId: block.id,
+          title: block.title,
+          status: "cancelled",
+          reason: optionId === archiveId
+            ? "Пользователь явно отправил вытеснённое дело в Архиватор дел."
+            : "Пользователь явно отменил вытеснённое дело.",
+        });
+        if (optionId === archiveId) {
+          const minutes = Math.max(1, isoDurationMinutes(block.startAt, block.endAt));
+          proposal.changes.push({
+            id: uniqueId("archiver-displaced", block.id),
+            kind: "upsert_archiver_entry",
+            entry: {
+              id: `displaced:${block.id}`,
+              category: "no_slot",
+              origin: "displaced",
+              itemId: block.itemId,
+              sourceBlockId: block.id,
+              occurrenceKey: block.occurrenceKey,
+              title: block.title,
+              reason: `Освобождено место для «${entry.title}»; это дело ожидает нового решения.`,
+              totalMinutes: minutes,
+              pendingMinutes: minutes,
+              scheduledMinutes: 0,
+              occurredAt: now.toISOString(),
+              createdAt: now.toISOString(),
+            },
+            reason: "Вытеснённое дело не потеряно и сохранено без штрафа как дело без места.",
+          });
+        }
+      }
+      groups.push({
+        id: groupId,
+        title: block.title,
+        message: proposedKind === "move"
+          ? "Для приоритетной вставки это дело нужно перенести. Подтвердите его судьбу."
+          : "Для приоритетной вставки это дело нужно сократить или убрать. Подтвердите его судьбу.",
+        blocking: optionId !== acceptId && optionId !== archiveId && optionId !== cancelId && optionId !== keepId,
+        selectedOptionId: optionId,
+        options: [
+          { id: acceptId, kind: proposedKind, title: proposedKind === "move" ? "Подтвердить перенос" : "Подтвердить сокращение", description: affected.reason },
+          { id: archiveId, kind: "queue", title: "Отправить в Архиватор", description: "Дело не потеряется и останется без срока истечения." },
+          { id: cancelId, kind: "cancel", title: "Отменить", description: "Выполнение будет отменено с сохранением истории." },
+          { id: keepId, kind: "keep", title: "Оставить как есть", description: "Сохранить этот блок и использовать только оставшееся безопасное место." },
+        ],
+      });
+    }
+    proposal.decisionGroups = groups;
+    proposal.decisions = input.decisions;
+    const refreshed = summarizeProposalImpact(input, proposal);
+    if (proposal.impact) {
+      proposal.impact = {
+        ...proposal.impact,
+        moves: refreshed.moves,
+        reductions: refreshed.reductions,
+        sleepChanges: refreshed.sleepChanges,
+      };
+    }
+  }
+  return proposal;
+}
+
 export function buildPlannerProposal(input: PlannerEngineInput): PlannerProposal {
+  if (input.operation?.kind === "resolve_archiver_entry") {
+    const proposal = buildArchiverResolutionProposal(input);
+    const withImpact = proposal.impact ? proposal : { ...proposal, impact: summarizeProposalImpact(input, proposal) };
+    return { ...withImpact, humanSummary: summarizeProposalChanges(withImpact) };
+  }
   const prepared = prepareConstructorInput(input);
   if (prepared.remainderTransfer) return buildRemainderTransferProposal(prepared);
   const proposal = resolveAutomaticWake(prepared) ?? resolvePreferredSleepDuration(prepared);
@@ -3898,6 +4424,73 @@ export function plannerItemPlanningStates(items: PlannerItem[], blocks: PlannerB
       reasonCode: planningReasonCode(item.unplacedReason),
     };
   });
+}
+
+export function reconcilePlannerArchiverEntries(
+  items: PlannerItem[],
+  blocks: PlannerBlock[],
+  existingEntries: PlannerArchiverEntry[],
+  now = new Date()
+): { entries: PlannerArchiverEntry[]; missedBlockIds: string[] } {
+  const existingIds = new Set(existingEntries.map((entry) => entry.id));
+  const unresolvedItemIds = new Set(existingEntries.flatMap((entry) => !entry.resolvedAt && entry.pendingMinutes > 0 && entry.itemId
+    ? [entry.itemId]
+    : []));
+  const entries: PlannerArchiverEntry[] = [];
+  const missedBlockIds: string[] = [];
+  const nowMs = now.getTime();
+  const graceCutoff = now.getTime() - 15 * 60_000;
+
+  for (const block of blocks) {
+    if (block.status !== "planned" || block.soft || !block.itemId) continue;
+    if (block.role && block.role !== "work" && block.role !== "calibration") continue;
+    const endMs = new Date(block.endAt).getTime();
+    if (endMs > graceCutoff) {
+      if (endMs <= nowMs) unresolvedItemIds.add(block.itemId);
+      continue;
+    }
+    const item = items.find((candidate) => candidate.id === block.itemId);
+    if (!item || item.status === "archived") continue;
+    const id = `missed:${block.id}`;
+    if (existingIds.has(id)) continue;
+    const minutes = Math.max(1, isoDurationMinutes(block.startAt, block.endAt));
+    entries.push({
+      id, category: "missed", origin: "unacknowledged", itemId: block.itemId,
+      sourceBlockId: block.id, occurrenceKey: block.occurrenceKey, title: block.title,
+      reason: "Дело закончилось более 15 минут назад и не было отмечено.",
+      totalMinutes: minutes, pendingMinutes: minutes, scheduledMinutes: 0,
+      occurredAt: block.endAt, createdAt: now.toISOString(),
+    });
+    existingIds.add(id);
+    unresolvedItemIds.add(block.itemId);
+    missedBlockIds.push(block.id);
+  }
+
+  const planningStateByItem = new Map(plannerItemPlanningStates(items, blocks, now).map((state) => [state.itemId, state]));
+  for (const item of items) {
+    if (item.status !== "active" || item.kind === "fixed_event" || unresolvedItemIds.has(item.id)) continue;
+    const planningState = planningStateByItem.get(item.id);
+    const minutes = Math.max(0, planningState?.remainingMinutes ?? item.uncertaintyPolicy.duration.likelyMinutes);
+    if (minutes === 0) continue;
+    const occurredAt = item.updatedAt ?? item.createdAt ?? now.toISOString();
+    const entry: PlannerArchiverEntry = {
+      id: uniqueId("unplaced-reconcile", item.id, occurredAt),
+      category: "no_slot",
+      origin: "unplaced",
+      itemId: item.id,
+      title: item.title,
+      reason: item.unplacedReason ?? "Активный оставшийся объём не был размещён до первого запуска Архиватора дел.",
+      totalMinutes: Math.max(minutes, planningState?.requestedMinutes ?? minutes),
+      pendingMinutes: minutes,
+      scheduledMinutes: planningState?.plannedMinutes ?? 0,
+      occurredAt,
+      createdAt: now.toISOString(),
+    };
+    entries.push(entry);
+    existingIds.add(entry.id);
+    unresolvedItemIds.add(item.id);
+  }
+  return { entries, missedBlockIds };
 }
 
 export function plannerCompletionSuggestion(item: PlannerItem, blocks: PlannerBlock[]): number | null {

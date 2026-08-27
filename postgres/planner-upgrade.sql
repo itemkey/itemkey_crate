@@ -180,6 +180,63 @@ alter table public.planner_deferred_remainders
 create index if not exists planner_deferred_remainders_user_expiry_idx
   on public.planner_deferred_remainders(app_user_id, expires_at, resolved_at);
 
+create table if not exists public.planner_archiver_entries (
+  app_user_id uuid not null references public.app_users(id) on delete cascade,
+  id text not null check (char_length(trim(id)) between 1 and 200),
+  category text not null check (category in ('missed', 'no_slot')),
+  origin text not null check (origin in ('unacknowledged', 'unplaced', 'deferred_remainder', 'displaced', 'legacy_remainder')),
+  item_id text null,
+  source_block_id text null,
+  occurrence_key text null,
+  title text not null check (char_length(trim(title)) between 1 and 160),
+  reason text not null default '',
+  outcome_note text null,
+  total_minutes integer not null check (total_minutes between 1 and 600000),
+  pending_minutes integer not null check (pending_minutes between 0 and 600000),
+  scheduled_minutes integer not null default 0 check (scheduled_minutes between 0 and 600000),
+  occurred_at timestamptz not null,
+  returned_at timestamptz null,
+  resolved_at timestamptz null,
+  resolution text null check (resolution is null or resolution in ('late_completed', 'scheduled', 'cancelled_occurrence', 'cancelled_future', 'cancelled_item')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key (app_user_id, id)
+);
+alter table public.planner_archiver_entries
+  add column if not exists outcome_note text null;
+alter table public.planner_archiver_entries
+  add column if not exists returned_at timestamptz null;
+alter table public.planner_archiver_entries
+  drop constraint if exists planner_archiver_entries_volume_check;
+alter table public.planner_archiver_entries
+  add constraint planner_archiver_entries_volume_check
+    check (pending_minutes + scheduled_minutes <= total_minutes);
+create index if not exists planner_archiver_entries_user_state_idx
+  on public.planner_archiver_entries(app_user_id, resolved_at, category, occurred_at desc);
+create index if not exists planner_archiver_entries_user_source_idx
+  on public.planner_archiver_entries(app_user_id, source_block_id, origin)
+  where source_block_id is not null;
+
+insert into public.planner_archiver_entries(
+  app_user_id,id,category,origin,item_id,source_block_id,occurrence_key,title,reason,
+  total_minutes,pending_minutes,scheduled_minutes,occurred_at,resolved_at,resolution,created_at,updated_at
+)
+select app_user_id,id,
+  case when resolved_at is null and expires_at <= now() then 'missed' else 'no_slot' end,
+  'legacy_remainder',item_id,source_block_id,occurrence_key,title,
+  case when resolved_at is null and expires_at <= now()
+    then 'Срок старого остатка истёк до появления Архиватора дел.'
+    else 'Перенесено из прежней очереди остатков.' end,
+  total_minutes,pending_minutes,scheduled_minutes,created_at,resolved_at,
+  case resolution when 'scheduled' then 'scheduled' when 'cancelled' then 'cancelled_occurrence' else null end,
+  created_at,updated_at
+from public.planner_deferred_remainders
+on conflict(app_user_id,id) do nothing;
+
+update public.planner_archiver_entries
+set returned_at=resolved_at
+where resolution='scheduled' and returned_at is null;
+
 create table if not exists public.planner_proposals (
   id uuid primary key default gen_random_uuid(),
   app_user_id uuid not null references public.app_users(id) on delete cascade,

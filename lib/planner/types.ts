@@ -137,6 +137,42 @@ export type PlannerDeferredRemainder = {
   resolution?: "scheduled" | "cancelled";
 };
 
+export type PlannerArchiverCategory = "missed" | "no_slot";
+export type PlannerArchiverOrigin =
+  | "unacknowledged"
+  | "unplaced"
+  | "deferred_remainder"
+  | "displaced"
+  | "legacy_remainder";
+export type PlannerArchiverResolution =
+  | "late_completed"
+  | "scheduled"
+  | "cancelled_occurrence"
+  | "cancelled_future"
+  | "cancelled_item";
+
+/** A durable, auditable case that must not disappear until the user resolves it. */
+export type PlannerArchiverEntry = {
+  id: string;
+  category: PlannerArchiverCategory;
+  origin: PlannerArchiverOrigin;
+  itemId?: string;
+  sourceBlockId?: string;
+  occurrenceKey?: string;
+  title: string;
+  reason: string;
+  outcomeNote?: string;
+  totalMinutes: number;
+  pendingMinutes: number;
+  scheduledMinutes: number;
+  occurredAt: string;
+  createdAt: string;
+  updatedAt?: string;
+  returnedAt?: string;
+  resolvedAt?: string;
+  resolution?: PlannerArchiverResolution;
+};
+
 export type PlannerProposalImpact = {
   kind: "remainder_transfer" | "general";
   itemId?: string;
@@ -457,6 +493,29 @@ export type PlannerPlacement =
   | { mode: "before" | "after"; anchorBlockId: string; gapMinutes?: number }
   | { mode: "first_free"; date?: string };
 
+export type PlannerArchiverPlacement = PlannerPlacement
+  | { mode: "spread_week" }
+  | { mode: "replace"; targetBlockId: string };
+
+export type PlannerArchiverConflictDecision = {
+  blockId: string;
+  disposition: "move" | "shorten" | "archive" | "cancel" | "keep";
+};
+
+export type PlannerArchiverResolutionInput =
+  | { kind: "late_complete"; actualMinutes: number }
+  | { kind: "reestimate"; remainingMinutes: number }
+  | { kind: "cancel" }
+  | {
+      kind: "schedule";
+      amount:
+        | { mode: "percent"; percent: 25 | 50 | 75 | 100 }
+        | { mode: "minutes"; minutes: number };
+      placement: PlannerArchiverPlacement;
+      strategy: "safe" | "priority";
+      conflictDecisions?: PlannerArchiverConflictDecision[];
+    };
+
 export type PlannerConstructorOperation =
   | { kind: "add_item"; draft: PlannerDraft }
   | { kind: "schedule_item"; target: PlannerOperationTarget; scope?: Exclude<PlannerOperationScope, "item"> }
@@ -487,11 +546,17 @@ export type PlannerConstructorOperation =
       fromAt: string;
       decisions: Array<{ itemId: string; disposition: "required" | "desired" | "if_time" | "cancel" }>;
       bedtime?: { date: string; time: string };
+    }
+  | {
+      kind: "resolve_archiver_entry";
+      entryId: string;
+      scope: PlannerOperationScope;
+      resolution: PlannerArchiverResolutionInput;
     };
 
 export type PlannerDecisionOption = {
   id: string;
-  kind: "move" | "shorten" | "cancel" | "queue" | "edit";
+  kind: "move" | "shorten" | "cancel" | "queue" | "keep" | "edit";
   title: string;
   description: string;
 };
@@ -588,6 +653,12 @@ export type PlannerProposalChange =
       id: string;
       kind: "add_deferred_remainder" | "update_deferred_remainder";
       remainder: PlannerDeferredRemainder;
+      reason: string;
+    }
+  | {
+      id: string;
+      kind: "upsert_archiver_entry";
+      entry: PlannerArchiverEntry;
       reason: string;
     };
 
@@ -733,7 +804,7 @@ export type PlannerBootstrap = {
   blocks: PlannerBlock[];
   sleepEvents: PlannerSleepEvent[];
   sleepBlocks: PlannerSleepBlock[];
-  deferredRemainders: PlannerDeferredRemainder[];
+  archiverEntries: PlannerArchiverEntry[];
   calibrationProgress: PlannerCalibrationProgress[];
   planningStates: PlannerItemPlanningState[];
   latestChangeSetId?: string;

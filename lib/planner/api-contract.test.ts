@@ -7,6 +7,7 @@ function source(relativeFromRepository: string): string {
 }
 
 const store = source("lib/planner/store.ts");
+const engine = source("lib/planner/engine.ts");
 const plannerUpgrade = source("postgres/planner-upgrade.sql");
 const freshSchema = source("postgres/schema.sql");
 const proposalsRoute = source("app/api/planner/proposals/route.ts");
@@ -15,6 +16,7 @@ const autoplannerModal = source("components/planner/autoplanner-modal.tsx");
 const constructorModal = source("components/planner/plan-constructor-modal.tsx");
 const itemDetailsModal = source("components/planner/item-details-modal.tsx");
 const plannerStyles = source("components/planner/planner-workspace.module.css");
+const archiverReconcileRoute = source("app/api/planner/archiver/reconcile/route.ts");
 const mutationRoutes = [
   "app/api/planner/settings/route.ts",
   "app/api/planner/items/route.ts",
@@ -26,6 +28,7 @@ const mutationRoutes = [
   "app/api/planner/legacy-import/route.ts",
   "app/api/planner/reset/route.ts",
   "app/api/planner/sleep/check-in/route.ts",
+  "app/api/planner/archiver/reconcile/route.ts",
 ];
 
 test("every planner mutation route authenticates the request and emits planner sync", () => {
@@ -48,6 +51,7 @@ test("direct mutations require a revision while proposal apply verifies its base
     "app/api/planner/legacy-import/route.ts",
     "app/api/planner/reset/route.ts",
     "app/api/planner/sleep/check-in/route.ts",
+    "app/api/planner/archiver/reconcile/route.ts",
   ]) {
     assert.match(source(route), /assertPlannerRevision/, `${route} must validate expected revision`);
   }
@@ -89,6 +93,8 @@ test("proposal endpoint accepts typed constructor decisions and legacy atomic wo
   assert.match(proposalsRoute, /missedOccurrence,/);
   assert.match(proposalsRoute, /const remainderTransfer = body\.remainderTransfer/);
   assert.match(proposalsRoute, /remainderTransfer,/);
+  assert.match(proposalsRoute, /value\.kind === "resolve_archiver_entry"/);
+  assert.match(proposalsRoute, /value\.resolution\.placement/);
   assert.doesNotMatch(proposalsRoute, /Опишите новое дело или запустите автоплан/);
 });
 
@@ -144,6 +150,9 @@ test("planner upgrade is idempotent and fresh installs include protected sleep",
   assert.match(plannerUpgrade, /add column if not exists sleepiness_level/);
   assert.match(plannerUpgrade, /create table if not exists public\.planner_deferred_remainders/);
   assert.match(plannerUpgrade, /planner_deferred_remainders_user_expiry_idx/);
+  assert.match(plannerUpgrade, /create table if not exists public\.planner_archiver_entries/);
+  assert.match(plannerUpgrade, /planner_archiver_entries_user_state_idx/);
+  assert.match(plannerUpgrade, /insert into public\.planner_archiver_entries/);
   assert.match(plannerUpgrade, /activation_transition/);
   assert.match(plannerUpgrade, /planner_reset/);
   assert.doesNotMatch(plannerUpgrade, /drop table if exists public\.planner_(?:profiles|items|blocks|sleep_events)/);
@@ -163,6 +172,8 @@ test("planner upgrade is idempotent and fresh installs include protected sleep",
   assert.match(freshSchema, /occurrence_override jsonb not null default '\{\}'/);
   assert.match(freshSchema, /create table public\.planner_deferred_remainders/);
   assert.match(freshSchema, /pending_minutes integer not null/);
+  assert.match(freshSchema, /create table public\.planner_archiver_entries/);
+  assert.match(freshSchema, /category text not null check \(category in \('missed', 'no_slot'\)\)/);
   assert.match(freshSchema, /activation_transition/);
 });
 
@@ -179,10 +190,36 @@ test("planner store repairs additive schema changes before serving requests", ()
   assert.match(store, /add column if not exists end_estimate/);
   assert.match(store, /add column if not exists occurrence_override/);
   assert.match(store, /create table if not exists public\.planner_deferred_remainders/);
+  assert.match(store, /create table if not exists public\.planner_archiver_entries/);
+  assert.match(store, /insert into public\.planner_archiver_entries/);
   assert.match(store, /delete from public\.planner_deferred_remainders where app_user_id=\$1::uuid/);
+  assert.match(store, /delete from public\.planner_archiver_entries where app_user_id=\$1::uuid/);
   assert.match(store, /deferredRemainders: beforeDeferredRemainders/);
+  assert.match(store, /archiverEntries: beforeArchiverEntries/);
   assert.match(store, /change\.inverse_snapshot\.deferredRemainders/);
+  assert.match(store, /change\.inverse_snapshot\.archiverEntries/);
   assert.match(store, /await ensurePlannerSchema\(getPostgresPool\(\)\)/);
+});
+
+test("task archiver reconciliation is revision-safe, idempotent and exposed in every planner view", () => {
+  assert.match(archiverReconcileRoute, /assertPlannerRevision\(body\.expectedRevision\)/);
+  assert.match(archiverReconcileRoute, /reconcileArchiver/);
+  assert.match(archiverReconcileRoute, /archiver_reconcile/);
+  assert.match(store, /reconcilePlannerArchiverEntries\(items, blocks, existing, now\)/);
+  assert.match(engine, /const id = `missed:\$\{block\.id\}`/);
+  assert.match(engine, /const graceCutoff = now\.getTime\(\) - 15 \* 60_000/);
+  assert.match(engine, /existingIds\.has\(id\)/);
+  assert.match(engine, /unresolvedItemIds\.has\(item\.id\)/);
+  assert.match(engine, /block\.role !== "work" && block\.role !== "calibration"/);
+  assert.match(store, /if \(reconciliation\.entries\.length === 0\) return \{ revision: profile\.revision, created: 0 \}/);
+  assert.match(store, /action === "skip"[\s\S]*insertArchiverEntry/);
+  assert.match(plannerWorkspace, /Архиватор дел/);
+  assert.match(plannerWorkspace, /Task Archiver/);
+  assert.match(plannerWorkspace, /Пропущенные/);
+  assert.match(plannerWorkspace, /Без места/);
+  assert.match(plannerWorkspace, /Разобранные/);
+  assert.match(plannerWorkspace, /Ждёт отметки/);
+  assert.match(plannerWorkspace, /endAt\)\.getTime\(\) \+ 15 \* 60_000/);
 });
 
 test("calendar blocks are read-only buttons opening exact occurrence details", () => {

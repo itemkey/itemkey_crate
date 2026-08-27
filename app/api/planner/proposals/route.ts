@@ -39,6 +39,11 @@ function placement(value: unknown): boolean {
   return value.mode === "first_free" && (value.date === undefined || typeof value.date === "string" && DATE.test(value.date));
 }
 
+function archiverPlacement(value: unknown): boolean {
+  return (record(value) && (value.mode === "spread_week"
+    || value.mode === "replace" && text(value.targetBlockId))) || placement(value);
+}
+
 function constructorOperation(value: unknown): PlannerConstructorOperation | undefined {
   if (!record(value) || typeof value.kind !== "string") return undefined;
   if (value.target !== undefined && !target(value.target)) return undefined;
@@ -64,6 +69,28 @@ function constructorOperation(value: unknown): PlannerConstructorOperation | und
   if (value.kind === "rebuild_remaining" && text(value.fromAt, 80) && Number.isFinite(new Date(value.fromAt).getTime())
     && Array.isArray(value.decisions) && value.decisions.length <= 100 && value.decisions.every((entry) => record(entry) && text(entry.itemId)
       && ["required", "desired", "if_time", "cancel"].includes(String(entry.disposition)))) return value as PlannerConstructorOperation;
+  if (value.kind === "resolve_archiver_entry" && text(value.entryId, 200) && scope(value.scope) && record(value.resolution)) {
+    if (value.resolution.kind === "late_complete"
+      && Number.isFinite(Number(value.resolution.actualMinutes)) && Number(value.resolution.actualMinutes) >= 1) {
+      return value as PlannerConstructorOperation;
+    }
+    if (value.resolution.kind === "reestimate"
+      && Number.isFinite(Number(value.resolution.remainingMinutes)) && Number(value.resolution.remainingMinutes) >= 5) {
+      return value as PlannerConstructorOperation;
+    }
+    if (value.resolution.kind === "cancel") return value as PlannerConstructorOperation;
+    if (value.resolution.kind === "schedule" && record(value.resolution.amount)
+      && (value.resolution.amount.mode === "percent" && [25, 50, 75, 100].includes(Number(value.resolution.amount.percent))
+        || value.resolution.amount.mode === "minutes" && Number.isFinite(Number(value.resolution.amount.minutes)) && Number(value.resolution.amount.minutes) >= 5)
+      && archiverPlacement(value.resolution.placement)
+      && (value.resolution.strategy === "safe" || value.resolution.strategy === "priority")
+      && (value.resolution.conflictDecisions === undefined
+        || Array.isArray(value.resolution.conflictDecisions) && value.resolution.conflictDecisions.length <= 100
+          && value.resolution.conflictDecisions.every((decision) => record(decision) && text(decision.blockId)
+            && ["move", "shorten", "archive", "cancel", "keep"].includes(String(decision.disposition))))) {
+      return value as PlannerConstructorOperation;
+    }
+  }
   return undefined;
 }
 

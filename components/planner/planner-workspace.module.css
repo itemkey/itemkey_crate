@@ -73,6 +73,9 @@
 .panelHead h2 { margin: 0; font-size: .78rem; text-transform: uppercase; }
 .panelHead > span:not(.liveDot) { min-width: 1.8rem; height: 1.8rem; display: grid; place-items: center; border: 1px solid var(--line); background: #cecece; font-size: .7rem; font-weight: 900; }
 .panelHint, .emptyState { color: var(--muted); font-size: .72rem; line-height: 1.45; }
+.archiverTabs { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.25rem;margin:.45rem 0; }
+.archiverTabs button { display:grid;gap:.12rem;justify-items:center;min-width:0;padding:.38rem .2rem;font-size:.62rem; }
+.archiverTabs button span { font-size:.58rem;color:var(--muted); }
 .inboxList { display: grid; gap: .35rem; }
 .inboxItem { display: grid; grid-template-columns: .38rem minmax(0, 1fr) 2rem; align-items: center; gap: .45rem; border: 1px solid #747474; padding: .48rem; background: #d1d1d1; }
 .inboxItem strong, .inboxItem small { display: block; }
@@ -145,6 +148,10 @@
 .liveDot { width: .65rem; height: .65rem; border: 1px solid #315a34; background: #6ea875; }
 .nowTime { margin: .7rem 0 .45rem; font-size: 1.85rem; font-weight: 900; font-variant-numeric: tabular-nums; }
 .currentCard, .freeCard, .healthCard, .blockSummary { border: 1px solid var(--line); padding: .6rem; }
+.graceCard { border:1px solid #8b5c1f;background:#ead2a8;padding:.6rem;margin-bottom:.5rem; }
+.graceCard > span { font-size:.62rem;text-transform:uppercase;color:#6c4a08; }
+.graceCard h3 { margin:.35rem 0 .2rem;font-size:.9rem; }
+.graceCard p { margin:.2rem 0 .45rem;font-size:.68rem;color:#5c4a32; }
 .currentCard { background: #5e5e5e; color: #f2f2f2; }
 .currentCard > span { font-size: .62rem; text-transform: uppercase; }
 .currentCard h3 { margin: .42rem 0 .22rem; font-size: .95rem; } .currentCard p { font-size: .7rem; }
