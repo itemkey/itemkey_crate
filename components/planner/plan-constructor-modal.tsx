@@ -349,10 +349,12 @@ export default function PlanConstructorModal({
   return <div className={styles.modalBackdrop} role="presentation"><section className={`${styles.modal} ${styles.constructorModal}`} role="dialog" aria-modal="true" aria-label={localTarget ? (ru ? "Конструктор дела" : "Item constructor") : (ru ? "Конструктор плана" : "Plan constructor")}>
     <header><div><h2>{localTarget ? (ru ? "Конструктор дела" : "Item constructor") : (ru ? "Конструктор дел" : "Item constructor")}</h2><small>{action ? (ru ? "Целевое изменение выполнения" : "Focused occurrence change") : (ru ? "Выберите дело и категорию настроек" : "Choose an item and a setting category")}</small></div></header>
     {!action ? <div className={styles.constructorCatalog}>
-      <p className={styles.fieldHelp}>{ru ? "Здесь собраны все активные дела. Откройте нужное или добавьте новое; внутри показывается только выбранная категория настроек." : "All active items are here. Open one or add a new item; only the selected setting category is shown."}</p>
+      <p className={styles.fieldHelp}>{localTarget
+        ? (ru ? "Изменяйте настройки по категориям. На экране показана только выбранная вкладка." : "Edit the item by category. Only the selected tab is shown.")
+        : (ru ? "Здесь собраны все активные дела. Откройте нужное или добавьте новое; внутри показывается только выбранная категория настроек." : "All active items are here. Open one or add a new item; only the selected setting category is shown.")}</p>
       <CommitmentsEditor commitments={structuredCommitments} locale={locale} onChange={setStructuredCommitments} onEstimateTravel={onEstimateTravel} onEditingChange={setStructuredEditing} initialEditingId={localTarget?.itemId} />
       {error && <p className={styles.inlineError} role="alert">{error}</p>}
-      <div className={styles.modalActions}><button type="button" onClick={onClose}>{ru ? "Отмена" : "Cancel"}</button><button type="button" className={styles.primaryButton} disabled={busy || structuredEditing} onClick={() => void submitStructuredItems()}>{structuredEditing ? (ru ? "Сначала сохраните дело" : "Save the item first") : (ru ? "Показать изменения" : "Preview changes")}</button></div>
+      {!structuredEditing && <div className={styles.modalActions}><button type="button" onClick={onClose}>{ru ? "Отмена" : "Cancel"}</button><button type="button" className={styles.primaryButton} disabled={busy} onClick={() => void submitStructuredItems()}>{ru ? "Показать изменения" : "Preview changes"}</button></div>}
     </div> : <div className={styles.form}>
       <button type="button" className={styles.constructorBack} onClick={() => { setAction(null); setError(""); }}>← {ru ? "К списку дел" : "Back to items"}</button>
       {error && <p className={styles.inlineError} role="alert">{error}</p>}

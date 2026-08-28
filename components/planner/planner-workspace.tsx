@@ -1172,7 +1172,7 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
 
           {(displayedView === "day" || displayedView === "week") && (
             <TimeGrid
-              dates={visibleDates} blocks={blocks} items={items} sleepBlocks={sleepBlocks} profile={profile} locale={locale}
+              dates={visibleDates} blocks={blocks} sleepBlocks={sleepBlocks} profile={profile} locale={locale}
               selectedDate={selectedDate} setSelectedDate={setSelectedDate}
               onSelect={openBlockDetails}
             />
@@ -1335,7 +1335,7 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
         onReview={(missedOccurrence) => run(() => createProposal({ trigger: "plans_changed", rebuildFuture: true, missedOccurrence }))}
       />}
       {modal === "item" && <ItemModal value={itemForm} setValue={setItemForm} items={items} profile={profile} now={now} onSubmit={submitItem} onClose={() => setModal(null)} busy={busy} locale={locale} />}
-      {modal === "proposal" && proposal && <ProposalModal proposal={proposal} profile={profile} items={items} locale={locale} busy={busy}
+      {modal === "proposal" && proposal && <ProposalModal proposal={proposal} profile={profile} locale={locale} busy={busy}
         onClose={() => setModal(null)} onApply={applyProposal} onEdit={() => {
           const operation = proposal.operation;
           if (operation?.kind === "resolve_archiver_entry") {
@@ -1428,44 +1428,12 @@ export default function PlannerWorkspace({ accountLocale, initialLegacyImport = 
   );
 }
 
-function TimeGrid({ dates, blocks, items, sleepBlocks, profile, locale, selectedDate, setSelectedDate, onSelect }: {
-  dates: string[]; blocks: PlannerBlock[]; items: PlannerItem[]; sleepBlocks: PlannerSleepBlock[]; profile: PlannerProfile; locale: Locale;
+function TimeGrid({ dates, blocks, sleepBlocks, profile, locale, selectedDate, setSelectedDate, onSelect }: {
+  dates: string[]; blocks: PlannerBlock[]; sleepBlocks: PlannerSleepBlock[]; profile: PlannerProfile; locale: Locale;
   selectedDate: string; setSelectedDate: (date: string) => void;
   onSelect: (block: PlannerBlock) => void;
 }) {
-  const itemById = new Map(items.map((item) => [item.id, item]));
-  const technicalTravelBlocks = blocks.flatMap((block): PlannerBlock[] => {
-    if (block.soft || ["cancelled", "skipped"].includes(block.status) || !block.itemId) return [];
-    const item = itemById.get(block.itemId);
-    const travel = item?.uncertaintyPolicy.travel;
-    if (!item || !travel || travel.likelyMinutes <= 0) return [];
-    const outboundMinutes = Math.min(travel.likelyMinutes, item.bufferBeforeMinutes);
-    const preparationMinutes = Math.max(0, item.bufferBeforeMinutes - outboundMinutes);
-    const before: PlannerBlock[] = [];
-    if (preparationMinutes > 0) before.push({
-      id: `technical-travel-buffer:${block.id}`,
-      title: locale === "ru" ? `Техническое время · запас перед дорогой — ${item.title}` : `Technical time · pre-travel buffer — ${item.title}`,
-      startAt: addIsoMinutes(block.startAt, -item.bufferBeforeMinutes),
-      endAt: addIsoMinutes(block.startAt, -outboundMinutes),
-      status: "planned", source: "auto", fixed: true, role: "protected_free",
-    });
-    if (outboundMinutes > 0) before.push({
-      id: `technical-travel-out:${block.id}`,
-      title: locale === "ru" ? `Техническое время · дорога туда — ${item.title}` : `Technical time · outbound travel — ${item.title}`,
-      startAt: addIsoMinutes(block.startAt, -outboundMinutes),
-      endAt: block.startAt,
-      status: "planned", source: "auto", fixed: true, role: "protected_free",
-    });
-    if (item.bufferAfterMinutes > 0) before.push({
-      id: `technical-travel-back:${block.id}`,
-      title: locale === "ru" ? `Техническое время · дорога домой — ${item.title}` : `Technical time · return travel — ${item.title}`,
-      startAt: block.endAt,
-      endAt: addIsoMinutes(block.endAt, item.bufferAfterMinutes),
-      status: "planned", source: "auto", fixed: true, role: "protected_free",
-    });
-    return before;
-  });
-  const calendarBlocks: CalendarBlock[] = [...blocks, ...technicalTravelBlocks, ...splitSleepBlocksByDate(sleepBlocks, dates, profile.timezone)];
+  const calendarBlocks: CalendarBlock[] = [...blocks, ...splitSleepBlocksByDate(sleepBlocks, dates, profile.timezone)];
   const relevantWindows = dates.flatMap((date) => profile.availabilityOverrides[date] ?? profile.availability[String(plannerWeekday(date))] ?? []);
   const relevantBlocks = calendarBlocks.filter((block) => dates.includes(localDate(block, profile.timezone)));
   const starts = [
@@ -1512,24 +1480,28 @@ function TimeGrid({ dates, blocks, items, sleepBlocks, profile, locale, selected
             {hours.map((hour) => <i key={hour} style={{ top: `${((hour * 60 - dayStart) / (dayEnd - dayStart)) * 100}%` }} />)}
             {dayBlocks.map((block) => {
               const sleep = isSleepBlock(block);
-              const technicalTravel = !sleep && block.id.startsWith("technical-travel-");
+              const reserve = !sleep && Boolean(block.soft);
               const start = minutesInZone(block.startAt, profile.timezone);
               const duration = isoDurationMinutes(block.startAt, block.endAt);
               const top = ((start - dayStart) / (dayEnd - dayStart)) * 100;
-              const size = Math.max(2.3, (duration / (dayEnd - dayStart)) * 100);
+              const size = Math.max(reserve ? .35 : 2.3, (duration / (dayEnd - dayStart)) * 100);
               const position = layout.get(block.id) ?? { lane: 0, laneCount: 1 };
               const leftPercent = (position.lane / position.laneCount) * 100;
               const widthPercent = 100 / position.laneCount;
               const partKey = !sleep && block.itemId && block.occurrenceKey ? `${block.itemId}:${block.occurrenceKey}` : "";
               const parts = partKey ? occurrenceParts.get(partKey) ?? [] : [];
               const partIndex = !sleep && parts.length > 1 ? parts.findIndex((candidate) => candidate.id === block.id) + 1 : 0;
-              const className = `${styles.calendarBlock} ${duration <= minimumVisualMinutes ? styles.compactCalendarBlock : ""} ${technicalTravel ? styles.technicalTravelBlock : sleep ? styles.sleepBlock : styles[block.fixed ? "fixedBlock" : "flexibleBlock"]} ${sleep && block.tentative ? styles.sleepTentative : ""} ${sleep && block.recoveryNight ? styles.sleepRecovery : ""} ${!sleep && block.soft ? styles.softReserveBlock : ""} ${!sleep && block.tentative ? styles.tentativeWorkBlock : ""} ${!sleep && block.status !== "planned" ? styles[block.status] ?? "" : ""}`;
+              const className = `${styles.calendarBlock} ${duration <= minimumVisualMinutes ? styles.compactCalendarBlock : ""} ${reserve ? styles.softReserveBlock : sleep ? styles.sleepBlock : styles[block.fixed ? "fixedBlock" : "flexibleBlock"]} ${sleep && block.tentative ? styles.sleepTentative : ""} ${sleep && block.recoveryNight ? styles.sleepRecovery : ""} ${!sleep && block.tentative ? styles.tentativeWorkBlock : ""} ${!sleep && block.status !== "planned" ? styles[block.status] ?? "" : ""}`;
               const title = sleep
                 ? block.recoveryNight ? (locale === "ru" ? "Сон · восстановление" : "Sleep · recovery") : (locale === "ru" ? "Сон" : "Sleep")
-                : block.soft ? `${locale === "ru" ? "Технический запас" : "Technical reserve"} · ${block.title}` : block.title;
-              const content = <><strong>{title}</strong><small>{sleep ? "■" : technicalTravel ? "⇄" : block.soft ? "≈" : block.fixed ? "◆" : "↝"} {formatTimeInTimeZone(new Date(block.startAt), profile.timezone)} · {formatDuration(duration, locale)}</small>{partIndex > 0 && <small>{locale === "ru" ? `Часть ${partIndex} из ${parts.length} одного выполнения` : `Part ${partIndex} of ${parts.length} of one occurrence`}</small>}{technicalTravel ? <small>{locale === "ru" ? "Не считается выполнением дела" : "Not counted as an item occurrence"}</small> : !sleep && block.soft ? <small>{locale === "ru" ? "Не отдельное дело · запас до" : "Not a separate item · reserve until"} {formatTimeInTimeZone(new Date(block.endAt), profile.timezone)}</small> : !sleep && block.tentative ? <small>{locale === "ru" ? "Может сдвинуться" : "May move"}</small> : sleep ? <small>{locale === "ru" ? "Защищено" : "Protected"}</small> : null}</>;
+                : block.title;
+              const content = <><strong>{title}</strong><small>{sleep ? "■" : block.fixed ? "◆" : "↝"} {formatTimeInTimeZone(new Date(block.startAt), profile.timezone)} · {formatDuration(duration, locale)}</small>{partIndex > 0 && <small>{locale === "ru" ? `Часть ${partIndex} из ${parts.length} одного выполнения` : `Part ${partIndex} of ${parts.length} of one occurrence`}</small>}{!sleep && block.tentative ? <small>{locale === "ru" ? "Может сдвинуться" : "May move"}</small> : sleep ? <small>{locale === "ru" ? "Защищено" : "Protected"}</small> : null}</>;
               const blockStyle = { top: `${top}%`, height: `${size}%`, left: `calc(${leftPercent}% + 2px)`, width: `calc(${widthPercent}% - 4px)`, right: "auto" };
-              return sleep || technicalTravel
+              if (reserve) {
+                const reserveLabel = locale === "ru" ? `Запас до ${formatTimeInTimeZone(new Date(block.endAt), profile.timezone)}` : `Reserve until ${formatTimeInTimeZone(new Date(block.endAt), profile.timezone)}`;
+                return <article key={block.id} className={className} style={blockStyle} title={`${reserveLabel} · ${block.title}`} aria-label={`${reserveLabel}: ${block.title}`}>{duration >= 45 && <span className={styles.reserveLabel}>{reserveLabel}</span>}</article>;
+              }
+              return sleep
                 ? <article key={block.id} className={className} style={blockStyle}>{content}</article>
                 : <button type="button" key={block.id} className={className} style={blockStyle} onClick={() => onSelect(block)} aria-label={locale === "ru" ? `Открыть сведения: ${block.title}, ${formatTimeInTimeZone(new Date(block.startAt), profile.timezone)}` : `Open details: ${block.title}, ${formatTimeInTimeZone(new Date(block.startAt), profile.timezone)}`}>{content}</button>;
             })}
@@ -1836,8 +1808,8 @@ function wakeDecisionReason(proposal: PlannerProposal, locale: Locale): string {
     : "Nothing requires an earlier or later wake time, so the neutral stable anchor of 09:00 was selected.";
 }
 
-function ProposalModal({ proposal, profile, items, locale, busy, onClose, onApply, onEdit, onResolve, onPause, onFinishFirst, onAddRecoveryNap, onSwitchFocus }: {
-  proposal: PlannerProposal; profile: PlannerProfile; items: PlannerItem[]; locale: Locale; busy: boolean;
+function ProposalModal({ proposal, profile, locale, busy, onClose, onApply, onEdit, onResolve, onPause, onFinishFirst, onAddRecoveryNap, onSwitchFocus }: {
+  proposal: PlannerProposal; profile: PlannerProfile; locale: Locale; busy: boolean;
   onClose: () => void; onApply: () => Promise<void>; onEdit: () => void; onPause: (blockId: string) => Promise<void>; onFinishFirst: (blockId: string, protectedId: string) => Promise<void>;
   onResolve: (groupId: string, optionId: string) => Promise<void>;
   onAddRecoveryNap: (nap: NonNullable<PlannerProposal["recoveryAdvice"]>["nap"] & {}) => Promise<void>;
@@ -1896,37 +1868,7 @@ function ProposalModal({ proposal, profile, items, locale, busy, onClose, onAppl
               ? (locale === "ru" ? "примерное время пользователя" : "user approximate time")
               : (locale === "ru" ? "нейтральный автоматический выбор" : "neutral automatic choice")
     : (locale === "ru" ? "фиксированный режим" : "fixed schedule");
-  const workPlacements = proposal.impact?.placements ?? [];
-  const reservePlacements = proposal.changes.flatMap((change) => change.kind === "add_block" && change.block.soft ? [{
-    title: `${locale === "ru" ? "Технический резерв" : "Technical reserve"} · ${change.block.title}`,
-    startAt: change.block.startAt,
-    endAt: change.block.endAt,
-  }] : []);
-  const travelPlacements = workPlacements.flatMap((placement) => {
-    const item = placement.itemId ? items.find((candidate) => candidate.id === placement.itemId) : undefined;
-    const travel = item?.uncertaintyPolicy.travel;
-    if (!item || !travel || travel.likelyMinutes <= 0) return [];
-    const outboundMinutes = Math.min(travel.likelyMinutes, item.bufferBeforeMinutes);
-    const preparationMinutes = Math.max(0, item.bufferBeforeMinutes - outboundMinutes);
-    return [
-      ...(preparationMinutes > 0 ? [{
-        title: `${locale === "ru" ? "Техническое время · запас перед дорогой" : "Technical time · pre-travel buffer"} — ${item.title}`,
-        startAt: addIsoMinutes(placement.startAt, -item.bufferBeforeMinutes),
-        endAt: addIsoMinutes(placement.startAt, -outboundMinutes),
-      }] : []),
-      ...(outboundMinutes > 0 ? [{
-        title: `${locale === "ru" ? "Техническое время · дорога туда" : "Technical time · outbound travel"} — ${item.title}`,
-        startAt: addIsoMinutes(placement.startAt, -outboundMinutes),
-        endAt: placement.startAt,
-      }] : []),
-      ...(item.bufferAfterMinutes > 0 ? [{
-        title: `${locale === "ru" ? "Техническое время · дорога домой" : "Technical time · return travel"} — ${item.title}`,
-        startAt: placement.endAt,
-        endAt: addIsoMinutes(placement.endAt, item.bufferAfterMinutes),
-      }] : []),
-    ];
-  });
-  const semanticPlacementDays = groupPlannerPlacementsByDay([...workPlacements, ...travelPlacements, ...reservePlacements], profile.timezone);
+  const semanticPlacementDays = groupPlannerPlacementsByDay(proposal.impact?.placements ?? [], profile.timezone);
   const impactMoves = (proposal.impact?.moves ?? []).filter((move) => !extensionChange
     || move.fromStartAt !== extensionChange.fromStartAt
     || move.fromEndAt !== extensionChange.fromEndAt
