@@ -1723,6 +1723,96 @@ test("range duration plans the likely volume and adds a non-blocking reserve to 
   assert.equal(reserves[0]?.startAt, [...work].sort((left, right) => right.endAt.localeCompare(left.endAt))[0]?.endAt);
 });
 
+test("an unsplittable range creates one likely block instead of minimum and likely fragments", () => {
+  const creative = item({
+    id: "continuous-range",
+    title: "Художка «КЛ»",
+    estimateMinutes: 180,
+    canSplit: false,
+    uncertaintyPolicy: {
+      outcomeMode: "deliverable",
+      duration: { mode: "range", minMinutes: 150, likelyMinutes: 180, maxMinutes: 300, source: "user" },
+      date: { mode: "exact", exactDate: "2026-08-19" },
+      time: { mode: "any" },
+      recurrence: { mode: "exact_days", period: "week", minOccurrences: 1, likelyOccurrences: 1, maxOccurrences: 1, allowedWeekdays: [] },
+    },
+  });
+  const proposal = buildPlannerProposal({
+    profile: { ...profile, reserveRatio: 0, defaultBufferMinutes: 0 },
+    items: [creative],
+    blocks: [],
+    now: new Date("2026-08-19T04:00:00.000Z"),
+  });
+  const added = proposal.changes.flatMap((change) => change.kind === "add_block" && change.block.itemId === creative.id ? [change.block] : []);
+  const work = added.filter((block) => !block.soft);
+  const reserve = added.filter((block) => block.soft);
+
+  assert.equal(work.length, 1);
+  assert.equal(isoDurationMinutes(work[0].startAt, work[0].endAt), 180);
+  assert.equal(reserve.reduce((sum, block) => sum + isoDurationMinutes(block.startAt, block.endAt), 0), 120);
+  assert.equal(reserve[0]?.startAt, work[0].endAt);
+});
+
+test("an unsplittable likely duration stays queued when only separated smaller windows exist", () => {
+  const continuous = item({
+    id: "continuous-no-slot",
+    title: "Непрерывное дело",
+    estimateMinutes: 180,
+    canSplit: false,
+    uncertaintyPolicy: {
+      outcomeMode: "deliverable",
+      duration: { mode: "range", minMinutes: 150, likelyMinutes: 180, maxMinutes: 180, source: "user" },
+      date: { mode: "exact", exactDate: "2026-08-19" },
+      time: { mode: "any" },
+      recurrence: { mode: "exact_days", period: "week", minOccurrences: 1, likelyOccurrences: 1, maxOccurrences: 1, allowedWeekdays: [] },
+    },
+  });
+  const narrowProfile = {
+    ...profile,
+    reserveRatio: 0,
+    defaultBufferMinutes: 0,
+    availability: {
+      ...profile.availability,
+      "3": [{ start: "10:00", end: "12:30" }, { start: "13:00", end: "13:30" }],
+    },
+  };
+  const proposal = buildPlannerProposal({ profile: narrowProfile, items: [continuous], blocks: [], now: new Date("2026-08-19T04:00:00.000Z") });
+  const work = proposal.changes.filter((change) => change.kind === "add_block" && change.block.itemId === continuous.id && !change.block.soft);
+
+  assert.equal(work.length, 0);
+  assert.equal(proposal.unplaced.find((entry) => entry.itemId === continuous.id)?.remainingMinutes, 180);
+});
+
+test("round-trip uncertainty reserves never create a duplicate work occurrence", () => {
+  const visit = item({
+    id: "continuous-trip",
+    title: "Художка с дорогой",
+    estimateMinutes: 180,
+    canSplit: false,
+    bufferBeforeMinutes: 40,
+    bufferAfterMinutes: 30,
+    uncertaintyPolicy: {
+      outcomeMode: "deliverable",
+      duration: { mode: "range", minMinutes: 150, likelyMinutes: 180, maxMinutes: 180, source: "user" },
+      date: { mode: "exact", exactDate: "2026-08-19" },
+      time: { mode: "any" },
+      recurrence: { mode: "exact_days", period: "week", minOccurrences: 1, likelyOccurrences: 1, maxOccurrences: 1, allowedWeekdays: [] },
+      travel: { mode: "range", minMinutes: 25, likelyMinutes: 30, maxMinutes: 45, punctuality: "normal" },
+    },
+  });
+  const proposal = buildPlannerProposal({
+    profile: { ...profile, reserveRatio: 0, defaultBufferMinutes: 0 },
+    items: [visit],
+    blocks: [],
+    now: new Date("2026-08-19T04:00:00.000Z"),
+  });
+  const added = proposal.changes.flatMap((change) => change.kind === "add_block" && change.block.itemId === visit.id ? [change.block] : []);
+
+  assert.equal(added.filter((block) => !block.soft).length, 1);
+  assert.equal(added.filter((block) => block.soft && block.title.startsWith("Запас на дорогу")).length, 1);
+  assert.equal(added.filter((block) => block.soft && block.title.startsWith("Запас на обратную дорогу")).length, 1);
+});
+
 test("a two-to-four-times weekly routine places minimum, likely and optional occurrences once each", () => {
   const routine = item({
     id: "routine-count-range",

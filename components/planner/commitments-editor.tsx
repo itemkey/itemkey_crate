@@ -29,6 +29,7 @@ const WEEKDAYS = [1, 2, 3, 4, 5, 6, 7];
 
 type OriginMode = "home" | "saved" | "temporary";
 type DestinationMode = "home" | "saved" | "temporary";
+type EditorTab = "basic" | "when" | "duration" | "travel" | "extra";
 
 function validPlaces(value: unknown): PlannerSavedPlace[] {
   if (!Array.isArray(value)) return [];
@@ -93,16 +94,23 @@ export default function CommitmentsEditor({
   onChange,
   onEstimateTravel,
   onEditingChange,
+  initialEditingId,
 }: {
   commitments: PlannerStructuredCommitment[];
   locale: Locale;
   onChange: (commitments: PlannerStructuredCommitment[]) => void;
   onEstimateTravel: (input: PlannerTravelEstimateInput) => Promise<PlannerTravelEstimateResult>;
   onEditingChange?: (editing: boolean) => void;
+  initialEditingId?: string;
 }) {
   const ru = locale === "ru";
+  const initialEditor = initialEditingId
+    ? commitments.find((commitment) => commitment.id === initialEditingId)
+    : undefined;
   const [quickTitle, setQuickTitle] = useState("");
-  const [editor, setEditorState] = useState<PlannerStructuredCommitment | null>(null);
+  const [editor, setEditorState] = useState<PlannerStructuredCommitment | null>(() => initialEditor ? normalizeStructuredCommitment(initialEditor) : null);
+  const [editorTab, setEditorTab] = useState<EditorTab>("basic");
+  const [tabErrors, setTabErrors] = useState<EditorTab[]>([]);
   const [places, setPlaces] = useState<PlannerSavedPlace[]>(() => {
     if (typeof window === "undefined") return [];
     try {
@@ -112,9 +120,9 @@ export default function CommitmentsEditor({
       return [];
     }
   });
-  const [originMode, setOriginMode] = useState<OriginMode>("home");
+  const [originMode, setOriginMode] = useState<OriginMode>(initialEditor?.travel.originAddress ? "temporary" : "home");
   const [selectedPlaceId, setSelectedPlaceId] = useState("");
-  const [originAddress, setOriginAddress] = useState("");
+  const [originAddress, setOriginAddress] = useState(initialEditor?.travel.originAddress ?? "");
   const [originLabel, setOriginLabel] = useState("");
   const [rememberOrigin, setRememberOrigin] = useState(false);
   const [destinationMode, setDestinationMode] = useState<DestinationMode>("temporary");
@@ -132,10 +140,10 @@ export default function CommitmentsEditor({
     empty: "Пока ничего не добавлено. Каждое дело появится здесь отдельной карточкой.",
     edit: "Изменить",
     remove: "Удалить",
-    what: "1. Что это за дело",
+    what: "Что это за дело",
     title: "Название",
     category: "Тип дела",
-    when: "2. Когда и как часто",
+    when: "Когда и как часто",
     once: "Один раз",
     recurring: "Регулярно",
     spareTime: "В свободное время",
@@ -160,7 +168,7 @@ export default function CommitmentsEditor({
     preferredDate: "Желательная дата",
     earliestDate: "Не раньше",
     latestDate: "Не позже",
-    timing: "3. Как выбирать время",
+    timing: "Длительность и время",
     fixed: "Точное время",
     flexible: "Подобрать автоматически",
     fixedHint: "Дело останется в указанных временных рамках.",
@@ -192,7 +200,7 @@ export default function CommitmentsEditor({
     allowedHint: "Оба поля необязательны. Интервал ограничивает само дело, но не дорогу.",
     timeFlexibility: "Насколько важно время",
     preferredTime: "Предпочтительное начало",
-    planning: "4. Важность и срок",
+    planning: "Важность и срок",
     priority: "Приоритет",
     commitment: "Насколько обязательно",
     mustNotSkip: "Нельзя пропустить",
@@ -207,7 +215,7 @@ export default function CommitmentsEditor({
     deadlineTime: "Время срока",
     canSplit: "Можно разделить дело на части",
     minChunk: "Минимальная часть",
-    road: "5. Нужно ли добираться",
+    road: "Нужно ли добираться",
     noRoad: "Нет, дорога не нужна",
     hasRoad: "Да, учесть дорогу",
     from: "Откуда вы обычно едете",
@@ -258,10 +266,10 @@ export default function CommitmentsEditor({
     empty: "Nothing has been added yet. Each item will appear as a separate card.",
     edit: "Edit",
     remove: "Remove",
-    what: "1. What is it",
+    what: "What is it",
     title: "Title",
     category: "Item type",
-    when: "2. When and how often",
+    when: "When and how often",
     once: "One time",
     recurring: "Recurring",
     spareTime: "In spare time",
@@ -286,7 +294,7 @@ export default function CommitmentsEditor({
     preferredDate: "Preferred date",
     earliestDate: "Not before",
     latestDate: "Not after",
-    timing: "3. How to choose the time",
+    timing: "Duration and time",
     fixed: "Exact time",
     flexible: "Choose automatically",
     fixedHint: "The item stays in the exact time range.",
@@ -318,7 +326,7 @@ export default function CommitmentsEditor({
     allowedHint: "Both fields are optional. The window limits the item itself, not travel.",
     timeFlexibility: "How important is the time",
     preferredTime: "Preferred start",
-    planning: "4. Priority and deadline",
+    planning: "Priority and deadline",
     priority: "Priority",
     commitment: "Commitment level",
     mustNotSkip: "Must not skip",
@@ -333,7 +341,7 @@ export default function CommitmentsEditor({
     deadlineTime: "Deadline time",
     canSplit: "This item can be split",
     minChunk: "Minimum part",
-    road: "5. Travel",
+    road: "Travel",
     noRoad: "No travel needed",
     hasRoad: "Yes, include travel",
     from: "Usual starting point",
@@ -419,6 +427,8 @@ export default function CommitmentsEditor({
       return;
     }
     setFormError("");
+    setEditorTab("basic");
+    setTabErrors([]);
     setEstimateError("");
     setOriginMode("home");
     setSelectedPlaceId(home?.id ?? "");
@@ -447,16 +457,26 @@ export default function CommitmentsEditor({
     setDestinationLabel(commitment.travel.destinationLabel ?? destinationPlace?.label ?? "");
     setRememberDestination(false);
     setFormError("");
+    setEditorTab("basic");
+    setTabErrors([]);
     setEstimateError("");
     setEditor(structuredClone(commitment));
   }
 
   function patchEditor(patch: Partial<PlannerStructuredCommitment>) {
+    setTabErrors((current) => current.filter((tab) => tab !== editorTab));
     setEditorState((current) => current ? { ...current, ...patch } : current);
   }
 
   function patchTravel(patch: Partial<PlannerStructuredCommitment["travel"]>) {
+    setTabErrors((current) => current.filter((tab) => tab !== "travel"));
     setEditorState((current) => current ? { ...current, travel: { ...current.travel, ...patch } } : current);
+  }
+
+  function failValidation(tab: EditorTab, message: string) {
+    setEditorTab(tab);
+    setTabErrors((current) => current.includes(tab) ? current : [...current, tab]);
+    setFormError(message);
   }
 
   function approximateBounds(likelyMinutes: number, tolerancePercent: 15 | 30 | 50) {
@@ -470,7 +490,7 @@ export default function CommitmentsEditor({
     if (!editor) return;
     if (durationType === "approximate") patchEditor({ durationType, ...approximateBounds(editor.durationMinutes, editor.tolerancePercent) });
     else if (durationType === "exact") patchEditor({ durationType, minDurationMinutes: editor.durationMinutes, maxDurationMinutes: editor.durationMinutes });
-    else patchEditor({ durationType, canSplit: durationType === "range" ? true : editor.canSplit });
+    else patchEditor({ durationType });
   }
 
   function changeLikelyDuration(durationMinutes: number) {
@@ -571,31 +591,31 @@ export default function CommitmentsEditor({
 
   function saveCommitment() {
     if (!editor) return;
-    if (!editor.title.trim()) return setFormError(ru ? "Введите название дела." : "Enter a title.");
+    if (!editor.title.trim()) return failValidation("basic", ru ? "Введите название дела." : "Enter a title.");
     if (editor.occurrenceMode !== "once" && !editor.weekdays.length) {
-      return setFormError(ru ? "Выберите хотя бы один день недели." : "Choose at least one weekday.");
+      return failValidation("when", ru ? "Выберите хотя бы один день недели." : "Choose at least one weekday.");
     }
     if (editor.occurrenceMode !== "once" && editor.recurrenceMode === "count_range"
       && (editor.minOccurrences < 0 || editor.minOccurrences > editor.likelyOccurrences
         || editor.likelyOccurrences > editor.maxOccurrences || editor.maxOccurrences > 31)) {
-      return setFormError(ru ? "Проверьте количество повторов: минимум ≤ обычно ≤ максимум." : "Check recurrence counts: minimum ≤ usual ≤ maximum.");
+      return failValidation("when", ru ? "Проверьте количество повторов: минимум ≤ обычно ≤ максимум." : "Check recurrence counts: minimum ≤ usual ≤ maximum.");
     }
     if (editor.timeMode === "fixed") {
       if (editor.occurrenceMode === "once" && !editor.date) {
-        return setFormError(ru ? "Для разового дела с точным временем нужна дата." : "A one-time fixed item needs a date.");
+        return failValidation("when", ru ? "Для разового дела с точным временем нужна дата." : "A one-time fixed item needs a date.");
       }
       if (!editor.startTime || !editor.endTime) {
-        return setFormError(ru ? "Укажите время начала и окончания." : "Enter both start and end times.");
+        return failValidation("when", ru ? "Укажите время начала и окончания." : "Enter both start and end times.");
       }
     } else {
       if (editor.occurrenceMode === "once" && editor.dateMode === "exact" && !editor.date) {
-        return setFormError(ru ? "Укажите точную дату или выберите другой режим даты." : "Enter the exact date or choose another date mode.");
+        return failValidation("when", ru ? "Укажите точную дату или выберите другой режим даты." : "Enter the exact date or choose another date mode.");
       }
       if (editor.occurrenceMode === "once" && editor.dateMode === "preferred" && !editor.preferredDate) {
-        return setFormError(ru ? "Укажите желательную дату." : "Enter the preferred date.");
+        return failValidation("when", ru ? "Укажите желательную дату." : "Enter the preferred date.");
       }
       if (editor.occurrenceMode === "once" && editor.dateMode === "range" && (!editor.earliestDate || !editor.latestDate || editor.earliestDate > editor.latestDate)) {
-        return setFormError(ru ? "Укажите корректный допустимый период дат." : "Enter a valid allowed date range.");
+        return failValidation("when", ru ? "Укажите корректный допустимый период дат." : "Enter a valid allowed date range.");
       }
       const rangedDuration = editor.durationType === "range" || editor.durationType === "approximate";
       const maximumAllowed = editor.outcomeMode === "deliverable" ? 600_000 : 1440;
@@ -604,26 +624,26 @@ export default function CommitmentsEditor({
         || !Number.isFinite(editor.maxDurationMinutes) || editor.minDurationMinutes < 5
         || editor.minDurationMinutes > editor.durationMinutes || editor.durationMinutes > editor.maxDurationMinutes
         || editor.maxDurationMinutes > maximumAllowed)) {
-        return setFormError(ru ? "Проверьте оценку: минимум ≤ обычно ≤ максимум." : "Check the estimate: minimum ≤ usual ≤ maximum.");
+        return failValidation("duration", ru ? "Проверьте оценку: минимум ≤ обычно ≤ максимум." : "Check the estimate: minimum ≤ usual ≤ maximum.");
       }
       if (editor.durationType === "exact" && (!Number.isFinite(editor.durationMinutes) || editor.durationMinutes < 5 || editor.durationMinutes > maximumAllowed)) {
-        return setFormError(ru ? "Укажите корректную длительность." : "Enter a valid duration.");
+        return failValidation("duration", ru ? "Укажите корректную длительность." : "Enter a valid duration.");
       }
       if (editor.durationType === "unknown" && (editor.calibrationMinutes < 5 || editor.calibrationMinutes > 1440)) {
-        return setFormError(ru ? "Пробная сессия должна длиться от 5 минут до 24 часов." : "The calibration session must last 5 minutes to 24 hours.");
+        return failValidation("duration", ru ? "Пробная сессия должна длиться от 5 минут до 24 часов." : "The calibration session must last 5 minutes to 24 hours.");
       }
       if (editor.flexibleTimeMode === "range" && Boolean(editor.allowedStartTime) !== Boolean(editor.allowedEndTime)) {
-        return setFormError(ru ? "Для допустимого интервала нужны оба времени." : "Enter both ends of the allowed window.");
+        return failValidation("when", ru ? "Для допустимого интервала нужны оба времени." : "Enter both ends of the allowed window.");
       }
       if (editor.flexibleTimeMode === "range" && editor.allowedStartTime && editor.allowedEndTime
         && plannerCommitmentDuration(editor.allowedStartTime, editor.allowedEndTime) < effectiveDuration) {
-        return setFormError(ru ? "Дело не помещается в допустимый интервал." : "The item does not fit inside the allowed window.");
+        return failValidation("when", ru ? "Дело не помещается в допустимый интервал." : "The item does not fit inside the allowed window.");
       }
       if (editor.canSplit && (editor.minChunkMinutes < 5 || editor.minChunkMinutes > effectiveDuration)) {
-        return setFormError(ru ? "Минимальная часть должна быть от 5 минут до полной длительности." : "The minimum part must be between 5 minutes and the full duration.");
+        return failValidation("duration", ru ? "Минимальная часть должна быть от 5 минут до полной длительности." : "The minimum part must be between 5 minutes and the full duration.");
       }
       if (editor.deadlineType !== "none" && !editor.deadlineDate) {
-        return setFormError(ru ? "Укажите дату срока." : "Enter the deadline date.");
+        return failValidation("extra", ru ? "Укажите дату срока." : "Enter the deadline date.");
       }
     }
 
@@ -634,26 +654,26 @@ export default function CommitmentsEditor({
       const address = currentOriginAddress();
       const destinationAddress = currentDestinationAddress();
       if (!address || !destinationAddress) {
-        return setFormError(ru ? "Для дороги нужны адрес отправления и адрес назначения." : "Travel requires origin and destination addresses.");
+        return failValidation("travel", ru ? "Для дороги нужны адрес отправления и адрес назначения." : "Travel requires origin and destination addresses.");
       }
       if (!Number.isFinite(editor.travel.durationMinutes) || editor.travel.durationMinutes < 1 || editor.travel.durationMinutes > 1440) {
-        return setFormError(ru ? "Укажите время одного пути или рассчитайте его." : "Enter or calculate one-way travel time.");
+        return failValidation("travel", ru ? "Укажите время одного пути или рассчитайте его." : "Enter or calculate one-way travel time.");
       }
       if (editor.travel.estimateMode !== "exact"
         && (editor.travel.minDurationMinutes < 1
           || editor.travel.minDurationMinutes > editor.travel.durationMinutes
           || editor.travel.durationMinutes > editor.travel.maxDurationMinutes
           || editor.travel.maxDurationMinutes > 1440)) {
-        return setFormError(ru ? "Проверьте оценку дороги: минимум ≤ обычно ≤ максимум." : "Check travel estimate: minimum ≤ usual ≤ maximum.");
+        return failValidation("travel", ru ? "Проверьте оценку дороги: минимум ≤ обычно ≤ максимум." : "Check travel estimate: minimum ≤ usual ≤ maximum.");
       }
       if (!Number.isFinite(editor.travel.bufferMinutes) || editor.travel.bufferMinutes < 0 || editor.travel.bufferMinutes > 120) {
-        return setFormError(ru ? "Запас перед выходом должен быть от 0 минут до 2 часов." : "The outbound buffer must be between 0 minutes and 2 hours.");
+        return failValidation("travel", ru ? "Запас перед выходом должен быть от 0 минут до 2 часов." : "The outbound buffer must be between 0 minutes and 2 hours.");
       }
       if (originMode === "home" && !home) {
         originPlace = { id: createRuntimeId(), label: ru ? "Дом" : "Home", address, kind: "home" };
         setPlaces((current) => [...current.filter((place) => place.kind !== "home"), originPlace!]);
       } else if (originMode === "temporary" && rememberOrigin) {
-        if (!originLabel.trim()) return setFormError(ru ? "Придумайте название для сохраняемого места." : "Name the place you want to save.");
+        if (!originLabel.trim()) return failValidation("travel", ru ? "Придумайте название для сохраняемого места." : "Name the place you want to save.");
         originPlace = { id: createRuntimeId(), label: originLabel.trim(), address, kind: "saved" };
         setPlaces((current) => {
           const currentHome = current.find((place) => place.kind === "home");
@@ -667,7 +687,7 @@ export default function CommitmentsEditor({
           : { id: createRuntimeId(), label: ru ? "Дом" : "Home", address: destinationAddress, kind: "home" };
         setPlaces((current) => [...current.filter((place) => place.kind !== "home"), destinationPlace!]);
       } else if (destinationMode === "temporary" && rememberDestination) {
-        if (!destinationLabel.trim()) return setFormError(ru ? "Придумайте название для места назначения." : "Name the destination you want to save.");
+        if (!destinationLabel.trim()) return failValidation("travel", ru ? "Придумайте название для места назначения." : "Name the destination you want to save.");
         destinationPlace = { id: createRuntimeId(), label: destinationLabel.trim(), address: destinationAddress, kind: "saved" };
         setPlaces((current) => {
           const currentHome = current.find((place) => place.kind === "home");
@@ -700,22 +720,33 @@ export default function CommitmentsEditor({
       : [...commitments, normalized]);
     setQuickTitle("");
     setFormError("");
+    setTabErrors([]);
     setEditor(null);
   }
 
   return <div className={styles.commitmentBuilder}>
     {editor ? <div className={styles.commitmentEditor}>
       <div className={styles.commitmentEditorHead}><strong>{copy.editTitle}</strong><span>{editor.title || (ru ? "Новое дело" : "New item")}</span></div>
+      <div className={styles.commitmentCategoryTabs} role="tablist" aria-label={ru ? "Категории настроек дела" : "Item setting categories"}>
+        {([
+          ["basic", ru ? "Основное" : "Basics"],
+          ["when", ru ? "Когда" : "When"],
+          ["duration", ru ? "Длительность" : "Duration"],
+          ["travel", ru ? "Дорога" : "Travel"],
+          ["extra", ru ? "Дополнительно" : "More"],
+        ] as Array<[EditorTab, string]>).map(([tab, label]) => <button type="button" role="tab" aria-selected={editorTab === tab} key={tab} className={`${editorTab === tab ? styles.segmentedActive : ""} ${tabErrors.includes(tab) ? styles.commitmentTabError : ""}`} onClick={() => { setEditorTab(tab); setFormError(""); }}>{label}{tabErrors.includes(tab) ? " !" : ""}</button>)}
+      </div>
 
-      <fieldset className={styles.commitmentFieldset}>
+      {editorTab === "basic" && <fieldset className={styles.commitmentFieldset}>
         <legend>{copy.what}</legend>
         <label>{copy.title}<input autoFocus value={editor.title} onChange={(event) => patchEditor({ title: event.target.value })} /></label>
+        <div><span className={styles.fieldTitle}>{ru ? "Тип" : "Type"}</span><div className={styles.routeToggle}><button type="button" className={editor.timeMode === "flexible" ? styles.segmentedActive : ""} onClick={() => patchEditor({ timeMode: "flexible" })}>{ru ? "Гибкое дело" : "Flexible item"}</button><button type="button" className={editor.timeMode === "fixed" ? styles.segmentedActive : ""} onClick={() => patchEditor({ timeMode: "fixed", canSplit: false, occurrenceMode: editor.occurrenceMode === "spare_time" ? "once" : editor.occurrenceMode })}>{ru ? "Фиксированное событие" : "Fixed event"}</button></div></div>
         <div><span className={styles.fieldTitle}>{copy.category}</span><div className={styles.categoryChoices}>{CATEGORIES.map((category) => <button type="button" key={category} className={editor.category === category ? styles.segmentedActive : ""} aria-pressed={editor.category === category} onClick={() => patchEditor({ category })}>{plannerCommitmentCategoryLabel(category, locale)}</button>)}</div></div>
-      </fieldset>
+      </fieldset>}
 
-      <fieldset className={styles.commitmentFieldset}>
+      {editorTab === "when" && <fieldset className={styles.commitmentFieldset}>
         <legend>{copy.when}</legend>
-        <div className={`${styles.routeToggle} ${styles.threeWayToggle}`}><button type="button" className={editor.occurrenceMode === "once" ? styles.segmentedActive : ""} aria-pressed={editor.occurrenceMode === "once"} onClick={() => patchEditor({ occurrenceMode: "once" })}>{copy.once}</button><button type="button" className={editor.occurrenceMode === "recurring" ? styles.segmentedActive : ""} aria-pressed={editor.occurrenceMode === "recurring"} onClick={() => patchEditor({ occurrenceMode: "recurring", weekdays: editor.weekdays.length ? editor.weekdays : [1, 3, 5] })}>{copy.recurring}</button><button type="button" className={editor.occurrenceMode === "spare_time" ? styles.segmentedActive : ""} aria-pressed={editor.occurrenceMode === "spare_time"} onClick={() => patchEditor({ occurrenceMode: "spare_time", timeMode: "flexible", commitmentLevel: "if_time", weekdays: editor.weekdays.length ? editor.weekdays : WEEKDAYS, canSplit: true })}>{copy.spareTime}<small>{copy.spareTimeHint}</small></button></div>
+        <div className={`${styles.routeToggle} ${styles.threeWayToggle}`}><button type="button" className={editor.occurrenceMode === "once" ? styles.segmentedActive : ""} aria-pressed={editor.occurrenceMode === "once"} onClick={() => patchEditor({ occurrenceMode: "once" })}>{copy.once}</button><button type="button" className={editor.occurrenceMode === "recurring" ? styles.segmentedActive : ""} aria-pressed={editor.occurrenceMode === "recurring"} onClick={() => patchEditor({ occurrenceMode: "recurring", weekdays: editor.weekdays.length ? editor.weekdays : [1, 3, 5] })}>{copy.recurring}</button><button type="button" className={editor.occurrenceMode === "spare_time" ? styles.segmentedActive : ""} aria-pressed={editor.occurrenceMode === "spare_time"} onClick={() => patchEditor({ occurrenceMode: "spare_time", timeMode: "flexible", commitmentLevel: "if_time", weekdays: editor.weekdays.length ? editor.weekdays : WEEKDAYS })}>{copy.spareTime}<small>{copy.spareTimeHint}</small></button></div>
         {editor.occurrenceMode === "once" ? <>
           {editor.timeMode === "fixed" ? <label>{copy.date}<input type="date" value={editor.date ?? ""} onChange={(event) => patchEditor({ date: event.target.value || undefined, dateMode: "exact" })} /></label> : <>
             <label>{copy.dateFlexibility}<select value={editor.dateMode} onChange={(event) => patchEditor({ dateMode: event.target.value as PlannerStructuredCommitment["dateMode"] })}><option value="exact">{copy.dateExact}</option><option value="preferred">{copy.datePreferred}</option><option value="range">{copy.dateRange}</option><option value="any">{copy.dateAny}</option></select></label>
@@ -729,17 +760,17 @@ export default function CommitmentsEditor({
           <div><span className={styles.fieldTitle}>{copy.recurrenceRule}</span><div className={styles.routeToggle}><button type="button" className={editor.recurrenceMode === "exact_days" ? styles.segmentedActive : ""} onClick={() => patchEditor({ recurrenceMode: "exact_days" })}>{copy.exactDays}</button><button type="button" className={editor.recurrenceMode === "count_range" ? styles.segmentedActive : ""} onClick={() => patchEditor({ recurrenceMode: "count_range" })}>{copy.countRange}</button></div></div>
           {editor.recurrenceMode === "count_range" && <><label>{ru ? "Период" : "Period"}<select value={editor.recurrencePeriod} onChange={(event) => patchEditor({ recurrencePeriod: event.target.value as "week" | "month" })}><option value="week">{copy.perWeek}</option><option value="month">{copy.perMonth}</option></select></label><div className={styles.formGrid}><label>{copy.occurrencesMin}<input type="number" min={0} max={31} value={editor.minOccurrences} onChange={(event) => patchEditor({ minOccurrences: Number(event.target.value) })} /></label><label>{copy.occurrencesLikely}<input type="number" min={0} max={31} value={editor.likelyOccurrences} onChange={(event) => patchEditor({ likelyOccurrences: Number(event.target.value) })} /></label><label>{copy.occurrencesMax}<input type="number" min={0} max={31} value={editor.maxOccurrences} onChange={(event) => patchEditor({ maxOccurrences: Number(event.target.value) })} /></label></div></>}
         </>}
-      </fieldset>
-
-      <fieldset className={styles.commitmentFieldset}>
-        <legend>{copy.timing}</legend>
-        {editor.occurrenceMode === "spare_time"
-          ? <small>{copy.spareTimeHint}</small>
-          : <div className={styles.routeToggle}><button type="button" className={editor.timeMode === "fixed" ? styles.segmentedActive : ""} aria-pressed={editor.timeMode === "fixed"} onClick={() => patchEditor({ timeMode: "fixed", canSplit: false })}>{copy.fixed}<small>{copy.fixedHint}</small></button><button type="button" className={editor.timeMode === "flexible" ? styles.segmentedActive : ""} aria-pressed={editor.timeMode === "flexible"} onClick={() => patchEditor({ timeMode: "flexible" })}>{copy.flexible}<small>{copy.flexibleHint}</small></button></div>}
         {editor.timeMode === "fixed"
           ? <div className={styles.formGrid}><label>{copy.start}<input type="time" value={editor.startTime} onChange={(event) => patchEditor({ startTime: event.target.value })} /></label><label>{copy.end}<input type="time" value={editor.endTime} onChange={(event) => patchEditor({ endTime: event.target.value })} /></label></div>
+          : <><label>{copy.timeFlexibility}<select value={editor.flexibleTimeMode} onChange={(event) => patchEditor({ flexibleTimeMode: event.target.value as PlannerStructuredCommitment["flexibleTimeMode"] })}><option value="any">{copy.dateAny}</option><option value="preferred">{copy.datePreferred}</option><option value="range">{copy.dateRange}</option></select></label>{editor.flexibleTimeMode === "preferred" && <label>{copy.preferredTime}<input type="time" value={editor.preferredStartTime ?? ""} onChange={(event) => patchEditor({ preferredStartTime: event.target.value || undefined })} /></label>}{editor.flexibleTimeMode === "range" && <><div className={styles.formGrid}><label>{copy.allowedFrom}<input type="time" value={editor.allowedStartTime ?? ""} onChange={(event) => patchEditor({ allowedStartTime: event.target.value || undefined })} /></label><label>{copy.allowedTo}<input type="time" value={editor.allowedEndTime ?? ""} onChange={(event) => patchEditor({ allowedEndTime: event.target.value || undefined })} /></label></div><small>{copy.allowedHint}</small></>}</>}
+      </fieldset>}
+
+      {editorTab === "duration" && <fieldset className={styles.commitmentFieldset}>
+        <legend>{copy.timing}</legend>
+        {editor.timeMode === "fixed"
+          ? <small>{ru ? "Длительность фиксированного события определяется временем начала и окончания во вкладке «Когда»." : "A fixed event's duration is determined by its start and end in the When tab."}</small>
           : <>
-            <div><span className={styles.fieldTitle}>{copy.durationGoal}</span><div className={styles.routeToggle}><button type="button" className={editor.outcomeMode === "deliverable" ? styles.segmentedActive : ""} onClick={() => patchEditor({ outcomeMode: "deliverable", durationMode: "per_cycle", canSplit: true })}>{copy.finishResult}<small>{ru ? "Общий объём вычитается после каждой сессии." : "Each session reduces the total workload."}</small></button><button type="button" className={editor.outcomeMode === "time_budget" ? styles.segmentedActive : ""} onClick={() => patchEditor({ outcomeMode: "time_budget", durationMode: "per_occurrence" })}>{copy.allocateTime}<small>{ru ? "Бюджет относится к занятию или выбранному периоду." : "The budget applies to an occurrence or period."}</small></button></div></div>
+            <div><span className={styles.fieldTitle}>{copy.durationGoal}</span><div className={styles.routeToggle}><button type="button" className={editor.outcomeMode === "deliverable" ? styles.segmentedActive : ""} onClick={() => patchEditor({ outcomeMode: "deliverable", durationMode: "per_cycle" })}>{copy.finishResult}<small>{ru ? "Общий объём вычитается после каждой сессии." : "Each session reduces the total workload."}</small></button><button type="button" className={editor.outcomeMode === "time_budget" ? styles.segmentedActive : ""} onClick={() => patchEditor({ outcomeMode: "time_budget", durationMode: "per_occurrence" })}>{copy.allocateTime}<small>{ru ? "Бюджет относится к занятию или выбранному периоду." : "The budget applies to an occurrence or period."}</small></button></div></div>
             <div><span className={styles.fieldTitle}>{copy.activityDuration}</span><div className={`${styles.routeToggle} ${styles.durationModeChoices}`}>
               <button type="button" className={editor.durationType === "exact" ? styles.segmentedActive : ""} onClick={() => changeDurationMode("exact")}>{copy.exactDuration}</button>
               <button type="button" className={editor.durationType === "approximate" ? styles.segmentedActive : ""} onClick={() => changeDurationMode("approximate")}>{copy.approximateDuration}</button>
@@ -752,22 +783,20 @@ export default function CommitmentsEditor({
             {editor.durationType === "unknown" && <><DurationInput label={copy.trialDuration} valueMinutes={editor.calibrationMinutes} minMinutes={5} maxMinutes={1440} locale={locale} onChangeMinutes={(calibrationMinutes) => patchEditor({ calibrationMinutes })} /><small>{ru ? "Планировщик создаст одну пробную сессию и после неё попросит оценить остаток." : "The planner creates one calibration session, then asks you to estimate what remains."}</small></>}
             {editor.outcomeMode === "time_budget" && editor.occurrenceMode !== "once" && <div><span className={styles.fieldTitle}>{copy.durationMeaning}</span><div className={styles.routeToggle}>
               <button type="button" className={editor.durationMode === "per_occurrence" ? styles.segmentedActive : ""} onClick={() => patchEditor({ durationMode: "per_occurrence" })}>{copy.perOccurrence}<small>{copy.perOccurrenceHint}</small></button>
-              <button type="button" className={editor.durationMode === "per_cycle" ? styles.segmentedActive : ""} onClick={() => patchEditor({ durationMode: "per_cycle", canSplit: true })}>{copy.perCycle}<small>{copy.perCycleHint}</small></button>
+              <button type="button" className={editor.durationMode === "per_cycle" ? styles.segmentedActive : ""} onClick={() => patchEditor({ durationMode: "per_cycle" })}>{copy.perCycle}<small>{copy.perCycleHint}</small></button>
             </div></div>}
-            <label>{copy.timeFlexibility}<select value={editor.flexibleTimeMode} onChange={(event) => patchEditor({ flexibleTimeMode: event.target.value as PlannerStructuredCommitment["flexibleTimeMode"] })}><option value="any">{copy.dateAny}</option><option value="preferred">{copy.datePreferred}</option><option value="range">{copy.dateRange}</option></select></label>
-            {editor.flexibleTimeMode === "preferred" && <label>{copy.preferredTime}<input type="time" value={editor.preferredStartTime ?? ""} onChange={(event) => patchEditor({ preferredStartTime: event.target.value || undefined })} /></label>}
-            {editor.flexibleTimeMode === "range" && <><div className={styles.formGrid}><label>{copy.allowedFrom}<input type="time" value={editor.allowedStartTime ?? ""} onChange={(event) => patchEditor({ allowedStartTime: event.target.value || undefined })} /></label><label>{copy.allowedTo}<input type="time" value={editor.allowedEndTime ?? ""} onChange={(event) => patchEditor({ allowedEndTime: event.target.value || undefined })} /></label></div><small>{copy.allowedHint}</small></>}
+            <label className={styles.choiceCheck}><input type="checkbox" checked={editor.canSplit} onChange={(event) => patchEditor({ canSplit: event.target.checked })} />{editor.canSplit ? (ru ? "Можно разбить на части" : "May split into parts") : (ru ? "Одним непрерывным блоком" : "One continuous block")}</label>
+            {editor.canSplit && <DurationInput label={copy.minChunk} valueMinutes={editor.minChunkMinutes} minMinutes={5} maxMinutes={editor.durationType === "unknown" ? editor.calibrationMinutes : editor.maxDurationMinutes} locale={locale} onChangeMinutes={(minChunkMinutes) => patchEditor({ minChunkMinutes })} />}
           </>}
-      </fieldset>
+      </fieldset>}
 
-      <fieldset className={styles.commitmentFieldset}>
+      {editorTab === "extra" && <fieldset className={styles.commitmentFieldset}>
         <legend>{copy.planning}</legend>
         <div className={styles.formGrid}><label>{copy.commitment}<select value={editor.deadlineType === "hard" ? "must_not_skip" : editor.commitmentLevel} disabled={editor.deadlineType === "hard"} onChange={(event) => patchEditor({ commitmentLevel: event.target.value as PlannerCommitmentLevel })}><option value="must_not_skip">{copy.mustNotSkip}</option><option value="required">{copy.required}</option><option value="desired">{copy.desired}</option><option value="if_time">{copy.ifTime}</option></select>{editor.deadlineType === "hard" && <small>{ru ? "Жёсткий срок автоматически поднимает дело в первую группу." : "A hard deadline automatically promotes the item."}</small>}</label><label>{copy.priority}<select value={editor.priority} onChange={(event) => patchEditor({ priority: event.target.value as PlannerPriority })}>{PRIORITIES.map((priority) => <option key={priority} value={priority}>{priorityLabels[priority]}</option>)}</select></label>{editor.timeMode === "flexible" && <label>{copy.deadlineType}<select value={editor.deadlineType} onChange={(event) => patchEditor({ deadlineType: event.target.value as PlannerDeadlineType, commitmentLevel: event.target.value === "hard" ? "must_not_skip" : editor.commitmentLevel })}><option value="none">{copy.noDeadline}</option><option value="target">{copy.targetDeadline}</option><option value="hard">{copy.hardDeadline}</option></select></label>}</div>
         {editor.timeMode === "flexible" && editor.deadlineType !== "none" && <div className={styles.formGrid}>{editor.deadlineType === "target" && <label>{copy.earliestDate}<input type="date" value={editor.deadlineEarliestDate ?? ""} onChange={(event) => patchEditor({ deadlineEarliestDate: event.target.value || undefined })} /></label>}<label>{editor.deadlineType === "hard" ? copy.deadlineDate : copy.latestDate}<input type="date" value={editor.deadlineDate ?? ""} onChange={(event) => patchEditor({ deadlineDate: event.target.value || undefined })} /></label><label>{copy.deadlineTime}<input type="time" value={editor.deadlineTime ?? "23:59"} onChange={(event) => patchEditor({ deadlineTime: event.target.value })} /></label></div>}
-        {editor.timeMode === "flexible" && <><label className={styles.choiceCheck}><input type="checkbox" checked={editor.canSplit} onChange={(event) => patchEditor({ canSplit: event.target.checked })} />{copy.canSplit}</label>{editor.canSplit && <DurationInput label={copy.minChunk} valueMinutes={editor.minChunkMinutes} minMinutes={5} maxMinutes={editor.durationType === "unknown" ? editor.calibrationMinutes : editor.maxDurationMinutes} locale={locale} onChangeMinutes={(minChunkMinutes) => patchEditor({ minChunkMinutes })} />}</>}
-      </fieldset>
+      </fieldset>}
 
-      <fieldset className={styles.commitmentFieldset}>
+      {editorTab === "travel" && <fieldset className={styles.commitmentFieldset}>
         <legend>{copy.road}</legend>
         <div className={styles.routeToggle}><button type="button" className={!editor.travel.enabled ? styles.segmentedActive : ""} aria-pressed={!editor.travel.enabled} onClick={() => patchTravel({ enabled: false })}>{copy.noRoad}</button><button type="button" className={editor.travel.enabled ? styles.segmentedActive : ""} aria-pressed={editor.travel.enabled} onClick={() => patchTravel({ enabled: true })}>{copy.hasRoad}</button></div>
         {editor.travel.enabled && <div className={styles.routeFields}>
@@ -791,9 +820,9 @@ export default function CommitmentsEditor({
           <DurationInput label={copy.reserve} valueMinutes={editor.travel.bufferMinutes} maxMinutes={1440} locale={locale} onChangeMinutes={(bufferMinutes) => patchTravel({ bufferMinutes })} />
           <small className={styles.routeHint}>{copy.routeHint}</small>
         </div>}
-      </fieldset>
+      </fieldset>}
 
-      <label>{copy.notes}<textarea className={styles.commitmentNotes} value={editor.notes ?? ""} onChange={(event) => patchEditor({ notes: event.target.value })} placeholder={copy.notesPlaceholder} /></label>
+      {editorTab === "extra" && <label>{copy.notes}<textarea className={styles.commitmentNotes} value={editor.notes ?? ""} onChange={(event) => patchEditor({ notes: event.target.value })} placeholder={copy.notesPlaceholder} /></label>}
       {formError && <p className={styles.inlineError} role="alert">{formError}</p>}
       <div className={styles.commitmentEditorActions}><button type="button" onClick={() => { setEditor(null); setFormError(""); }}>{copy.cancel}</button><button type="button" className={styles.primaryButton} onClick={saveCommitment}>{copy.save}</button></div>
     </div> : <>

@@ -700,32 +700,47 @@ function buildPlacementRequests(
       });
       return;
     }
-    const legacySpareMinimum = item.recurrence?.schedulingMode === "spare_time"
-      ? Math.min(scaledMinimum, scaleMinutes(item.recurrence.minimumMinutes ?? estimate.minMinutes))
+    const spareTime = item.recurrence?.schedulingMode === "spare_time";
+    const legacySpareMinimum = spareTime
+      ? Math.min(scaledMinimum, scaleMinutes(item.recurrence?.minimumMinutes ?? estimate.minMinutes))
       : scaledMinimum;
-    const minimumRemaining = Math.max(0, legacySpareMinimum - alreadyPlanned);
-    const likelyRemaining = Math.max(0, scaledLikely - Math.max(alreadyPlanned, legacySpareMinimum));
     const reserveRemaining = Math.max(0, scaledMaximum - Math.max(alreadyPlanned, scaledLikely));
-    if (minimumRemaining > 0) requests.push({
-      item,
-      occurrenceKey: estimate.mode === "exact" ? occurrenceKey : `${occurrenceKey}:minimum`,
-      durationMinutes: minimumRemaining,
-      tier: "minimum",
-      role,
-      mandatory: mandatoryOverride ?? mandatoryMinimum(item),
-      reportRemainder,
-      ...constraints,
-    });
-    if (likelyRemaining > 0) requests.push({
-      item,
-      occurrenceKey: `${occurrenceKey}:likely`,
-      durationMinutes: likelyRemaining,
-      tier: "likely",
-      role,
-      mandatory: false,
-      reportRemainder,
-      ...constraints,
-    });
+    if (spareTime && item.canSplit) {
+      const minimumRemaining = Math.max(0, legacySpareMinimum - alreadyPlanned);
+      const likelyRemaining = Math.max(0, scaledLikely - Math.max(alreadyPlanned, legacySpareMinimum));
+      if (minimumRemaining > 0) requests.push({
+        item,
+        occurrenceKey: estimate.mode === "exact" ? occurrenceKey : `${occurrenceKey}:minimum`,
+        durationMinutes: minimumRemaining,
+        tier: "minimum",
+        role,
+        mandatory: mandatoryOverride ?? mandatoryMinimum(item),
+        reportRemainder,
+        ...constraints,
+      });
+      if (likelyRemaining > 0) requests.push({
+        item,
+        occurrenceKey: `${occurrenceKey}:likely`,
+        durationMinutes: likelyRemaining,
+        tier: "likely",
+        role,
+        mandatory: false,
+        reportRemainder,
+        ...constraints,
+      });
+    } else {
+      const likelyRemaining = Math.max(0, scaledLikely - alreadyPlanned);
+      if (likelyRemaining > 0) requests.push({
+        item,
+        occurrenceKey: estimate.mode === "exact" ? occurrenceKey : `${occurrenceKey}:likely`,
+        durationMinutes: likelyRemaining,
+        tier: estimate.mode === "exact" ? "minimum" : "likely",
+        role,
+        mandatory: mandatoryOverride ?? mandatoryMinimum(item),
+        reportRemainder,
+        ...constraints,
+      });
+    }
     if (reserveRemaining > 0) requests.push({
       item,
       occurrenceKey: `${occurrenceKey}:reserve`,
@@ -2384,7 +2399,7 @@ function buildPlannerProposalResolved(input: PlannerEngineInput): PlannerProposa
             : request.tier === "minimum"
               ? "Сначала размещён обязательный минимум неточной оценки."
               : request.tier === "likely"
-                ? "План доведён от минимума до наиболее вероятной длительности."
+                ? "Размещена обычная плановая длительность; это одно выполнение, даже если оно явно разбито на части."
               : request.item.preferredWindows.length
             ? "Подобрано свободное окно с учётом предпочтительного времени и нагрузки."
             : "Подобрано свободное окно с учётом приоритета, энергии и нагрузки.",

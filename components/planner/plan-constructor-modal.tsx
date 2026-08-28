@@ -3,6 +3,14 @@
 import { useEffect, useMemo, useState } from "react";
 
 import type { Locale } from "@/lib/i18n";
+import CommitmentsEditor from "@/components/planner/commitments-editor";
+import {
+  commitmentToPlannerDraft,
+  plannerDraftToCommitment,
+  type PlannerStructuredCommitment,
+  type PlannerTravelEstimateInput,
+  type PlannerTravelEstimateResult,
+} from "@/lib/planner/commitments";
 import {
   type PlannerBlock,
   type PlannerCommitmentLevel,
@@ -42,31 +50,10 @@ type Props = {
   initialAction?: ConstructorAction;
   initialBlockId?: string;
   localTarget?: PlannerOperationTarget;
+  onEstimateTravel: (input: PlannerTravelEstimateInput) => Promise<PlannerTravelEstimateResult>;
   onClose: () => void;
   onReview: (operation: PlannerConstructorOperation) => Promise<void>;
 };
-
-const actionGroups: Array<{ titleRu: string; titleEn: string; actions: Array<{ id: ConstructorAction; ru: string; en: string; hintRu: string; hintEn: string }> }> = [
-  { titleRu: "Дела", titleEn: "Items", actions: [
-    { id: "add", ru: "Добавить дело", en: "Add item", hintRu: "Новое гибкое дело или событие", hintEn: "A flexible item or fixed event" },
-    { id: "edit", ru: "Изменить дело", en: "Edit item", hintRu: "Название, обязательность и гибкость", hintEn: "Title, commitment and flexibility" },
-    { id: "move", ru: "Перенести дело", en: "Move item", hintRu: "Дата, время, до или после другого дела", hintEn: "Date, time, before or after another item" },
-    { id: "replace", ru: "Заменить дело", en: "Replace item", hintRu: "В том числе текущее", hintEn: "Including the current item" },
-    { id: "cancel", ru: "Отменить дело", en: "Cancel item", hintRu: "Одно выполнение или всё дело", hintEn: "One occurrence or the whole item" },
-    { id: "duration", ru: "Изменить длительность", en: "Change duration", hintRu: "Точно, примерно или диапазоном", hintEn: "Exact, approximate or range" },
-    { id: "time", ru: "Изменить начало или конец", en: "Change start or end", hintRu: "Для конкретного блока календаря", hintEn: "For a specific calendar block" },
-  ] },
-  { titleRu: "Время и день", titleEn: "Time and day", actions: [
-    { id: "protect", ru: "Освободить промежуток", en: "Protect free interval", hintRu: "Автоплан не займёт это время", hintEn: "Autoplanning will keep it free" },
-    { id: "occupy", ru: "Занять промежуток", en: "Occupy interval", hintRu: "Добавить новое фиксированное дело", hintEn: "Add a new fixed event" },
-    { id: "day_bounds", ru: "Изменить границы дня", en: "Change day boundaries", hintRu: "Разово для выбранной даты", hintEn: "One-off for a selected date" },
-  ] },
-  { titleRu: "Сон и пересборка", titleEn: "Sleep and rebuild", actions: [
-    { id: "sleep", ru: "Установить сон или подъём", en: "Set bedtime or wake-up", hintRu: "Жёсткая граница выбранной ночи", hintEn: "A hard boundary for the selected night" },
-    { id: "rebuild", ru: "Пересобрать остаток дня", en: "Rebuild the rest of the day", hintRu: "Сейчас или с выбранного момента", hintEn: "From now or a selected moment" },
-    { id: "priorities", ru: "Приоритеты и порядок", en: "Priorities and order", hintRu: "Настроить обязательность всех дел", hintEn: "Set commitment for all items" },
-  ] },
-];
 
 function endOnDate(date: string, start: string, end: string, timezone: string): string {
   return zonedPlannerDateTimeToUtc(
@@ -101,7 +88,7 @@ function durationPolicy(mode: PlannerEstimateMode, likely: number, minimum: numb
 
 export default function PlanConstructorModal({
   profile, items, blocks, currentBlock, selectedDate, now, locale, busy,
-  initialAction, initialBlockId, localTarget, onClose, onReview,
+  initialAction, initialBlockId, localTarget, onEstimateTravel, onClose, onReview,
 }: Props) {
   const ru = locale === "ru";
   const activeItems = useMemo(() => items.filter((item) => item.status === "active"), [items]);
@@ -147,6 +134,11 @@ export default function PlanConstructorModal({
   const [rebuildDecisions, setRebuildDecisions] = useState<Record<string, "required" | "desired" | "if_time" | "cancel">>({});
   const [rebuildBedtime, setRebuildBedtime] = useState(false);
   const [error, setError] = useState("");
+  const editableSourceItems = useMemo(() => localTarget
+    ? activeItems.filter((item) => item.id === localTarget.itemId)
+    : activeItems, [activeItems, localTarget]);
+  const [structuredCommitments, setStructuredCommitments] = useState<PlannerStructuredCommitment[]>(() => editableSourceItems.map((item) => plannerDraftToCommitment(item, profile.timezone, item.id)));
+  const [structuredEditing, setStructuredEditing] = useState(Boolean(localTarget));
 
   useEffect(() => {
     const escape = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
@@ -193,11 +185,6 @@ export default function PlanConstructorModal({
     const item = activeItems.find((candidate) => candidate.id === itemId);
     if (item) populateItem(item);
     setTargetBlockId(futureBlocks.find((block) => block.itemId === itemId)?.id ?? "");
-  }
-
-  function chooseAction(nextAction: ConstructorAction) {
-    setAction(nextAction);
-    if ((nextAction === "edit" || nextAction === "duration") && targetItem) populateItem(targetItem);
   }
 
   function fixedDraft(forceTitle?: string): PlannerDraft {
@@ -340,27 +327,34 @@ export default function PlanConstructorModal({
     }
   }
 
+  async function submitStructuredItems() {
+    setError("");
+    try {
+      const retainedIds = new Set(structuredCommitments.map((commitment) => commitment.id));
+      await onReview({
+        kind: "bulk_update_items",
+        drafts: structuredCommitments.map((commitment) => commitmentToPlannerDraft(commitment, locale, profile.timezone)),
+        archiveItemIds: editableSourceItems.filter((item) => !retainedIds.has(item.id)).map((item) => item.id),
+      });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : (ru ? "Проверьте параметры." : "Check the parameters."));
+    }
+  }
+
   const needsBlock = action === "move" || action === "cancel" || action === "replace" || action === "time";
   const needsItem = action === "edit" || action === "duration";
   const needsScheduleScope = action === "schedule" && Boolean(targetBlock);
   const showCommonItem = action === "add" || action === "edit";
 
-  const localActions: Array<{ id: ConstructorAction; ru: string; en: string; hintRu: string; hintEn: string }> = [
-    { id: "schedule", ru: "Найти время", en: "Find time", hintRu: "Поставить остаток выбранного дела", hintEn: "Schedule the selected item's remainder" },
-    { id: "edit", ru: "Изменить дело", en: "Edit item", hintRu: "Название, правила и обязательность", hintEn: "Title, rules and commitment" },
-    { id: "move", ru: "Перенести", en: "Move", hintRu: "Дата, точное время или относительно другого дела", hintEn: "Date, exact time or relative placement" },
-    { id: "replace", ru: "Заменить", en: "Replace", hintRu: "Сохранить историю выбранного выполнения", hintEn: "Preserve the selected occurrence history" },
-    { id: "time", ru: "Изменить время", en: "Change time", hintRu: "Начало или окончание", hintEn: "Start or end" },
-    { id: "duration", ru: "Изменить длительность", en: "Change duration", hintRu: "Оценка и разрешённый минимум", hintEn: "Estimate and allowed minimum" },
-    { id: "cancel", ru: "Отменить выполнение", en: "Cancel occurrence", hintRu: "Одно или выбранное и будущие", hintEn: "One or selected and future" },
-    { id: "archive", ru: "Архивировать дело", en: "Archive item", hintRu: "Отменить будущие, сохранив историю", hintEn: "Cancel future work and keep history" },
-  ];
-  const visibleLocalActions = targetBlock ? localActions : localActions.filter((entry) => ["schedule", "edit", "duration", "archive"].includes(entry.id));
-
   return <div className={styles.modalBackdrop} role="presentation"><section className={`${styles.modal} ${styles.constructorModal}`} role="dialog" aria-modal="true" aria-label={localTarget ? (ru ? "Конструктор дела" : "Item constructor") : (ru ? "Конструктор плана" : "Plan constructor")}>
-    <header><div><h2>{localTarget ? (ru ? "Конструктор дела" : "Item constructor") : (ru ? "Конструктор плана" : "Plan constructor")}</h2><small>{action ? (ru ? "2 из 3 · параметры" : "2 of 3 · parameters") : (ru ? "1 из 3 · действие" : "1 of 3 · action")}</small></div></header>
-    {!action ? <div className={styles.constructorCatalog}>{localTarget ? <section><h3>{targetItem?.title}</h3><div className={styles.constructorActions}>{visibleLocalActions.map((entry) => <button type="button" key={entry.id} onClick={() => chooseAction(entry.id)}><strong>{ru ? entry.ru : entry.en}</strong><small>{ru ? entry.hintRu : entry.hintEn}</small></button>)}</div></section> : actionGroups.map((group) => <section key={group.titleEn}><h3>{ru ? group.titleRu : group.titleEn}</h3><div className={styles.constructorActions}>{group.actions.map((entry) => <button type="button" key={entry.id} onClick={() => chooseAction(entry.id)}><strong>{ru ? entry.ru : entry.en}</strong><small>{ru ? entry.hintRu : entry.hintEn}</small></button>)}</div></section>)}</div> : <div className={styles.form}>
-      <button type="button" className={styles.constructorBack} onClick={() => { setAction(null); setError(""); }}>← {ru ? "Все действия" : "All actions"}</button>
+    <header><div><h2>{localTarget ? (ru ? "Конструктор дела" : "Item constructor") : (ru ? "Конструктор дел" : "Item constructor")}</h2><small>{action ? (ru ? "Целевое изменение выполнения" : "Focused occurrence change") : (ru ? "Выберите дело и категорию настроек" : "Choose an item and a setting category")}</small></div></header>
+    {!action ? <div className={styles.constructorCatalog}>
+      <p className={styles.fieldHelp}>{ru ? "Здесь собраны все активные дела. Откройте нужное или добавьте новое; внутри показывается только выбранная категория настроек." : "All active items are here. Open one or add a new item; only the selected setting category is shown."}</p>
+      <CommitmentsEditor commitments={structuredCommitments} locale={locale} onChange={setStructuredCommitments} onEstimateTravel={onEstimateTravel} onEditingChange={setStructuredEditing} initialEditingId={localTarget?.itemId} />
+      {error && <p className={styles.inlineError} role="alert">{error}</p>}
+      <div className={styles.modalActions}><button type="button" onClick={onClose}>{ru ? "Отмена" : "Cancel"}</button><button type="button" className={styles.primaryButton} disabled={busy || structuredEditing} onClick={() => void submitStructuredItems()}>{structuredEditing ? (ru ? "Сначала сохраните дело" : "Save the item first") : (ru ? "Показать изменения" : "Preview changes")}</button></div>
+    </div> : <div className={styles.form}>
+      <button type="button" className={styles.constructorBack} onClick={() => { setAction(null); setError(""); }}>← {ru ? "К списку дел" : "Back to items"}</button>
       {error && <p className={styles.inlineError} role="alert">{error}</p>}
       {initialBlockId && !targetBlock && <p className={styles.inlineError} role="alert">{ru ? "Выбранное выполнение изменилось или устарело. Закройте окно и обновите план." : "The selected occurrence changed or became stale. Close this window and refresh the plan."}</p>}
       {needsBlock && <label>{ru ? "Выполнение" : "Occurrence"}<select value={targetBlockId} onChange={(event) => selectBlock(event.target.value)} disabled={Boolean(localTarget)}>{[...futureBlocks, ...(targetBlock && !futureBlocks.some((block) => block.id === targetBlock.id) ? [targetBlock] : [])].map((block) => <option value={block.id} key={block.id}>{block.id === currentBlock?.id ? (ru ? "Текущее — " : "Current — ") : ""}{block.title} · {formatDateInTimeZone(new Date(block.startAt), profile.timezone)} {formatTimeInTimeZone(new Date(block.startAt), profile.timezone)}</option>)}</select></label>}
